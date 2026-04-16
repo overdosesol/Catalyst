@@ -119,6 +119,41 @@
 
 ---
 
+## 2026-04-16 (inference cost optimization)
+
+- Model/session: Claude Sonnet 4.6
+- Цель: снизить inference cost без потери качества скоринга
+- Изменения (файлы):
+  - `src/analysis/scorer.js`:
+    - Добавлен метод `_buildFeedbackContext()` — feedback строится один раз на вызов `scoreTrends()`, не повторяется на каждый batch (экономия ~200 tokens × (N_batches-1))
+    - `_callResponsesAPI` теперь возвращает `{ text, inputTokens, outputTokens }` вместо plain string
+    - `_extractTextFromResponse` переименован в `_extractResponseData` — парсит `data.usage.input_tokens` / `data.usage.output_tokens`
+    - `_analyzeBatchStage1` принимает pre-built `systemPrompt` (третий аргумент), накапливает реальные токены в metrics
+    - `_stage2DeepDive` возвращает `{ inputTokens, outputTokens }` для аккумуляции
+    - `const batchSize = 5` → `batchSize = 8`
+    - Stage 2 threshold: 70 → 78
+    - Stage 2 cap: max 3 вызова на цикл (`this.stage2MaxCalls = 3`, `.slice(0, 3)`)
+    - Stage 2 gate: пропускаем google_trends (`source !== 'google_trends'`)
+    - Stage 2 novelty gate: `clusterMetrics?.isNovel !== false` — не гоняем x_search по заведомо старым нарративам
+    - Логируется `total_in`/`total_out` (реальные токены) через `this.logger.info()`
+  - `src/analysis/prompts.js`:
+    - Description truncation: 250 → 100 символов
+    - Поле `titleRu` удалено из output spec (требование JSON) и из HARD RULES (правило №2)
+    - Поле `isGenuinelyInteresting` удалено из output spec
+    - SYSTEM_PROMPT HARD RULE #2 упрощён: «All output fields must be in ENGLISH.»
+  - `src/analysis/clusterer.js`:
+    - В `_decide()` добавлен engagement gate перед финальным `save_only`: `if (maxEngagement < 200 && batchSize <= 1 && dbRecentCount < 2) return 'save_only'`
+    - (gate логически избыточен сейчас, но явно документирует намерение и упростит будущее расширение)
+  - `ai-context/SESSION_CONTEXT.md`: обновлён раздел «Важные технические решения»
+- Проверка/деплой:
+  - Ожидает деплоя владельцем (`deploy.sh` / `deploy.ps1`)
+- Риски/заметки:
+  - `titleRu` и `isGenuinelyInteresting` убраны из prompt-spec, но scorer.js всё ещё читает `a.titleRu` и `a.isGenuinelyInteresting` для обратной совместимости — если модель их вернёт (старый промпт кэшируется или тест), ничего не сломается
+  - batch_size=8 может увеличить риск parse-ошибок на очень длинных ответах; при первых признаках вернуть к 5 или 6
+  - Stage 2 cap=3 — при большом числе высокопотенциальных трендов часть не пройдёт x_search; это приемлемо (лучшие 3 по score идут первыми)
+
+---
+
 ## TEMPLATE (копировать для новых записей)
 
 ### YYYY-MM-DD HH:MM

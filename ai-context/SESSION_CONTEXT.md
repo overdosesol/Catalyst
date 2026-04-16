@@ -39,6 +39,14 @@
   - `score (virality) >= global viralityThreshold`
 - `alertThreshold` из dashboard теперь реально применяется как global floor (раньше фактически не участвовал в send-loop)
 - Добавлен глобальный setting `viralityThreshold` (default: 70), доступен в dashboard settings API/UI
+- **NarrativeClusterer** (pre-AI слой): Aggregator → Clusterer → Scorer; Jaccard threshold=0.40; routing: `priority`/`stage1`/`save_only`/`drop`; low-engagement singleton gate: maxEngagement<200 && batchSize<=1 && dbRecentCount<2 → save_only
+- **Inference cost optimizations (v3.1)**:
+  - Feedback context строится один раз на цикл в `_buildFeedbackContext()`, не на каждый batch
+  - `_callResponsesAPI` возвращает `{ text, inputTokens, outputTokens }` (реальные токены из `data.usage`)
+  - Stage 1 batch size: 5 → 8
+  - Stage 2 gate: threshold 70 → 78, cap 3 вызова на цикл, skip google_trends, novelty gate (`clusterMetrics.isNovel !== false`)
+  - Prompt: description truncated 250 → 100; поля `titleRu` и `isGenuinelyInteresting` удалены из output spec
+  - Логируется `total_in`/`total_out` (реальные токены) после каждого цикла
 
 ## AI модели (UI curated)
 
