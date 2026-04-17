@@ -398,6 +398,161 @@
 
 ---
 
+## 2026-04-18 (Twitter preview fix — /i/status/ path)
+
+- Цель: починить отсутствие картинок для Twitter-трендов в дашборде
+- Причина: `_handlePreview` вызывал `api.fxtwitter.com/{user}/status/{id}`, но `author` в коллекторе часто падал в `'unknown'` → URL вида `twitter.com/unknown/status/123` → fxtwitter API возвращал 404
+- Изменения:
+  - `src/dashboard/server.js` — `_handlePreview()`:
+    - Twitter URL → теперь использует `api.fxtwitter.com/i/status/{tweetId}` (путь `/i/` не требует юзернейма, работает по ID твита)
+    - Добавлены `info`-логи: `[Preview] tweet {id} → has image / no media / error` для диагностики
+  - `src/collectors/twitter.js`:
+    - `author` fallback расширен: добавлен `tweet.author?.username` (lowercase) — некоторые версии Apify актора используют нижний регистр
+- Проверка: `node --check` обоих файлов → OK
+- Риски/заметки:
+  - Большинство вирусных твитов — текстовые, без медиа → X-иконка-плейсхолдер остаётся нормальным поведением
+  - Логи позволяют понять: `no media` = твит без фото/видео (ок); `error` = сетевая проблема с fxtwitter
+
+---
+
+## 2026-04-18 (feedback кнопки 👍👎 на алерт-карточках)
+
+- Цель: добавить инлайн-кнопки 👍/👎 к каждому алерту — дублируют реакции, но работают как кнопки прямо в сообщении
+- Изменения:
+  - `src/db/database.js`:
+    - Новый метод `getUserVote(trendId, chatId)` → `+1`, `-1`, или `null` (нет голоса); нужен для тоггла
+  - `src/notifications/telegram.js`:
+    - Переименован метод `attachXButton` → `attachAlertButtons` (старое имя сохранено как alias для обратной совместимости)
+    - `attachAlertButtons` формирует клавиатуру из 2 рядов: `[🔍 X Analysis]` + `[👍] [👎]`
+    - В `_setupCallbacks`: добавлен обработчик `feedback:{vote}:{trendId}`:
+      - Проверяет prevVote через `db.getUserVote` — повторное нажатие той же кнопки удаляет голос (toggle-off)
+      - Вызывает `_feedbackWeight` + `db.recordFeedback` — та же логика, что и у реакций
+      - `answerCallbackQuery` с текстом: 👍 Лайк засчитан / 👎 Дизлайк засчитан / ❌ Оценка удалена
+- Проверка: `node --check` обоих файлов → OK
+- Поведение:
+  - Кнопки и реакции используют единую таблицу `feedback_votes` → один пользователь = один голос (кнопки перезаписывают реакции и наоборот)
+  - Веса по планам работают одинаково для обоих механизмов
+  - Callback_data: `feedback:1:{id}` (лайк), `feedback:-1:{id}` (дизлайк)
+
+---
+
+## 2026-04-18 (Вариант A — Adoption-first, убрать emergence из gate)
+
+- Цель: вернуть качество нарративов после того как Emergence+Adoption система начала давать скучные результаты
+- Диагностика:
+  - Emergence измеряет "спред нарратива по платформам" — но для мемкоинов нужен РАННИЙ контент, который ещё не распространился → метрика инвертирована относительно цели
+  - Мёртвая зона: emergence 15–19 → `_decide` падал в `save_only` (нет ветки) → контент не шёл в AI вообще
+  - Alert gate `emergence < 20 && adoption < 60` вырезал одиночный вирусный твит с adoption=55 → молчание
+  - RankScore 0.40×emergence + 0.60×adoption занижал свежий контент (низкий emergence = ещё не распространился = ценность)
+- Изменения (3 файла):
+  - `src/index.js`: убран emergence gate целиком; единственный критерий алерта — `memePotential >= effectiveMemeThreshold`
+  - `src/analysis/clusterer.js` — `_decide()`: fallback `return 'save_only'` → `return 'stage1'`; теперь всё что не drop и не save_only → идёт в AI
+  - `src/analysis/scorer.js` — `narrativeRankScore()`: веса 0.40/0.60 → 0.15/0.85; adoption доминирует в сортировке
+- Что осталось без изменений:
+  - Emergence/Adoption как UI-метрики на дашборде — остаются, информативны визуально
+  - JunkPenalty gate (35) — остаётся, отсекает политику/kpop
+  - `effectiveMemeThreshold` пользователя — остаётся, управляет порогом алертов
+  - DROP условие в clusterer — остаётся (убирает реальный стейл-спам)
+  - SAVE_ONLY для очень слабого emergence + нулевой engagement — остаётся
+- Проверка: `node --check` всех 3 файлов → OK
+- Риски/заметки:
+  - Количество алертов может вырасти — если слишком шумно, снизить порог `effectiveMemeThreshold` или повысить junkPenalty threshold с 35 до 45
+  - Если всё ещё плохо — следующий шаг: поднять порог `SAVE_EMERGENCE_MAX` с 15 до 0 (чтобы ещё больше контента шло в AI)
+
+---
+
+## 2026-04-18 (пороги алертов + кастомный ввод)
+
+- Цель: обновить пресеты порогов (52/67/75), добавить кнопку своего числа, добавить рекомендацию 75+
+- Изменения:
+  - `src/i18n/ru.js` и `src/i18n/en.js`:
+    - `thresholdLow`: 40+ → 52+
+    - `thresholdMedium`: 60+ → 67+
+    - `thresholdHigh`: 80+ → 75+
+    - `thresholdTitle`: добавлена строка "⭐ Рекомендуется: 75+" (на обоих языках)
+    - Новые ключи: `thresholdCustomBtn`, `thresholdCustomPrompt`, `thresholdCustomInvalid`
+  - `src/notifications/telegram.js`:
+    - `_thresholdKeyboard`: обновлены callback_data (52/67/75), добавлена кнопка `threshold_custom`
+    - `this._awaitingInput`: новый Map в конструкторе для хранения состояния ввода
+    - Обработчик `threshold_custom` в `_setupCallbacks`: устанавливает состояние, отправляет запрос числа
+    - `bot.on('message')` в `_setupCommands`: проверяет `_awaitingInput`, парсит число, валидирует 1–100, сохраняет и показывает подтверждение
+- Проверка: `node --check` всех 3 файлов → OK
+- Риски/заметки:
+  - `_awaitingInput` хранится в памяти → при перезапуске контейнера ожидание сбрасывается (ок, пользователь просто нажмёт кнопку снова)
+  - Любое текстовое сообщение пользователя пока активен state заменяет его порог — команды (`/start`, `/menu`) начинаются с `/` и пропускаются
+
+---
+
+## 2026-04-18 (Telegram Stars оплата)
+
+- Цель: добавить оплату через Telegram Stars (⭐) — нативный способ без внешних провайдеров
+- Как работает:
+  - `sendInvoice` с `currency: 'XTR'` и `provider_token: ''` (пустой — Stars не требует провайдера)
+  - Telegram сам показывает UI баланса и подтверждения
+  - `pre_checkout_query` → бот отвечает в течение 10 сек → `answerPreCheckoutQuery(id, true)`
+  - `successful_payment` → приходит как обычное сообщение с `msg.successful_payment`
+  - Подтверждение мгновенное — никакого ожидания blockchain
+- Изменения:
+  - `src/config.js`:
+    - `config.telegram.starsTestPrice` (default 250 XTR ≈ $5, env `STARS_TEST_PRICE`)
+    - `config.telegram.starsProPrice`  (default 5000 XTR ≈ $100, env `STARS_PRO_PRICE`)
+  - `src/i18n/ru.js` и `src/i18n/en.js`:
+    - `btnPayStars(amount)`: кнопка "⭐ Telegram Stars (250 ⭐)"
+    - `starsInvoiceTitle(plan)`: заголовок инвойса
+    - `starsInvoiceDesc(plan)`: описание инвойса
+  - `src/notifications/telegram.js`:
+    - `allowed_updates`: добавлен `'pre_checkout_query'`
+    - `_paymentMethodKeyboard`: Stars стоит первой кнопкой (наиболее удобный способ)
+    - `pay:plan:STARS` callback → `_handleStarsPayment()` (не ждёт ответа колбэка — сначала answerCallbackQuery)
+    - `_handleStarsPayment(chatId, messageId, user, planName, t)`:
+      - Создаёт `payments` запись со status=pending, currency='STARS'
+      - Вызывает `bot.sendInvoice()` с пустым provider_token и currency='XTR'
+    - `_setupStarsPayments()`:
+      - `pre_checkout_query` → мгновенный approve
+      - `message` с `successful_payment` → lookup pending payment → `confirmPaymentAndUpgrade(reference, chargeId, durationDays)` → отправляет подтверждение с главным меню
+- Проверка: `node --check` всех 4 файлов → OK
+- Настройка:
+  - Никаких дополнительных ключей не нужно (Stars работает с любым Telegram ботом)
+  - Цены можно менять через `STARS_TEST_PRICE` и `STARS_PRO_PRICE` в `.env`
+  - Для вывода Stars → TON: через BotFather → Payments → Stars balance
+- Риски/заметки:
+  - Дублированный `bot.on('message')` — не конфликтует с threshold-input хендлером (у каждого свой guard: `!msg.successful_payment` и `!state`)
+  - Если `confirmPaymentAndUpgrade` вернул null (уже подтверждён или истёк) → тихо логируем, не шлём повторное сообщение пользователю
+
+---
+
+## 2026-04-18 (/top — селектор количества + красивый вывод)
+
+- Цель: сделать /top читаемым, добавить выбор количества трендов
+- Изменения:
+  - `src/i18n/ru.js` и `src/i18n/en.js`:
+    - `topSelectorTitle`: заголовок экрана выбора
+    - `topBtnCount(n)`: текст кнопки (📊 ТОП-N)
+    - `topTitle(n)`: теперь функция с количеством, не строка
+    - `topCatIcons`: объект {category → emoji} для компактного отображения категории
+    - `topLifeIcons`: объект {lifespan → emoji} для компактного отображения длительности
+    - Удалено: `topPotential` (больше не нужен — score показывается как бар)
+  - `src/notifications/telegram.js`:
+    - `/top` команда → теперь показывает селектор количества (`topSelectorTitle` + `_topSelectorKeyboard`)
+    - `data === 'top'` callback → переключается на показ селектора (editMessage)
+    - `data.startsWith('top:')` callback → вызывает `_handleTopCommand(chatId, user, limit)`
+    - `_topSelectorKeyboard(t)`: 2×2 кнопки (3/5/10/20) + Back
+    - `_handleTopCommand(chatId, user, limit = 5)`: полностью переписан
+      - Каждый тренд: горизонтальный разделитель + жирный заголовок + score bar (блоки ██████░░░░ N) + catIcon + lifeIcon
+      - `whyItWillPump` — дежен-питч курсивом, если есть
+      - Ссылки: 🔗 Открыть · 📢 TG (через `·` на одной строке)
+- Проверка: `node --check` всех 3 файлов → OK
+- Пример вывода карточки:
+  ```
+  ────────────────────
+  1. Funny Cat Falls Off Chair
+  ██████████ 92  🐾  ⚡
+  💡 $CAT launches in 3h — Elon just liked it
+  🔗 Открыть  ·  📢 TG
+  ```
+
+---
+
 ## TEMPLATE (копировать для новых записей)
 
 ### YYYY-MM-DD HH:MM
@@ -407,3 +562,28 @@
 - Изменения (файлы):
 - Проверка/деплой:
 - Риски/заметки:
+
+---
+
+## 2026-04-18 (thumbnail/preview fix для видео-источников)
+
+- Цель: убрать пустые картинки в дашборде для Twitter и TikTok трендов
+- Проблема: коллекторы не сохраняли медиа-превью, `_handlePreview` не мог получить og:image с Twitter (блокирует ботов) и TikTok
+- Изменения:
+  - `src/collectors/tiktok.js`: извлекается `thumbnailUrl` из `video.originCoverUrl || covers[0] || cover || dynamicCover || shareCover[0]`; добавляется в metrics
+  - `src/collectors/twitter.js`: извлекается `thumbnailUrl` из `tweet.media[0].preview_image_url` (видео-превью) или `.url` / `.media_url_https` (фото); добавляется в metrics
+  - `src/dashboard/server.js` — `_handlePreview()`:
+    - Twitter/X URL → переписывается на `fxtwitter.com` (прокси, отдаёт og:image для видео и фото)
+    - TikTok URL с `/video/{id}` → запрос к `tiktok.com/oembed` (JSON, поле `thumbnail_url`)
+    - Остальные URL → прежняя логика (fetch + regex og:image)
+  - `_formatTrend` уже содержал `metrics.imageUrl || metrics.thumbnailUrl || metrics.thumbnail` — новое поле подхватывается автоматически
+- Проверка: `node --check` всех 3 файлов → OK
+- Порядок приоритетов для картинки тренда:
+  1. `metrics.imageUrl` (Reddit thumbnail, прямой URL)
+  2. `metrics.thumbnailUrl` (TikTok cover, Twitter media preview) — новое
+  3. `metrics.thumbnail` (legacy)
+  4. `/api/preview?url=` → fxtwitter/oembed/og:image fallback
+- Риски/заметки:
+  - fxtwitter.com — публичный сервис, может быть недоступен; при ошибке тихо возвращает null
+  - TikTok oEmbed работает без авторизации, но может измениться
+  - Старые записи в БД без thumbnailUrl будут использовать /api/preview fallback как раньше
