@@ -549,7 +549,7 @@ class TelegramNotifier {
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     this.db.createPayment(user.id, planName, starsAmount, 'STARS', reference, expiresAt);
 
-    const title = t.starsInvoiceTitle ? t.starsInvoiceTitle(planLabel) : 'TrendScout — ' + planLabel;
+    const title = t.starsInvoiceTitle ? t.starsInvoiceTitle(planLabel) : 'Catalyst — ' + planLabel;
     const desc  = t.starsInvoiceDesc  ? t.starsInvoiceDesc(planLabel)  : planLabel + ' access';
 
     try {

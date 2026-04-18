@@ -3,7 +3,26 @@ data
 logs
 .env
 .env.*
-*.bat
-*.md
 .git
 .gitignore
+.gitattributes
+
+# AI / dev context — not needed in image
+.claude
+ai-context
+
+# Content / posts
+posts
+
+# Deploy & local scripts — not part of the app
+deploy.ps1
+deploy.sh
+setup_remote.sh
+insert_test_plan.sh
+start.bat
+scripts/
+
+# Misc
+*.bat
+*.md
+DEPLOYMENT_SUMMARY.txt

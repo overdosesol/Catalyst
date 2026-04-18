@@ -84,7 +84,7 @@ const config = {
   logLevel:            process.env.LOG_LEVEL || 'info',
 
   // Database
-  dbPath: process.env.DB_PATH || './data/trendscout.db',
+  dbPath: process.env.DB_PATH || './data/catalyst.db',
 };
 
 // ─── Validation ────────────────────────────────────────────────────────────────

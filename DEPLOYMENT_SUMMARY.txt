@@ -1,6 +1,6 @@
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                                                                            ║
-║              🚀 TrendScout v3.0 — Production Deployment                   ║
+║              🚀 Catalyst v3.0 — Production Deployment                   ║
 ║                                                                            ║
 ║                        ✅ ГОТОВ К РАЗВЁРТЫВАНИЮ                          ║
 ║                                                                            ║
@@ -65,10 +65,10 @@
 🚀 БЫСТРЫЙ СТАРТ (5 МИНУТ):
 
 1. Скопировать проект:
-   scp -r ./Narrative\ Parser user@server:/opt/trendscout
+   scp -r ./Narrative\ Parser user@server:/opt/catalyst
 
 2. Настроить конфиг:
-   cd /opt/trendscout
+   cd /opt/catalyst
    cp .env.example .env
    nano .env  # заполнить TELEGRAM_BOT_TOKEN, SOLANA_MERCHANT_WALLET, HELIUS_API_KEY, DASHBOARD_API_KEY
 

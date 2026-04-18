@@ -1,6 +1,6 @@
 # Catalyst Twitter Context
 
-Этот файл используется как постоянная память для Twitter/shilling сессий по проекту `Catalyst` / `TrendScout`.
+Этот файл используется как постоянная память для Twitter/shilling сессий по проекту `Catalyst` / `Catalyst`.
 
 ## Session Contract
 
@@ -17,7 +17,7 @@
 
 ## Product Context
 
-- Product: `Catalyst` (`TrendScout` / `Narrative Parser` в кодовой базе)
+- Product: `Catalyst` (`Catalyst` / `Narrative Parser` в кодовой базе)
 - Core idea: AI system for early narrative detection in the trenches
 - Main job: monitor `Reddit`, `Twitter/X`, `TikTok`, and `Google Trends` 24/7
 - Goal: detect viral narratives before they fully hit CT and estimate which ones can become Solana memecoins in the next `24-72h`
@@ -385,7 +385,62 @@ Add newly published tweets here with:
 ## Session Notes
 
 - Current working assumption: public brand is `Catalyst`
-- Codebase/internal name: `TrendScout`
+- Codebase/internal name: `Catalyst`
 - Need to keep brand wording consistent in public-facing posts
 - Scope rule: this file is the working memory for Twitter content; other project files must remain untouched unless explicitly requested by the user
 - Future tweet drafts should lean slightly more degen and more alive, while staying controlled and near-official in tone
+
+## Codex Handoff
+
+- The user plans to continue this workflow in the Codex app
+- This file should be treated as the main Twitter-context handoff for the next session
+- Published post archive lives in `posts/history.md`
+- Only add a tweet to history after the user explicitly confirms it was published
+- Do not store brainstorming drafts in `posts/history.md`
+
+### What Was Learned In This Session
+
+- Highly polished brand posters may be hurting performance because they can read as promotional or ad-like
+- Text-only posts are worth testing because they may feel more native to X and less like brand content
+- Minimal visuals are preferable to explanatory diagrams
+- The account should lean more into concrete observations, sharper hooks, and native CT-style insights
+- Avoid visuals that look like:
+  - generic crypto ads
+  - AI dashboards
+  - fake alert UI
+  - glowing red signal blobs
+- Current acceptable visual direction:
+  - oversized typography
+  - black / white / red palette
+  - minimal divider bars or convergence lines
+  - restrained editorial layout
+
+### Current Mascot Guidance
+
+- Generated mascot variations tend to get worse when the model is pushed to restyle them
+- Do not spend too much time trying to perfect the mascot via prompting alone
+- Keep the current general mascot treatment if needed and focus more on composition, typography, and clarity
+- Avoid repeated prompt iterations that overfit on mascot changes and worsen the result
+
+### Current Content Testing Plan
+
+- Near-term test mix:
+  - 3 text-only posts
+  - 2 posts with very minimal images
+  - 1 question / thesis post
+  - 1 short thread
+- Posting cadence target:
+  - usually 1 post per day
+  - sometimes 2 posts in a day if spaced out by 4-6 hours
+- Reply strategy matters:
+  - thoughtful replies to relevant CT accounts are highly useful for growth
+  - a few strong replies are better than many weak ones
+
+### Working Guidance For Next Session
+
+- Default to helping the user generate better-performing tweets, not just prettier branded content
+- If a post feels too polished, too slogan-heavy, or too commercial, simplify it
+- Prefer posts that sound like real observations from the trenches
+- Prefer strong first-line hooks
+- Use images only when they genuinely strengthen the post
+- If unsure, test a text-only version first

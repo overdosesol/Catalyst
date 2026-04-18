@@ -1,17 +1,17 @@
 services:
-  trendscout:
+  catalyst:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: trendscout-app
+    container_name: catalyst-app
     restart: always
     env_file:
       - .env
     environment:
       NODE_ENV: production
       NODE_OPTIONS: "--max-old-space-size=1024"
-      DB_PATH: /data/trendscout.db
-      LOG_FILE: /logs/trendscout.log
+      DB_PATH: /data/catalyst.db
+      LOG_FILE: /logs/catalyst.log
       DASHBOARD_PORT: 8080
       DASHBOARD_HOST: 0.0.0.0
       ADMIN_PORT: 8081
@@ -24,9 +24,9 @@ services:
     
     volumes:
       # Персистентные данные
-      - trendscout_data:/data
+      - catalyst_data:/data
       # Логи
-      - trendscout_logs:/logs
+      - catalyst_logs:/logs
     
     # Ограничение ресурсов
     deploy:
@@ -40,7 +40,7 @@ services:
     
     # Network
     networks:
-      - trendscout
+      - catalyst
     
     # Health check
     healthcheck:
@@ -56,14 +56,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-        labels: "app=trendscout"
+        labels: "app=catalyst"
 
 volumes:
-  trendscout_data:
+  catalyst_data:
     driver: local
-  trendscout_logs:
+  catalyst_logs:
     driver: local
 
 networks:
-  trendscout:
+  catalyst:
     driver: bridge

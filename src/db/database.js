@@ -52,6 +52,10 @@ class TrendDatabase {
     // Notifications user_id migration
     addIfMissing('notifications', 'user_id', 'INTEGER');
 
+    // Pipeline status — tracks how far a trend got through the analysis pipeline
+    // 'save_only' = clusterer skipped AI scoring; 'scored' = went through stage 1 AI
+    addIfMissing('trends', 'pipeline_status', "TEXT NOT NULL DEFAULT 'save_only'");
+
     // Settings key-value store
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings (
@@ -420,13 +424,33 @@ class TrendDatabase {
   // ── Trend Management ─────────────────────────────────────────────────────────
 
   isTrendSeen(externalId, title, url) {
+    // Logic:
+    //   scored    → block forever (AI already analysed, no point repeating)
+    //   save_only → always allow through with fresh collector metrics so the
+    //               clusterer can re-evaluate based on current engagement.
+    //               The collector itself acts as a natural "freshness gate":
+    //               if a post fell off the feed it won't appear at all.
+    const _check = (row) => {
+      if (!row) return false;
+      if (row.pipeline_status === 'scored') {
+        this._touchTrend(row.id);
+        return true;
+      }
+      // save_only — let it through every scan
+      return false;
+    };
+
     if (externalId) {
-      const row = this.db.prepare(`SELECT id FROM trends WHERE external_id = ?`).get(externalId);
-      if (row) { this._touchTrend(row.id); return true; }
+      const row = this.db.prepare(
+        `SELECT id, pipeline_status FROM trends WHERE external_id = ?`
+      ).get(externalId);
+      if (_check(row)) return true;
     }
     if (url) {
-      const row = this.db.prepare(`SELECT id FROM trends WHERE url = ?`).get(url);
-      if (row) { this._touchTrend(row.id); return true; }
+      const row = this.db.prepare(
+        `SELECT id, pipeline_status FROM trends WHERE url = ?`
+      ).get(url);
+      if (_check(row)) return true;
     }
     return false;
   }
@@ -450,12 +474,56 @@ class TrendDatabase {
   }
 
   saveTrend(trend) {
-    const stmt = this.db.prepare(`
-      INSERT INTO trends (external_id, source, title, original_title, description, url, score, category, sentiment, ai_explanation, predicted_lifespan, raw_metrics)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    const pipelineStatus = trend.pipelineStatus || 'save_only';
+    const rawMetrics = JSON.stringify({
+      ...(trend.metrics || {}),
+      memePotential:  trend.memePotential,
+      adoptionScore:  trend.adoptionScore  ?? trend.memePotential ?? 0,
+      emergenceScore: trend.emergenceScore ?? trend.clusterMetrics?.emergenceScore ?? 0,
+      narrativePhase: trend.narrativePhase  ?? null,
+      rankScore:      trend.rankScore       ?? null,
+      marketStage:    trend.marketStage     ?? null, // [MARKET_STAGE] remove to disable
+      junkPenalty:    trend.junkPenalty     ?? trend.clusterMetrics?.junkPenalty  ?? 0, // [JUNK_FILTER]
+      junkReasons:    trend.clusterMetrics?.junkReasons ?? [],                           // [JUNK_FILTER]
+    });
 
-    const result = stmt.run(
+    // UPSERT: if the trend already exists in DB (re-analysis after window expiry),
+    // update it instead of inserting a duplicate row.
+    let existingId = null;
+    if (trend.externalId) {
+      const row = this.db.prepare(`SELECT id FROM trends WHERE external_id = ?`).get(trend.externalId);
+      if (row) existingId = row.id;
+    }
+    if (!existingId && trend.url) {
+      const row = this.db.prepare(`SELECT id FROM trends WHERE url = ?`).get(trend.url);
+      if (row) existingId = row.id;
+    }
+
+    if (existingId) {
+      this.db.prepare(`
+        UPDATE trends SET
+          score = ?, category = ?, sentiment = ?, ai_explanation = ?,
+          predicted_lifespan = ?, raw_metrics = ?, pipeline_status = ?,
+          last_seen_at = CURRENT_TIMESTAMP, times_seen = times_seen + 1
+        WHERE id = ?
+      `).run(
+        trend.score || 0,
+        trend.category || null,
+        trend.sentiment || null,
+        trend.aiExplanation || null,
+        trend.predictedLifespan || null,
+        rawMetrics,
+        pipelineStatus,
+        existingId
+      );
+      return existingId;
+    }
+
+    // New trend — INSERT
+    const result = this.db.prepare(`
+      INSERT INTO trends (external_id, source, title, original_title, description, url, score, category, sentiment, ai_explanation, predicted_lifespan, raw_metrics, pipeline_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
       trend.externalId || null,
       trend.source,
       trend.title,
@@ -467,17 +535,8 @@ class TrendDatabase {
       trend.sentiment || null,
       trend.aiExplanation || null,
       trend.predictedLifespan || null,
-      JSON.stringify({
-        ...(trend.metrics || {}),
-        memePotential:  trend.memePotential,
-        adoptionScore:  trend.adoptionScore  ?? trend.memePotential ?? 0,
-        emergenceScore: trend.emergenceScore ?? trend.clusterMetrics?.emergenceScore ?? 0,
-        narrativePhase: trend.narrativePhase  ?? null,
-        rankScore:      trend.rankScore       ?? null,
-        marketStage:    trend.marketStage     ?? null, // [MARKET_STAGE] remove to disable
-        junkPenalty:    trend.junkPenalty     ?? trend.clusterMetrics?.junkPenalty  ?? 0, // [JUNK_FILTER]
-        junkReasons:    trend.clusterMetrics?.junkReasons ?? [],                           // [JUNK_FILTER]
-      })
+      rawMetrics,
+      pipelineStatus
     );
 
     return result.lastInsertRowid;

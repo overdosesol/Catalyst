@@ -1,5 +1,5 @@
 {
-  "name": "trendscout",
+  "name": "catalyst",
   "version": "3.0.0",
   "description": "24/7 AI-powered memecoin trend monitoring with multi-user Telegram bot and Solana Pay",
   "main": "src/index.js",

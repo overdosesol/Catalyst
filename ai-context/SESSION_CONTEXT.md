@@ -4,7 +4,7 @@
 
 ## Проект
 
-- Название: TrendScout (Narrative Parser)
+- Название: **Catalyst** (единое название проекта, ранее TrendScout / Narrative Parser)
 - Назначение: мониторинг трендов + алерты в Telegram/Discord
 - Прод: Docker deployment
 
@@ -101,3 +101,11 @@
 - Если в алерте видно `🤖 AI unavailable`, проверь логи scorer (чаще всего это upstream API error или fallback после 400/429).
 - В исторических строках `trends.raw_metrics` может оставаться legacy-поле `suggestedTicker`; для новых записей поле больше не пишется.
 - Для быстрого снижения шума рекомендованный порядок: сначала поднять `viralityThreshold` (70 -> 75), затем при необходимости `alertThreshold`.
+
+- Dashboard/Admin UI shell update (2026-04-18):
+  - dashboard and admin were pushed toward a darker "ops / terminal / memecoin tool" style in `src/dashboard/server.js` and `src/admin/server.js`
+  - dashboard top source strip now always includes all core sources, including `TikTok` at zero count
+  - dashboard `����������` button is no longer dead; it switches to a real overview/stats mode
+  - dashboard has a right-side intelligence rail (`Session Pulse`, `Hot Now`, `Sources`, `Category Focus`); on narrow screens this rail uses internal scroll to avoid clipping
+  - temporary explanatory copy that was briefly added to dashboard/admin was removed after review
+  - quick rollback files exist: `.codex-backups/dashboard.server.before-2026-04-18.js`, `.codex-backups/admin.server.before-2026-04-18.js`

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * TrendScout — Solana Pay manual test script
+ * Catalyst — Solana Pay manual test script
  *
  * Usage:
  *   node scripts/test-payment.js                    # list pending payments
@@ -18,7 +18,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const config = {
-  dbPath: process.env.DB_PATH || path.join(__dirname, '../data/trendscout.db'),
+  dbPath: process.env.DB_PATH || path.join(__dirname, '../data/catalyst.db'),
   solanaPay: {
     merchantWallet: process.env.SOLANA_MERCHANT_WALLET,
     rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
@@ -265,7 +265,7 @@ switch (cmd) {
   // ─────────────────────────────────────────────────────────────────────────
   default: {
     console.log(`
-TrendScout — Solana Pay Test Script
+Catalyst — Solana Pay Test Script
 
 Commands:
   rpc                           Test Solana RPC connectivity (Helius or mainnet)

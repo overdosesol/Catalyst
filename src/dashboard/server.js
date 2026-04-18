@@ -1,5 +1,5 @@
 /**
- * TrendScout Dashboard — Express REST API + embedded React SPA
+ * Catalyst Dashboard — Express REST API + embedded React SPA
  *
  * Endpoints:
  *   GET  /api/health          — health check (no auth)
@@ -148,6 +148,7 @@ class DashboardServer {
       if (path === '/api/settings'  && method === 'GET')  return this._handleSettingsGet(req, res);
       if (path === '/api/settings'  && method === 'POST') return this._handleSettingsPost(req, res);
       if (path.match(/^\/api\/collectors\/[\w_]+\/toggle$/) && method === 'POST') return this._handleCollectorToggle(req, res, path);
+      if (path.match(/^\/api\/trends\/\d+\/feedback$/) && method === 'POST') return this._handleTrendFeedback(req, res, path);
 
       // SPA fallback — serve dashboard HTML for all non-API routes
       if (!path.startsWith('/api/')) return html(res, this._buildSPA());
@@ -201,7 +202,8 @@ class DashboardServer {
     const countQuery = query.replace(/ORDER BY.*$/, '').replace(/^SELECT \*/, 'SELECT COUNT(*) as c');
     const total = this.db.db.prepare(countQuery).get(...countParams)?.c ?? 0;
 
-    const trends = rows.map(row => this._formatTrend(row));
+    const userId = String(req.headers['x-user-id'] || '').trim() || null;
+    const trends = rows.map(row => this._formatTrend(row, userId));
 
     return json(res, 200, { trends, total, limit, offset });
   }
@@ -210,7 +212,8 @@ class DashboardServer {
     const id  = parseInt(path.split('/').pop(), 10);
     const row = this.db.db.prepare(`SELECT * FROM trends WHERE id = ?`).get(id);
     if (!row) return json(res, 404, { error: 'Trend not found' });
-    return json(res, 200, this._formatTrend(row));
+    const userId = String(req.headers['x-user-id'] || '').trim() || null;
+    return json(res, 200, this._formatTrend(row, userId));
   }
 
   _handleStats(req, res, url) {
@@ -227,9 +230,10 @@ class DashboardServer {
       `SELECT category, COUNT(*) as count FROM trends WHERE first_seen_at > ? GROUP BY category ORDER BY count DESC`
     ).all(cutoff);
 
+    const statsUserId = String(req.headers['x-user-id'] || '').trim() || null;
     const topTrends = this.db.db.prepare(
-      `SELECT id, title, score, category, source, first_seen_at, raw_metrics FROM trends WHERE first_seen_at > ? ORDER BY CAST(JSON_EXTRACT(raw_metrics, '$.memePotential') AS INT) DESC LIMIT 5`
-    ).all(cutoff).map(r => this._formatTrend(r));
+      `SELECT * FROM trends WHERE first_seen_at > ? ORDER BY CAST(JSON_EXTRACT(raw_metrics, '$.memePotential') AS INT) DESC LIMIT 5`
+    ).all(cutoff).map(r => this._formatTrend(r, statsUserId));
 
     const avgScore = this.db.db.prepare(
       `SELECT AVG(score) as avg FROM trends WHERE first_seen_at > ? AND score > 0`
@@ -345,6 +349,52 @@ class DashboardServer {
     return json(res, 200, { source: name, enabled: !disabled.has(name) });
   }
 
+  // ── Trend feedback (like / dislike) ───────────────────────────────────────
+  async _handleTrendFeedback(req, res, path) {
+    const m = path.match(/^\/api\/trends\/(\d+)\/feedback$/);
+    if (!m) return json(res, 400, { error: 'Invalid path' });
+    const trendId = parseInt(m[1], 10);
+
+    const userId = String(req.headers['x-user-id'] || '').trim();
+    if (!userId) return json(res, 400, { error: 'X-User-Id header required' });
+
+    // Read body
+    let body = '';
+    await new Promise((resolve, reject) => {
+      req.on('data', chunk => { body += chunk; if (body.length > 4096) reject(new Error('Body too large')); });
+      req.on('end', resolve);
+      req.on('error', reject);
+    }).catch(() => {});
+
+    let vote;
+    try {
+      const parsed = body ? JSON.parse(body) : {};
+      vote = parseInt(parsed.vote, 10);
+    } catch (e) {
+      return json(res, 400, { error: 'Invalid JSON body' });
+    }
+    if (![1, -1, 0].includes(vote)) return json(res, 400, { error: 'vote must be 1, -1 or 0' });
+
+    const trend = this.db.getTrendById ? this.db.getTrendById(trendId) : null;
+    if (!trend) return json(res, 404, { error: 'Trend not found' });
+
+    // Toggle off if the same vote is sent twice
+    const prev = this.db.getUserVote ? this.db.getUserVote(trendId, userId) : null;
+    const finalVote = (vote !== 0 && prev === vote) ? 0 : vote;
+
+    // Dashboard voters use plan='dashboard' with weight=1 by default.
+    const weight = parseFloat(this.db?.getSetting?.('feedbackWeightDashboard', '1') || '1');
+    this.db.recordFeedback(trendId, userId, finalVote, weight, 'dashboard');
+
+    const stats = this.db.getFeedbackStats(trendId);
+    return json(res, 200, {
+      likes:    stats.likes    || 0,
+      dislikes: stats.dislikes || 0,
+      score:    stats.weightedScore || 0,
+      userVote: finalVote || 0,
+    });
+  }
+
   async _handleScan(req, res) {
     if (this.appState?.paused) {
       return json(res, 409, { error: 'Scanner is paused. Resume it first.' });
@@ -371,9 +421,22 @@ class DashboardServer {
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
-  _formatTrend(row) {
+  _formatTrend(row, userId = null) {
     let metrics = {};
     try { metrics = JSON.parse(row.raw_metrics || '{}'); } catch (e) {}
+    // Feedback (likes / dislikes / user's current vote)
+    let feedback = { likes: 0, dislikes: 0, score: 0, userVote: 0 };
+    try {
+      const fb = this.db.getFeedbackStats ? this.db.getFeedbackStats(row.id) : null;
+      if (fb) {
+        feedback.likes    = fb.likes || 0;
+        feedback.dislikes = fb.dislikes || 0;
+        feedback.score    = fb.weightedScore || 0;
+      }
+      if (userId && this.db.getUserVote) {
+        feedback.userVote = this.db.getUserVote(row.id, userId) || 0;
+      }
+    } catch (e) {}
     return {
       id:              row.id,
       title:           row.title,
@@ -402,6 +465,7 @@ class DashboardServer {
       lastSeen:        row.last_seen_at,
       timesSeen:       row.times_seen,
       imageUrl:        metrics.imageUrl || metrics.thumbnailUrl || metrics.thumbnail || null,
+      feedback,
     };
   }
 
@@ -426,7 +490,7 @@ class DashboardServer {
         try {
           const r = await fetch(`https://api.fxtwitter.com/i/status/${tweetId}`, {
             signal: controller.signal,
-            headers: { 'User-Agent': 'TrendScout/3.0', 'Accept': 'application/json' },
+            headers: { 'User-Agent': 'Catalyst/3.0', 'Accept': 'application/json' },
           });
           clearTimeout(timer);
           if (!r.ok) {
@@ -455,7 +519,7 @@ class DashboardServer {
           try {
             const r = await fetch(
               `https://www.tiktok.com/oembed?url=${encodeURIComponent(target)}`,
-              { signal: controller.signal, headers: { 'User-Agent': 'TrendScout/3.0', 'Accept': 'application/json' } }
+              { signal: controller.signal, headers: { 'User-Agent': 'Catalyst/3.0', 'Accept': 'application/json' } }
             );
             clearTimeout(timer);
             if (r.ok) {
@@ -472,7 +536,7 @@ class DashboardServer {
       const timer = setTimeout(() => controller.abort(), 4000);
       const r = await fetch(target, {
         signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TrendScout/3.0)' },
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Catalyst/3.0)' },
       });
       clearTimeout(timer);
       const ct = r.headers.get('content-type') || '';
@@ -494,51 +558,52 @@ class DashboardServer {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TrendScout — Degen Intelligence</title>
+  <title>Catalyst — Degen Intelligence</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"><\/script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"><\/script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
     :root {
-      --bg:        #06060a;
-      --surface:   #0c0c12;
-      --card:      #111118;
-      --card2:     #16161e;
-      --card3:     #1a1a24;
-      --border:    #1e1e2a;
-      --border2:   #2a2a3a;
-      --border3:   #353548;
-      --text:      #eeeef0;
-      --text2:     #ccccd0;
-      --muted:     #8888a0;
-      --dim:       #50506a;
-      --accent:    #6c5ce7;
-      --accent2:   #a29bfe;
-      --accent-glow: rgba(108,92,231,.2);
-      --green:     #00b894;
-      --green2:    #55efc4;
-      --red:       #d63031;
-      --red2:      #ff7675;
-      --orange:    #e17055;
-      --orange2:   #fab1a0;
-      --yellow:    #fdcb6e;
-      --yellow2:   #ffeaa7;
-      --blue:      #74b9ff;
-      --pink:      #fd79a8;
-      --teal:      #81ecec;
-      --purple:    #a29bfe;
-      --radius:    14px;
-      --radius-sm: 10px;
-      --radius-xs: 7px;
-      --shadow:    0 4px 24px rgba(0,0,0,.4);
-      --shadow-lg: 0 8px 40px rgba(0,0,0,.5);
-      --glass:     rgba(255,255,255,.03);
-      --glass2:    rgba(255,255,255,.05);
+      --bg:          #08080f;
+      --surface:     #0d0d18;
+      --card:        #101020;
+      --card2:       #13132a;
+      --card3:       #181832;
+      --border:      rgba(255,255,255,.055);
+      --border2:     rgba(255,255,255,.09);
+      --border3:     rgba(255,255,255,.14);
+      --text:        #e4eaf8;
+      --text2:       #c8d3e8;
+      --muted:       #8594b0;
+      --dim:         #4a5470;
+      --accent:      #6272ff;
+      --accent2:     #818cf8;
+      --accent-glow: rgba(98,114,255,.15);
+      --green:       #00d4aa;
+      --green2:      #2dddb8;
+      --red:         #ff4560;
+      --red2:        #ff7088;
+      --orange:      #ff9f43;
+      --orange2:     #ffd089;
+      --yellow:      #f6c453;
+      --yellow2:     #ffe39d;
+      --blue:        #38bdf8;
+      --pink:        #e879f9;
+      --teal:        #06b6d4;
+      --purple:      #a78bfa;
+      --radius:      10px;
+      --radius-sm:   8px;
+      --radius-xs:   6px;
+      --shadow:      0 4px 20px rgba(0,0,0,.5);
+      --shadow-lg:   0 8px 40px rgba(0,0,0,.65);
+      --glass:       rgba(255,255,255,.03);
+      --glass2:      rgba(255,255,255,.055);
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html, body { height: 100%; overflow: hidden; }
     body {
       background: var(--bg);
       color: var(--text);
@@ -550,831 +615,1289 @@ class DashboardServer {
     }
 
     /* ── Scrollbar ── */
-    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 10px; }
-    ::-webkit-scrollbar-thumb:hover { background: var(--border3); }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.1); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.18); }
 
     /* ── Animations ── */
-    @keyframes pulse    { 0%,100%{opacity:1} 50%{opacity:.3} }
+    @keyframes pulse    { 0%,100%{opacity:1} 50%{opacity:.2} }
     @keyframes spin     { to { transform: rotate(360deg); } }
-    @keyframes fadeIn   { from { opacity:0; transform: translateY(8px); } to { opacity:1; transform: translateY(0); } }
-    @keyframes slideIn  { from { opacity:0; transform: translateX(-12px); } to { opacity:1; transform: translateX(0); } }
+    @keyframes fadeIn   { from { opacity:0; transform: translateY(5px); } to { opacity:1; transform: translateY(0); } }
+    @keyframes slideIn  { from { opacity:0; transform: translateX(-10px); } to { opacity:1; transform: translateX(0); } }
     @keyframes shimmer  { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
-    @keyframes glow     { 0%,100% { box-shadow: 0 0 8px rgba(108,92,231,.3); } 50% { box-shadow: 0 0 20px rgba(108,92,231,.5); } }
+    @keyframes glow     { 0%,100% { box-shadow: 0 0 6px rgba(98,114,255,.3); } 50% { box-shadow: 0 0 16px rgba(98,114,255,.5); } }
 
     /* ── Nav ── */
     .nav {
       position: sticky; top: 0; z-index: 200;
-      background: rgba(6,6,10,.85);
-      backdrop-filter: blur(20px) saturate(1.4);
-      -webkit-backdrop-filter: blur(20px) saturate(1.4);
+      background: rgba(8,8,15,.93);
+      backdrop-filter: blur(16px) saturate(1.2);
+      -webkit-backdrop-filter: blur(16px) saturate(1.2);
       border-bottom: 1px solid var(--border);
-      padding: 0 28px;
-      height: 60px;
-      display: flex; align-items: center; gap: 20px;
+      padding: 0 18px;
+      height: 50px;
+      display: flex; align-items: center; gap: 14px;
     }
     .nav-logo {
-      display: flex; align-items: center; gap: 10px;
-      font-size: 17px; font-weight: 800; letter-spacing: -0.5px;
-      background: linear-gradient(135deg, var(--accent), var(--accent2), var(--teal));
-      background-size: 200% 200%;
-      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      display: flex; align-items: center; gap: 8px;
+      font-size: 15px; font-weight: 800; letter-spacing: -0.5px;
+      color: var(--text);
       white-space: nowrap;
     }
-    .nav-logo-icon { font-size: 22px; -webkit-text-fill-color: initial; }
-    .nav-sep { width: 1px; height: 24px; background: var(--border); }
-    .nav-subtitle { font-size: 10px; color: var(--dim); letter-spacing: 1.5px; text-transform: uppercase; font-weight: 600; }
-    .nav-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+    .nav-logo-icon { font-size: 17px; }
+    .nav-version {
+      font-size: 9px; font-weight: 700; letter-spacing: .4px;
+      color: var(--accent2); background: var(--accent-glow);
+      border: 1px solid rgba(98,114,255,.22); border-radius: 5px;
+      padding: 2px 6px; font-family: 'JetBrains Mono', monospace;
+    }
+    .nav-sep { width: 1px; height: 16px; background: var(--border2); }
+    .nav-subtitle { font-size: 9px; color: var(--dim); letter-spacing: 1.4px; text-transform: uppercase; font-weight: 600; }
+    .nav-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
     .status-pill {
-      display: flex; align-items: center; gap: 7px;
-      background: var(--glass2); border: 1px solid var(--border);
-      border-radius: 20px; padding: 5px 14px;
-      font-size: 11px; color: var(--muted); font-weight: 500;
-      backdrop-filter: blur(8px);
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(255,255,255,.025); border: 1px solid var(--border);
+      border-radius: 7px; padding: 4px 10px;
+      font-size: 10px; color: var(--text2); font-weight: 600;
+      letter-spacing: .2px;
     }
     .status-dot {
-      width: 7px; height: 7px; border-radius: 50%;
+      width: 6px; height: 6px; border-radius: 50%;
       background: var(--green2);
-      box-shadow: 0 0 8px var(--green);
-      animation: pulse 2s ease-in-out infinite;
+      box-shadow: 0 0 6px var(--green);
+      animation: pulse 2.5s ease-in-out infinite;
     }
-    .status-dot.paused { background: var(--red2); box-shadow: 0 0 8px var(--red); animation: none; }
-    .nav-time { font-size: 11px; color: var(--dim); font-family: 'JetBrains Mono', monospace; font-weight: 400; }
+    .status-dot.paused { background: var(--red2); box-shadow: 0 0 6px var(--red); animation: none; }
+    .nav-time { font-size: 10px; color: var(--dim); font-family: 'JetBrains Mono', monospace; font-weight: 400; }
 
-    /* ── Layout ── */
-    .layout { display: flex; min-height: calc(100vh - 60px); }
+    /* ── Layout (classic 2-col for settings/stats) ── */
+    .layout { display: flex; min-height: calc(100vh - 50px); }
 
     /* ── Sidebar ── */
     .sidebar {
       width: 240px; min-width: 240px;
-      background: var(--surface);
+      background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
       border-right: 1px solid var(--border);
-      padding: 20px 14px;
-      display: flex; flex-direction: column; gap: 4px;
-      position: sticky; top: 60px; height: calc(100vh - 60px); overflow-y: auto;
+      padding: 14px 10px 10px;
+      display: flex; flex-direction: column; gap: 2px;
+      /* classic layout: sticky scroll */
+      position: sticky; top: 50px; height: calc(100vh - 50px); overflow-y: auto;
     }
+    /* In dashboard-grid the sidebar is app-shell (overrides above) */
     .sidebar-section {
-      font-size: 10px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 1.2px; color: var(--dim); padding: 12px 10px 6px;
-      margin-top: 4px;
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 9px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 1.4px; color: var(--accent); padding: 8px 8px 6px;
+      margin-top: 6px;
     }
     .sidebar-section:first-child { margin-top: 0; }
+    .sidebar-section-link {
+      font-size: 9px; font-weight: 600; letter-spacing: 1px;
+      color: var(--muted); cursor: pointer; padding: 2px 6px; border-radius: 4px;
+      transition: all .15s;
+    }
+    .sidebar-section-link:hover { color: var(--accent2); background: rgba(98,114,255,.08); }
+
+    /* ── Source items (brand-colored, feed-like rows) ── */
     .source-item {
       display: flex; align-items: center; gap: 10px;
-      padding: 10px 12px; border-radius: var(--radius-sm);
+      padding: 9px 10px; border-radius: var(--radius-sm);
       border: 1px solid transparent;
-      cursor: pointer; transition: all .2s ease;
-      font-size: 12px; font-weight: 500;
-      user-select: none;
+      cursor: pointer; transition: all .18s ease;
+      font-size: 12.5px; font-weight: 600;
+      user-select: none; position: relative;
     }
-    .source-item:hover { background: var(--glass2); border-color: var(--border); }
+    .source-item:hover {
+      background: rgba(255,255,255,.04); border-color: var(--border2);
+      transform: translateX(1px);
+    }
     .source-item.on {
-      background: rgba(0,184,148,.06);
-      border-color: rgba(0,184,148,.2);
-      color: var(--green2);
+      background: rgba(255,255,255,.025);
+      border-color: rgba(255,255,255,.06);
     }
     .source-item.off {
-      background: rgba(214,48,49,.04);
-      border-color: rgba(214,48,49,.12);
+      background: transparent;
+      border-color: transparent;
       color: var(--dim);
-      opacity: .7;
+      opacity: .5;
     }
-    .source-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; transition: all .2s; }
-    .source-dot.on  { background: var(--green2); box-shadow: 0 0 8px rgba(0,184,148,.5); }
-    .source-dot.off { background: var(--red2); box-shadow: 0 0 4px rgba(214,48,49,.3); }
-    .source-name { flex: 1; }
+    .source-item.off .source-icon { filter: grayscale(1); }
+    .source-item.off .source-count { opacity: .4; }
+    .source-icon {
+      width: 22px; height: 22px; border-radius: 6px;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 12px; flex-shrink: 0;
+      background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.05);
+      transition: all .18s;
+    }
+    .source-item[data-src="reddit"] .source-icon        { background: rgba(255,88,0,.14); border-color: rgba(255,88,0,.25); }
+    .source-item[data-src="google_trends"] .source-icon { background: rgba(66,133,244,.14); border-color: rgba(66,133,244,.28); }
+    .source-item[data-src="twitter"] .source-icon       { background: rgba(255,255,255,.07); border-color: rgba(255,255,255,.12); }
+    .source-item[data-src="tiktok"] .source-icon        { background: rgba(255,0,80,.14); border-color: rgba(255,0,80,.25); }
+    .source-name { flex: 1; letter-spacing: -.1px; }
     .source-count {
-      font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 500;
-      color: var(--dim); background: var(--glass); padding: 2px 7px; border-radius: 6px;
+      font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 600;
+      color: var(--text2); background: rgba(255,255,255,.04);
+      padding: 2px 7px; border-radius: 5px; min-width: 26px; text-align: center;
+      border: 1px solid var(--border);
     }
-    .sidebar-divider { height: 1px; background: linear-gradient(90deg, transparent, var(--border), transparent); margin: 10px 8px; }
+    .source-count.hot { color: var(--accent2); background: rgba(98,114,255,.1); border-color: rgba(98,114,255,.22); }
+    .source-eye {
+      position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+      font-size: 11px; opacity: 0; transition: opacity .15s;
+      pointer-events: none;
+    }
+    .source-item:hover .source-eye { opacity: .75; }
+
+    .sidebar-divider { height: 1px; background: var(--border); margin: 10px 6px; }
 
     /* ── Sidebar filters ── */
-    .sidebar-filters { padding: 4px 8px; display: flex; flex-direction: column; gap: 8px; }
+    .sidebar-filters { padding: 2px 2px; display: flex; flex-direction: column; gap: 10px; }
+    .filter-group { display: flex; flex-direction: column; gap: 5px; }
+    .filter-label {
+      font-size: 9px; font-weight: 700; letter-spacing: 1.2px;
+      text-transform: uppercase; color: var(--muted); padding: 0 4px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .filter-label .filter-val {
+      color: var(--accent2); font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; letter-spacing: 0;
+    }
+
+    /* ── Segmented control ── */
+    .seg-group {
+      display: flex; background: rgba(255,255,255,.025);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 2px; gap: 2px;
+    }
+    .seg-btn {
+      flex: 1; padding: 5px 4px; border-radius: 6px;
+      font-size: 10.5px; font-weight: 600; color: var(--muted);
+      background: transparent; border: none; cursor: pointer;
+      transition: all .15s; font-family: inherit;
+      white-space: nowrap; text-align: center;
+    }
+    .seg-btn:hover { color: var(--text2); background: rgba(255,255,255,.03); }
+    .seg-btn.active {
+      background: var(--accent-glow);
+      color: var(--accent2);
+      box-shadow: 0 0 0 1px rgba(98,114,255,.2);
+    }
+    .seg-group.seg-compact .seg-btn { padding: 5px 2px; font-size: 11px; }
+
+    /* ── Reset filters button ── */
+    .sb-reset-btn {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 6px 10px; margin-top: 4px;
+      background: transparent; border: 1px dashed var(--border2);
+      border-radius: 6px; color: var(--muted);
+      font-size: 10.5px; font-weight: 600; cursor: pointer;
+      transition: all .15s; font-family: inherit;
+    }
+    .sb-reset-btn:hover { color: var(--red2); border-color: rgba(255,69,96,.35); background: rgba(255,69,96,.04); }
+
+    /* ── Sidebar footer (stats/settings row) ── */
+    .sidebar-footer {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+      padding: 6px 2px 4px;
+    }
+    .sb-foot-btn {
+      display: flex; flex-direction: column; align-items: center; gap: 3px;
+      padding: 9px 6px; border-radius: 8px;
+      background: rgba(255,255,255,.025); border: 1px solid var(--border);
+      cursor: pointer; transition: all .15s;
+      color: var(--muted); font-size: 10.5px; font-weight: 600;
+    }
+    .sb-foot-btn .sb-foot-ico { font-size: 15px; filter: saturate(.8); }
+    .sb-foot-btn:hover { color: var(--text); background: rgba(255,255,255,.05); border-color: var(--border2); }
+    .sb-foot-btn.active { color: var(--accent2); background: var(--accent-glow); border-color: rgba(98,114,255,.25); }
 
     /* ── Main content ── */
-    .main { flex: 1; min-width: 0; padding: 28px; }
+    .main { flex: 1; min-width: 0; padding: 18px 20px 24px; }
+
+    /* ── Session bar (compact hero replacement) ── */
+    .session-bar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 10px 14px; margin-bottom: 14px;
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: var(--shadow);
+    }
+    .session-tag {
+      font-size: 9px; font-weight: 800; letter-spacing: 1.6px; text-transform: uppercase;
+      color: var(--accent2); padding: 2px 7px; border-radius: 4px;
+      background: rgba(98,114,255,.1); border: 1px solid rgba(98,114,255,.2);
+    }
+    .session-title { font-size: 13px; font-weight: 700; color: var(--text); letter-spacing: -.3px; }
+    .session-chips { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-left: auto; }
+    .session-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 10px; font-weight: 500; color: var(--muted);
+      padding: 3px 8px; border-radius: 5px;
+      background: rgba(255,255,255,.03); border: 1px solid var(--border);
+    }
+    .session-chip .chip-val { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--text2); font-size: 11px; }
+
+    /* ── Old hero stubs (kept for compat) ── */
+    .dashboard-hero { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+    .hero-panel { border-radius: var(--radius); border: 1px solid var(--border); overflow: hidden; }
+    .hero-main { background: var(--card); padding: 18px 20px; }
+    .hero-side { background: var(--surface); padding: 14px 16px; }
+    .hero-kicker { font-size: 9px; font-weight: 800; letter-spacing: 2px; text-transform: uppercase; color: var(--accent2); margin-bottom: 6px; }
+    .hero-title { font-size: 18px; line-height: 1.1; letter-spacing: -.5px; font-weight: 800; margin-bottom: 6px; }
+    .hero-copy { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+    .hero-chip-row { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }
+    .hero-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 5px; border: 1px solid var(--border2); background: rgba(255,255,255,.03); color: var(--muted); font-size: 11px; font-weight: 500; }
+    .hero-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green2); box-shadow: 0 0 6px rgba(0,212,170,.5); }
+    .hero-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .hero-side-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .hero-mini-card { border-radius: 8px; border: 1px solid var(--border); background: rgba(255,255,255,.025); padding: 10px; }
+    .hero-mini-label { font-size: 9px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--dim); margin-bottom: 5px; }
+    .hero-mini-value { font-size: 15px; font-weight: 800; color: var(--text); letter-spacing: -.4px; margin-bottom: 2px; font-family: 'JetBrains Mono', monospace; }
+    .hero-mini-sub { font-size: 10px; color: var(--muted); }
+
+    .section-shell {
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .section-shell + .section-shell { margin-top: 10px; }
 
     /* ── Stats grid ── */
-    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 28px; }
+    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
     .stat-card {
       background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 20px 22px;
+      border-radius: var(--radius); padding: 14px 16px;
       position: relative; overflow: hidden;
-      transition: all .25s ease;
-      animation: fadeIn .4s ease backwards;
+      transition: border-color .2s, transform .18s;
+      animation: fadeIn .35s ease backwards;
+      box-shadow: var(--shadow);
     }
-    .stat-card:nth-child(2) { animation-delay: .05s; }
-    .stat-card:nth-child(3) { animation-delay: .1s; }
-    .stat-card:nth-child(4) { animation-delay: .15s; }
-    .stat-card:hover { border-color: var(--border2); transform: translateY(-2px); box-shadow: var(--shadow); }
-    .stat-card::before {
+    .stat-card:nth-child(2) { animation-delay: .04s; }
+    .stat-card:nth-child(3) { animation-delay: .08s; }
+    .stat-card:nth-child(4) { animation-delay: .12s; }
+    .stat-card:hover { border-color: rgba(98,114,255,.28); transform: translateY(-1px); }
+    .stat-card::after {
       content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-      background: linear-gradient(90deg, var(--accent), var(--accent2), transparent);
-      opacity: 0; transition: opacity .3s;
+      background: linear-gradient(90deg, var(--accent), transparent);
+      opacity: 0; transition: opacity .25s;
     }
-    .stat-card:hover::before { opacity: 1; }
-    .stat-icon { font-size: 20px; margin-bottom: 12px; display: inline-block; }
+    .stat-card:hover::after { opacity: 1; }
+    .stat-icon { font-size: 15px; margin-bottom: 9px; display: inline-block; opacity: .65; }
     .stat-val {
-      font-size: 28px; font-weight: 800; color: var(--text); letter-spacing: -1px; line-height: 1;
+      font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -.8px; line-height: 1;
       font-family: 'JetBrains Mono', monospace;
     }
-    .stat-val span { font-size: 14px; font-weight: 500; color: var(--accent2); margin-left: 2px; }
-    .stat-lbl { font-size: 11px; color: var(--muted); margin-top: 6px; font-weight: 500; }
-    .stat-sub { font-size: 10px; color: var(--dim); margin-top: 3px; }
+    .stat-val span { font-size: 12px; font-weight: 500; color: var(--accent2); margin-left: 1px; }
+    .stat-lbl { font-size: 10px; color: var(--muted); margin-top: 5px; font-weight: 500; }
+    .stat-sub { font-size: 10px; color: var(--dim); margin-top: 2px; }
 
     /* ── Toolbar ── */
     .toolbar {
-      display: flex; align-items: center; gap: 10px;
-      margin-bottom: 18px; flex-wrap: wrap;
-      padding: 14px 18px;
-      background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-      backdrop-filter: blur(8px);
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 10px; flex-wrap: wrap;
+      padding: 10px 14px;
     }
-    .toolbar-label { font-size: 11px; color: var(--dim); margin-right: 2px; white-space: nowrap; font-weight: 600; }
+    .toolbar-label { font-size: 9px; color: var(--dim); margin-right: 1px; white-space: nowrap; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; }
 
     /* ── Control Panel ── */
     .control-panel {
-      background: linear-gradient(135deg, rgba(108,92,231,.05) 0%, rgba(129,236,236,.03) 100%);
-      border: 1px solid rgba(108,92,231,.15);
+      background: var(--card);
       border-radius: var(--radius);
-      padding: 20px 24px;
-      margin-bottom: 24px;
-      backdrop-filter: blur(10px);
+      padding: 14px 16px;
     }
     .control-panel-title {
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--accent2);
-      text-transform: uppercase;
-      letter-spacing: 1.2px;
-      margin-bottom: 16px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
+      font-size: 9px; font-weight: 700; color: var(--dim);
+      text-transform: uppercase; letter-spacing: 1.3px; margin-bottom: 10px;
+      display: flex; align-items: center; gap: 6px;
     }
-    .control-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 12px;
-    }
+    .control-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px; }
     .control-btn {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
-      padding: 16px 12px;
-      background: var(--card2);
-      border: 1.5px solid var(--border2);
-      border-radius: var(--radius-sm);
-      cursor: pointer;
-      transition: all .2s ease;
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--text2);
-      white-space: nowrap;
-      position: relative;
-      overflow: hidden;
+      display: flex; flex-direction: column; align-items: center; gap: 5px;
+      padding: 11px 8px;
+      background: rgba(255,255,255,.025); border: 1px solid var(--border2);
+      border-radius: 8px; cursor: pointer; transition: all .15s ease;
+      font-size: 11px; font-weight: 600; color: var(--muted);
+      white-space: nowrap; position: relative; overflow: hidden;
     }
-    .control-btn::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      background: radial-gradient(circle at var(--mouse-x, 50%) var(--mouse-y, 50%), rgba(108,92,231,.1) 0%, transparent 80%);
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity .3s;
-    }
-    .control-btn:hover {
-      border-color: var(--accent);
-      background: rgba(108,92,231,.08);
-      transform: translateY(-2px);
-      box-shadow: 0 4px 12px rgba(108,92,231,.15);
-      color: var(--accent2);
-    }
-    .control-btn:hover::before {
-      opacity: 1;
-    }
-    .control-btn:active {
-      transform: translateY(0);
-    }
-    .control-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-      transform: none !important;
-    }
-    .control-icon {
-      font-size: 22px;
-      display: block;
-      line-height: 1;
-    }
-    .control-label {
-      font-size: 11px;
-      color: var(--muted);
-    }
-    .control-btn:hover .control-label {
-      color: var(--text2);
-    }
+    .control-btn:hover { border-color: rgba(98,114,255,.28); background: rgba(98,114,255,.07); color: var(--accent2); transform: translateY(-1px); }
+    .control-btn:active { transform: translateY(0); }
+    .control-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
+    .control-icon { font-size: 17px; display: block; line-height: 1; }
+    .control-label { font-size: 10px; color: inherit; }
     .control-status {
-      position: absolute;
-      top: 6px;
-      right: 6px;
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--green2);
-      box-shadow: 0 0 6px rgba(0,184,148,.6);
+      position: absolute; top: 5px; right: 5px;
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--green2); box-shadow: 0 0 5px rgba(0,212,170,.6);
     }
-    .control-status.off {
-      background: var(--red2);
-      box-shadow: 0 0 6px rgba(214,48,49,.4);
-    }
-    .control-status.idle {
-      background: var(--dim);
-      box-shadow: none;
-    }
+    .control-status.off { background: var(--red2); box-shadow: none; }
+    .control-status.idle { background: var(--dim); box-shadow: none; }
 
     /* ── Source Controls ── */
-    .source-controls {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 10px;
-      margin-top: 12px;
-      padding-top: 12px;
-      border-top: 1px solid var(--border);
-    }
+    .source-controls { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
     .source-control-btn {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px 14px;
-      background: var(--card);
-      border: 1px solid var(--border2);
-      border-radius: var(--radius-xs);
-      cursor: pointer;
-      transition: all .2s ease;
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text2);
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 7px 11px; background: rgba(255,255,255,.02);
+      border: 1px solid var(--border); border-radius: var(--radius-xs);
+      cursor: pointer; transition: all .15s; font-size: 11px; font-weight: 600; color: var(--text2);
     }
-    .source-control-btn:hover {
-      border-color: var(--accent);
-      background: rgba(108,92,231,.06);
-    }
-    .source-control-btn.disabled {
-      border-color: var(--border);
-      background: rgba(214,48,49,.04);
-      color: var(--dim);
-    }
+    .source-control-btn:hover { border-color: rgba(98,114,255,.22); background: rgba(98,114,255,.05); }
+    .source-control-btn.disabled { border-color: var(--border); background: transparent; color: var(--dim); }
     .source-control-toggle {
-      width: 24px;
-      height: 14px;
-      border-radius: 7px;
-      background: var(--green2);
-      position: relative;
-      transition: all .2s;
+      width: 26px; height: 14px; border-radius: 7px; background: var(--green);
+      position: relative; transition: background .2s; flex-shrink: 0;
     }
     .source-control-toggle::after {
-      content: '';
-      position: absolute;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: white;
-      top: 1px;
-      left: 1px;
-      transition: left .2s;
+      content: ''; position: absolute;
+      width: 10px; height: 10px; border-radius: 50%; background: white;
+      top: 2px; left: 14px; transition: left .2s;
     }
-    .source-control-btn.disabled .source-control-toggle {
-      background: var(--dim);
-    }
-    .source-control-btn.disabled .source-control-toggle::after {
-      left: 11px;
-    }
-    .toolbar-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+    .source-control-btn.disabled .source-control-toggle { background: var(--dim); }
+    .source-control-btn.disabled .source-control-toggle::after { left: 2px; }
+
+    .toolbar-sep { width: 1px; height: 16px; background: var(--border); margin: 0 2px; }
     select {
-      background: var(--card2); border: 1px solid var(--border2);
-      color: var(--text); padding: 7px 12px; border-radius: var(--radius-xs);
-      font-size: 12px; outline: none; cursor: pointer;
-      font-family: 'Inter', sans-serif;
-      transition: border-color .2s, box-shadow .2s;
+      background: rgba(255,255,255,.025); border: 1px solid var(--border);
+      color: var(--text2); padding: 7px 10px; border-radius: 8px;
+      font-size: 11px; font-weight: 600; outline: none; cursor: pointer;
+      font-family: 'Inter', sans-serif; transition: all .15s;
+      appearance: none; -webkit-appearance: none;
+      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
+      padding-right: 26px;
     }
-    select:hover { border-color: var(--border3); }
-    select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+    select:hover { border-color: var(--border2); color: var(--text); }
+    select:focus {
+      border-color: rgba(98,114,255,.3); color: var(--text);
+      box-shadow: 0 0 0 1px rgba(98,114,255,.2);
+      background-color: var(--accent-glow);
+    }
+    select option { background: var(--surface); color: var(--text); }
 
     .btn {
-      padding: 8px 16px; border-radius: var(--radius-xs); border: none;
-      cursor: pointer; font-size: 12px; font-weight: 600;
-      transition: all .2s ease; white-space: nowrap;
-      font-family: 'Inter', sans-serif;
+      padding: 7px 12px; border-radius: 8px; border: 1px solid transparent;
+      cursor: pointer; font-size: 11px; font-weight: 700;
+      transition: all .15s ease; white-space: nowrap;
+      font-family: 'Inter', sans-serif; letter-spacing: .1px;
+      display: inline-flex; align-items: center; gap: 5px;
     }
     .btn-primary {
-      background: linear-gradient(135deg, var(--accent), #7c6cf0);
-      color: #fff; box-shadow: 0 2px 16px rgba(108,92,231,.35);
+      background: var(--accent-glow); color: var(--accent2);
+      border-color: rgba(98,114,255,.3);
+      box-shadow: 0 0 0 1px rgba(98,114,255,.1) inset;
     }
-    .btn-primary:hover { box-shadow: 0 4px 24px rgba(108,92,231,.5); transform: translateY(-1px); }
-    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:hover {
+      background: rgba(98,114,255,.18); color: var(--text);
+      border-color: rgba(98,114,255,.5);
+      box-shadow: 0 0 14px rgba(98,114,255,.18);
+    }
+    .btn-primary:active { transform: translateY(1px); }
     .btn-ghost {
-      background: var(--glass); border: 1px solid var(--border2);
+      background: rgba(255,255,255,.025); border-color: var(--border);
       color: var(--muted);
     }
-    .btn-ghost:hover { background: var(--card3); color: var(--text); border-color: var(--border3); }
+    .btn-ghost:hover {
+      background: rgba(255,255,255,.05); color: var(--text);
+      border-color: var(--border2);
+    }
     .btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+    .btn.is-spinning { opacity: .8; }
+    .btn.is-spinning .btn-refresh-ico {
+      display: inline-block;
+      animation: spin 0.9s linear infinite;
+    }
+    .btn-refresh-ico { display: inline-block; }
 
-    /* ── Trend Cards (card layout) ── */
-    .trends-list { display: flex; flex-direction: column; gap: 10px; padding: 16px; }
+    /* ── Trend Cards ── */
+    .trends-list { display: flex; flex-direction: column; gap: 4px; padding: 8px; }
     .trend-card {
-      background: var(--card);
+      background: rgba(255,255,255,.01);
       border: 1px solid var(--border);
-      border-radius: var(--radius);
+      border-radius: 8px;
       padding: 0;
-      transition: all .2s ease;
-      animation: fadeIn .3s ease backwards;
+      transition: border-color .15s, background .15s;
+      animation: fadeIn .25s ease backwards;
       overflow: hidden;
+      cursor: pointer;
     }
     .trend-card:hover {
-      border-color: var(--border2);
-      box-shadow: 0 4px 20px rgba(0,0,0,.3);
-      transform: translateY(-1px);
+      border-color: rgba(98,114,255,.28);
+      background: rgba(98,114,255,.025);
     }
 
     /* ── Card header row ── */
     .card-header {
-      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-      padding: 14px 18px 10px;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 10px 13px 8px;
       border-bottom: 1px solid var(--border);
-      background: var(--glass);
+      background: rgba(255,255,255,.015);
     }
     .card-title {
-      font-size: 14px; font-weight: 700; color: var(--text);
+      font-size: 13px; font-weight: 700; color: var(--text);
       flex: 1; min-width: 0;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .card-title a { color: inherit; text-decoration: none; transition: color .15s; }
-    .card-title a:hover { color: var(--accent2); text-decoration: underline; }
-    .card-meta {
-      display: flex; align-items: center; gap: 8px; flex-shrink: 0;
-    }
+    .card-title a { color: inherit; text-decoration: none; transition: color .12s; }
+    .card-title a:hover { color: var(--accent2); }
+    .card-meta { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
 
     /* ── Card body ── */
-    .card-body { padding: 14px 18px; }
+    .card-body { padding: 10px 13px; }
     .card-orig {
-      font-size: 11px; color: var(--dim); font-style: italic;
-      margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 10px; color: var(--dim); font-style: italic;
+      margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .card-desc {
       font-size: 12px; color: var(--muted); line-height: 1.5;
-      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
-      margin-bottom: 12px;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+      margin-bottom: 9px;
     }
     .card-desc.pump { color: var(--orange); font-weight: 500; }
 
     /* ── Card stats row ── */
-    .card-stats {
-      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-    }
-    .card-stat {
-      display: flex; flex-direction: column; gap: 2px;
-    }
-    .card-stat-label {
-      font-size: 9px; text-transform: uppercase; letter-spacing: .8px;
-      color: var(--dim); font-weight: 600;
-    }
+    .card-stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .card-stat { display: flex; flex-direction: column; gap: 2px; }
+    .card-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: .7px; color: var(--dim); font-weight: 600; }
 
-    /* ── Meme score (inline for cards, legacy) ── */
-    .meme-score { display: flex; align-items: center; gap: 8px; }
-    .meme-num {
-      font-size: 20px; font-weight: 800; font-family: 'JetBrains Mono', monospace;
-      line-height: 1;
-    }
-    .meme-num.hot  { color: var(--red2);  text-shadow: 0 0 14px rgba(255,118,117,.5); }
-    .meme-num.warm { color: var(--orange); text-shadow: 0 0 12px rgba(225,112,85,.4); }
+    /* ── Score / meme bars ── */
+    .meme-score { display: flex; align-items: center; gap: 7px; }
+    .meme-num { font-size: 17px; font-weight: 800; font-family: 'JetBrains Mono', monospace; line-height: 1; }
+    .meme-num.hot  { color: var(--red2); text-shadow: 0 0 10px rgba(255,69,96,.35); }
+    .meme-num.warm { color: var(--orange); }
     .meme-num.ok   { color: var(--yellow); }
     .meme-num.cold { color: var(--dim); }
-    .meme-bar-wrap { display: flex; flex-direction: column; gap: 2px; min-width: 80px; }
-    .meme-bar {
-      height: 4px; border-radius: 4px;
-      background: var(--border); overflow: hidden; width: 80px;
-    }
-    .meme-fill { height: 100%; border-radius: 4px; transition: width .4s ease; }
-    .meme-label { font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; }
+    .meme-bar-wrap { display: flex; flex-direction: column; gap: 2px; min-width: 70px; }
+    .meme-bar { height: 3px; border-radius: 3px; background: rgba(255,255,255,.06); overflow: hidden; width: 70px; }
+    .meme-fill { height: 100%; border-radius: 3px; transition: width .35s ease; }
+    .meme-label { font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; }
 
-    /* ── ScoreBar — reusable bar for emergence + adoption ── */
     .score-bar-wrap { display: flex; flex-direction: column; gap: 2px; }
-    .score-bar-row  { display: flex; align-items: center; gap: 7px; }
-    .score-bar-label {
-      font-size: 10px; color: var(--dim); font-weight: 600;
-      white-space: nowrap; min-width: 86px;
-    }
-    .score-bar-track {
-      flex: 1; height: 5px; border-radius: 4px;
-      background: var(--border); overflow: hidden;
-    }
-    .score-bar-fill { height: 100%; border-radius: 4px; transition: width .4s ease; }
-    .score-bar-num {
-      font-size: 11px; font-weight: 800; font-family: 'JetBrains Mono', monospace;
-      min-width: 22px; text-align: right;
-    }
-    .score-bar-sub {
-      font-size: 10px; color: var(--dim); padding-left: 93px;
-      margin-top: -1px;
-    }
-
-    /* ── Two-bar container in card ── */
-    .card-score-bars { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .score-bar-row  { display: flex; align-items: center; gap: 6px; }
+    .score-bar-label { font-size: 10px; color: var(--dim); font-weight: 600; white-space: nowrap; min-width: 82px; }
+    .score-bar-track { flex: 1; height: 3px; border-radius: 3px; background: rgba(255,255,255,.06); overflow: hidden; }
+    .score-bar-fill { height: 100%; border-radius: 3px; transition: width .35s ease; }
+    .score-bar-num { font-size: 11px; font-weight: 800; font-family: 'JetBrains Mono', monospace; min-width: 20px; text-align: right; }
+    .score-bar-sub { font-size: 10px; color: var(--dim); padding-left: 88px; margin-top: -1px; }
+    .card-score-bars { display: flex; flex-direction: column; gap: 5px; margin-top: 7px; }
 
     /* ── Phase badge ── */
     .phase-badge {
-      display: inline-flex; align-items: center; gap: 4px;
-      padding: 2px 8px; border-radius: 5px;
-      font-size: 9px; font-weight: 800; letter-spacing: .8px;
+      display: inline-flex; align-items: center; gap: 3px;
+      padding: 2px 6px; border-radius: 4px;
+      font-size: 9px; font-weight: 800; letter-spacing: .6px;
       white-space: nowrap; flex-shrink: 0;
     }
 
     /* ── Badges ── */
-    .badge {
-      display: inline-flex; align-items: center; gap: 4px;
-      padding: 4px 10px; border-radius: 6px;
-      font-size: 10px; font-weight: 600; white-space: nowrap; letter-spacing: .3px;
-    }
-    .cat-meme        { background: rgba(162,155,254,.12); color: #a29bfe; border: 1px solid rgba(162,155,254,.2); }
-    .cat-elon        { background: rgba(116,185,255,.12); color: #74b9ff; border: 1px solid rgba(116,185,255,.2); }
-    .cat-animals     { background: rgba(85,239,196,.12);  color: #55efc4; border: 1px solid rgba(85,239,196,.2); }
-    .cat-tech_drama  { background: rgba(225,112,85,.12);  color: #e17055; border: 1px solid rgba(225,112,85,.2); }
-    .cat-degenerates { background: rgba(253,121,168,.12); color: #fd79a8; border: 1px solid rgba(253,121,168,.2); }
-    .cat-celebrity   { background: rgba(253,203,110,.12); color: #fdcb6e; border: 1px solid rgba(253,203,110,.2); }
-    .cat-sports_degen{ background: rgba(116,185,255,.12); color: #74b9ff; border: 1px solid rgba(116,185,255,.2); }
-    .cat-ai_drama    { background: rgba(129,236,236,.12); color: #81ecec; border: 1px solid rgba(129,236,236,.2); }
-    .cat-boring      { background: rgba(30,30,40,.6);     color: #555568; border: 1px solid rgba(40,40,55,.8); }
-    .cat-other       { background: rgba(30,30,40,.6);     color: #666680; border: 1px solid rgba(40,40,55,.8); }
+    .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 5px; font-size: 10px; font-weight: 600; white-space: nowrap; letter-spacing: .2px; }
+    .cat-meme        { background: rgba(162,155,254,.1); color: #a29bfe; border: 1px solid rgba(162,155,254,.18); }
+    .cat-elon        { background: rgba(116,185,255,.1); color: #74b9ff; border: 1px solid rgba(116,185,255,.18); }
+    .cat-animals     { background: rgba(85,239,196,.1);  color: #55efc4; border: 1px solid rgba(85,239,196,.18); }
+    .cat-tech_drama  { background: rgba(225,112,85,.1);  color: #e17055; border: 1px solid rgba(225,112,85,.18); }
+    .cat-degenerates { background: rgba(253,121,168,.1); color: #fd79a8; border: 1px solid rgba(253,121,168,.18); }
+    .cat-celebrity   { background: rgba(253,203,110,.1); color: #fdcb6e; border: 1px solid rgba(253,203,110,.18); }
+    .cat-sports_degen{ background: rgba(116,185,255,.1); color: #74b9ff; border: 1px solid rgba(116,185,255,.18); }
+    .cat-ai_drama    { background: rgba(129,236,236,.1); color: #81ecec; border: 1px solid rgba(129,236,236,.18); }
+    .cat-boring      { background: rgba(255,255,255,.04); color: var(--dim); border: 1px solid var(--border); }
+    .cat-other       { background: rgba(255,255,255,.04); color: var(--dim); border: 1px solid var(--border); }
 
     /* ── Source chip ── */
-    .source-chip {
-      display: inline-flex; align-items: center; gap: 5px;
-      font-size: 11px; color: var(--muted); white-space: nowrap;
-      padding: 3px 8px; border-radius: 6px; background: var(--glass);
-    }
+    .source-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--dim); white-space: nowrap; padding: 2px 7px; border-radius: 5px; background: rgba(255,255,255,.04); }
 
-    /* ── Lifespan ── */
-    .lifespan { font-size: 11px; color: var(--dim); white-space: nowrap; }
+    /* ── Lifespan / Time ── */
+    .lifespan { font-size: 10px; color: var(--dim); white-space: nowrap; }
+    .time-cell { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--dim); white-space: nowrap; }
 
-    /* ── Time ── */
-    .time-cell { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--dim); white-space: nowrap; }
-
-    /* ── Card footer (action buttons) ── */
+    /* ── Card footer ── */
     .card-footer {
-      display: flex; gap: 8px; padding: 12px 18px;
+      display: flex; gap: 6px; padding: 8px 13px;
       border-top: 1px solid var(--border);
-      background: var(--glass);
+      background: rgba(255,255,255,.012);
     }
     .trend-link {
-      display: inline-flex; align-items: center; gap: 6px;
-      font-size: 12px; font-weight: 600; color: var(--accent2);
-      text-decoration: none; padding: 7px 16px;
-      border: 1px solid var(--border2); border-radius: 8px;
-      background: var(--card2); transition: all .2s;
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; font-weight: 600; color: var(--muted);
+      text-decoration: none; padding: 5px 11px;
+      border: 1px solid var(--border); border-radius: 6px;
+      background: rgba(255,255,255,.025); transition: all .13s;
       white-space: nowrap;
     }
-    .trend-link:hover {
-      background: var(--accent-glow); border-color: var(--accent);
-      color: var(--text); transform: translateY(-1px);
-      box-shadow: 0 2px 8px rgba(108,92,231,.25);
-    }
-    .trend-link-tg {
-      color: #5bc0eb; border-color: rgba(91,192,235,.3);
-    }
-    .trend-link-tg:hover {
-      background: rgba(91,192,235,.12); border-color: rgba(91,192,235,.5);
-      color: #fff; box-shadow: 0 2px 8px rgba(91,192,235,.2);
-    }
-    .trend-link-reddit { color: #ff6b35; border-color: rgba(255,107,53,.3); }
-    .trend-link-reddit:hover {
-      background: rgba(255,107,53,.12); border-color: rgba(255,107,53,.5);
-      color: #fff; box-shadow: 0 2px 8px rgba(255,107,53,.2);
-    }
-    .trend-link-twitter { color: #1da1f2; border-color: rgba(29,161,242,.3); }
-    .trend-link-twitter:hover {
-      background: rgba(29,161,242,.12); border-color: rgba(29,161,242,.5);
-      color: #fff; box-shadow: 0 2px 8px rgba(29,161,242,.2);
-    }
-    .trend-link-tiktok { color: #ee1d52; border-color: rgba(238,29,82,.3); }
-    .trend-link-tiktok:hover {
-      background: rgba(238,29,82,.12); border-color: rgba(238,29,82,.5);
-      color: #fff; box-shadow: 0 2px 8px rgba(238,29,82,.2);
-    }
+    .trend-link:hover { background: rgba(255,255,255,.05); color: var(--text); border-color: var(--border2); }
+    .trend-link-tg { color: #5bc0eb; border-color: rgba(91,192,235,.2); }
+    .trend-link-tg:hover { background: rgba(91,192,235,.1); border-color: rgba(91,192,235,.4); color: #fff; }
+    .trend-link-reddit { color: #ff6b35; border-color: rgba(255,107,53,.2); }
+    .trend-link-reddit:hover { background: rgba(255,107,53,.1); border-color: rgba(255,107,53,.4); color: #fff; }
+    .trend-link-twitter { color: #1da1f2; border-color: rgba(29,161,242,.2); }
+    .trend-link-twitter:hover { background: rgba(29,161,242,.1); border-color: rgba(29,161,242,.4); color: #fff; }
+    .trend-link-tiktok { color: #ee1d52; border-color: rgba(238,29,82,.2); }
+    .trend-link-tiktok:hover { background: rgba(238,29,82,.1); border-color: rgba(238,29,82,.4); color: #fff; }
 
     /* ── Table wrap & header ── */
-    .table-wrap {
-      background: transparent; border: none;
-      border-radius: var(--radius); overflow: hidden;
-    }
+    .table-wrap { background: transparent; border: none; border-radius: var(--radius); overflow: hidden; }
     .table-header {
-      padding: 14px 22px;
-      border-bottom: 1px solid var(--border);
+      padding: 11px 14px; border-bottom: 1px solid var(--border);
       display: flex; align-items: center; justify-content: space-between;
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius);
-      margin-bottom: 4px;
+      background: var(--card);
+      border-radius: var(--radius) var(--radius) 0 0;
     }
-    .table-title { font-size: 14px; font-weight: 700; color: var(--text); }
-    .table-count { font-size: 11px; color: var(--dim); font-family: 'JetBrains Mono', monospace; font-weight: 500; }
+    .table-title { font-size: 13px; font-weight: 700; color: var(--text); }
+    .table-count { font-size: 10px; color: var(--dim); font-family: 'JetBrains Mono', monospace; font-weight: 500; }
 
     /* ── Pagination ── */
     .pagination {
-      display: flex; gap: 8px; align-items: center;
-      justify-content: center; padding: 18px;
-      background: var(--glass);
+      display: flex; gap: 7px; align-items: center;
+      justify-content: center; padding: 12px;
+      border-top: 1px solid var(--border);
     }
-    .page-info { font-size: 12px; color: var(--dim); font-family: 'JetBrains Mono', monospace; }
+    .page-info { font-size: 11px; color: var(--dim); font-family: 'JetBrains Mono', monospace; }
 
     /* ── Loading / Empty ── */
-    .loading-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 80px 20px; gap: 16px; }
-    .loading-spinner {
-      width: 36px; height: 36px; border-radius: 50%;
-      border: 3px solid var(--border); border-top-color: var(--accent);
-      animation: spin .7s linear infinite;
-    }
-    .loading-text { font-size: 13px; color: var(--dim); font-weight: 500; }
-    .empty-wrap { display: flex; flex-direction: column; align-items: center; padding: 80px 20px; gap: 14px; }
-    .empty-icon { font-size: 48px; opacity: .2; }
-    .empty-text { font-size: 14px; color: var(--dim); font-weight: 500; }
+    .loading-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 20px; gap: 14px; }
+    .loading-spinner { width: 28px; height: 28px; border-radius: 50%; border: 2px solid rgba(255,255,255,.06); border-top-color: var(--accent); animation: spin .7s linear infinite; }
+    .loading-text { font-size: 12px; color: var(--dim); font-weight: 500; }
+    .empty-wrap { display: flex; flex-direction: column; align-items: center; padding: 60px 20px; gap: 12px; }
+    .empty-icon { font-size: 40px; opacity: .15; }
+    .empty-text { font-size: 13px; color: var(--dim); font-weight: 500; }
 
     /* ── Error ── */
     .error-bar {
-      background: rgba(214,48,49,.08); border: 1px solid rgba(214,48,49,.2);
-      color: var(--red2); padding: 12px 18px; border-radius: var(--radius-sm);
-      margin-bottom: 18px; font-size: 13px; font-weight: 500;
+      background: rgba(255,69,96,.07); border: 1px solid rgba(255,69,96,.2);
+      color: var(--red2); padding: 10px 14px; border-radius: 8px;
+      margin-bottom: 12px; font-size: 12px; font-weight: 500;
       display: flex; align-items: center; gap: 8px;
-      animation: fadeIn .3s ease;
+      animation: fadeIn .25s ease;
     }
 
     /* ── Settings panel ── */
-    .settings-panel { padding: 28px 32px; max-width: 700px; animation: fadeIn .3s ease; }
-    .settings-header {
-      display: flex; align-items: center; gap: 16px;
-      margin-bottom: 28px;
-    }
-    .settings-title { font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; }
+    .settings-panel { padding: 20px 24px; max-width: 680px; animation: fadeIn .25s ease; }
+    .settings-header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+    .settings-title { font-size: 17px; font-weight: 800; color: var(--text); letter-spacing: -.3px; }
     .settings-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 22px 26px;
-      margin-bottom: 20px;
-      transition: border-color .2s;
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 18px 20px; margin-bottom: 12px; box-shadow: var(--shadow);
     }
-    .settings-card:hover { border-color: var(--border2); }
-    .settings-card-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
-    .settings-card-desc  { font-size: 12px; color: var(--muted); margin-bottom: 20px; }
-    .setting-row {
-      display: flex; align-items: center; justify-content: space-between; gap: 24px;
-      padding: 16px 0;
-      border-top: 1px solid var(--border);
+    .settings-card-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 3px; }
+    .settings-card-desc  { font-size: 11px; color: var(--muted); margin-bottom: 16px; }
+    .stats-view { display: grid; gap: 12px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .stats-block { padding: 14px 16px; }
+    .stats-block-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+    .stats-block-title { font-size: 9px; font-weight: 700; letter-spacing: 1.4px; text-transform: uppercase; color: var(--accent2); }
+    .stats-block-sub { color: var(--dim); font-size: 10px; }
+    .stats-list { display: flex; flex-direction: column; gap: 5px; }
+    .stats-list-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
+      background: rgba(255,255,255,.018);
     }
+    .stats-list-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .stats-list-name { font-size: 12px; font-weight: 600; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stats-list-meta { font-size: 10px; color: var(--dim); }
+    .stats-list-value { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--accent2); font-size: 11px; white-space: nowrap; }
+    .stats-top-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .stats-top-card { padding: 11px; border-radius: 8px; border: 1px solid var(--border); background: rgba(255,255,255,.018); cursor: pointer; transition: border-color .15s, background .15s; }
+    .stats-top-card:hover { border-color: rgba(98,114,255,.25); background: rgba(98,114,255,.05); }
+    .stats-top-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .stats-top-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--muted); font-size: 10px; }
+    .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 13px 0; border-top: 1px solid var(--border); }
     .setting-row:first-of-type { border-top: none; }
-    .setting-label { display: flex; flex-direction: column; gap: 4px; flex: 1; }
-    .setting-name  { font-size: 13px; font-weight: 600; color: var(--text); }
-    .setting-hint  { font-size: 11px; color: var(--muted); }
-    .setting-control { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
-    .setting-control input[type=range] {
-      width: 150px; accent-color: var(--accent);
-      height: 4px; cursor: pointer;
-    }
-    .setting-val {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 16px; font-weight: 700;
-      color: var(--accent2); min-width: 36px; text-align: right;
-    }
-    .settings-actions { display: flex; gap: 12px; margin-top: 12px; }
+    .setting-label { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+    .setting-name  { font-size: 12px; font-weight: 600; color: var(--text); }
+    .setting-hint  { font-size: 10px; color: var(--muted); }
+    .setting-control { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+    .setting-control input[type=range] { width: 130px; accent-color: var(--accent); height: 3px; cursor: pointer; }
+    .setting-val { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: var(--accent2); min-width: 30px; text-align: right; }
+    .settings-actions { display: flex; gap: 10px; margin-top: 10px; }
 
     /* ── Preset grid ── */
-    .preset-grid {
-      display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;
-      margin-top: 8px;
-    }
+    .preset-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 6px; }
     @media (max-width: 700px) { .preset-grid { grid-template-columns: repeat(3, 1fr); } }
     .preset-card {
-      display: flex; flex-direction: column; align-items: center; gap: 7px;
-      padding: 16px 8px; border-radius: var(--radius-sm);
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+      padding: 12px 6px; border-radius: var(--radius-sm);
       border: 1px solid var(--border); background: var(--card2);
-      cursor: pointer; text-align: center;
-      transition: all .2s ease;
+      cursor: pointer; text-align: center; transition: all .15s ease;
     }
     .preset-card:hover { border-color: var(--border3); background: var(--card3); transform: translateY(-1px); }
-    .preset-card.active {
-      border-color: var(--accent);
-      background: var(--accent-glow);
-      box-shadow: 0 0 0 1px var(--accent), 0 4px 16px rgba(108,92,231,.2);
-    }
-    .preset-icon  { font-size: 24px; }
-    .preset-label { font-size: 12px; font-weight: 700; color: var(--text); }
-    .preset-hint  { font-size: 10px; color: var(--muted); line-height: 1.3; }
+    .preset-card.active { border-color: var(--accent); background: rgba(98,114,255,.1); box-shadow: 0 0 0 1px var(--accent); }
+    .preset-icon  { font-size: 20px; }
+    .preset-label { font-size: 11px; font-weight: 700; color: var(--text); }
+    .preset-hint  { font-size: 9px; color: var(--muted); line-height: 1.3; }
 
     /* ── Sidebar settings link ── */
     .sidebar-settings-btn {
-      display: flex; align-items: center; gap: 10px;
-      padding: 10px 12px; border-radius: var(--radius-sm);
+      display: flex; align-items: center; gap: 9px;
+      padding: 8px 10px; border-radius: var(--radius-sm);
       cursor: pointer; color: var(--muted);
-      font-size: 13px; font-weight: 500;
-      transition: all .2s ease;
+      font-size: 12px; font-weight: 500;
+      transition: all .15s ease; border: 1px solid transparent;
       margin-top: auto;
     }
-    .sidebar-settings-btn:hover { background: var(--glass2); color: var(--text); }
-    .sidebar-settings-btn.active { background: var(--accent-glow); color: var(--accent2); }
-
-    /* ── Trend card: clickable cursor ── */
-    .trend-card { cursor: pointer; }
-    .trend-card:hover { border-color: var(--accent); box-shadow: 0 4px 24px rgba(108,92,231,.15); }
+    .sidebar-settings-btn:hover { background: rgba(255,255,255,.04); color: var(--text); }
+    .sidebar-settings-btn.active { background: rgba(98,114,255,.1); color: var(--accent2); border-color: rgba(98,114,255,.2); }
 
     /* ── Card image thumbnail ── */
-    .card-image-wrap {
-      width: 80px; height: 80px; flex-shrink: 0;
-      border-radius: 8px; overflow: hidden;
-      background: var(--card3); border: 1px solid var(--border);
-      position: relative;
-    }
-    .card-image-wrap img {
-      width: 100%; height: 100%; object-fit: cover;
-      transition: transform .3s ease;
-    }
-    .trend-card:hover .card-image-wrap img { transform: scale(1.05); }
-    .card-image-placeholder {
-      width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
-      font-size: 28px; opacity: .25;
-    }
+    .card-image-wrap { flex-shrink: 0; border-radius: 7px; overflow: hidden; background: var(--card3); border: 1px solid var(--border); position: relative; }
+    .card-image-wrap img { width: 100%; height: 100%; object-fit: cover; transition: transform .25s ease; }
+    .trend-card:hover .card-image-wrap img { transform: scale(1.04); }
+    .card-image-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 24px; opacity: .18; }
 
-    /* ── Copy button (shows on card hover) ── */
+    /* ── Copy button ── */
     .card-copy-btn {
       opacity: 0; pointer-events: none;
       background: var(--card3); border: 1px solid var(--border2);
-      color: var(--muted); border-radius: 6px; padding: 3px 8px;
-      font-size: 10px; cursor: pointer; transition: all .15s;
-      white-space: nowrap;
+      color: var(--muted); border-radius: 5px; padding: 2px 7px;
+      font-size: 10px; cursor: pointer; transition: all .12s; white-space: nowrap;
     }
     .trend-card:hover .card-copy-btn { opacity: 1; pointer-events: auto; }
     .card-copy-btn:hover { background: var(--accent-glow); color: var(--accent2); border-color: var(--accent); }
 
     /* ── Search input ── */
-    .search-wrap {
-      position: relative; flex: 1; min-width: 200px; max-width: 340px;
-    }
-    .search-icon {
-      position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
-      color: var(--dim); font-size: 13px; pointer-events: none;
-    }
+    .search-wrap { position: relative; flex: 1; min-width: 170px; max-width: 300px; }
+    .search-icon { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: var(--dim); font-size: 12px; pointer-events: none; }
     .search-input {
-      width: 100%;
-      background: var(--card2); border: 1px solid var(--border2);
-      color: var(--text); padding: 7px 12px 7px 32px;
-      border-radius: var(--radius-xs); font-size: 12px;
-      outline: none; font-family: 'Inter', sans-serif;
-      transition: border-color .2s, box-shadow .2s;
+      width: 100%; background: rgba(255,255,255,.03); border: 1px solid var(--border2);
+      color: var(--text); padding: 5px 10px 5px 27px;
+      border-radius: var(--radius-xs); font-size: 11px;
+      outline: none; font-family: 'Inter', sans-serif; transition: border-color .15s;
     }
     .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
     .search-input::placeholder { color: var(--dim); }
 
     /* ── Toast notifications ── */
-    @keyframes toastIn  { from { opacity:0; transform: translateX(40px); } to { opacity:1; transform: translateX(0); } }
-    @keyframes toastOut { from { opacity:1; transform: translateX(0); }    to { opacity:0; transform: translateX(40px); } }
-    .toasts-wrap {
-      position: fixed; top: 72px; right: 20px; z-index: 9999;
-      display: flex; flex-direction: column; gap: 10px;
-      pointer-events: none;
-    }
+    @keyframes toastIn  { from { opacity:0; transform: translateX(30px); } to { opacity:1; transform: translateX(0); } }
+    @keyframes toastOut { from { opacity:1; transform: translateX(0); }    to { opacity:0; transform: translateX(30px); } }
+    .toasts-wrap { position: fixed; top: 60px; right: 14px; z-index: 9999; display: flex; flex-direction: column; gap: 7px; pointer-events: none; }
     .toast {
-      display: flex; align-items: center; gap: 10px;
+      display: flex; align-items: center; gap: 9px;
       background: var(--card3); border: 1px solid var(--border2);
-      border-radius: var(--radius-sm); padding: 12px 18px;
-      font-size: 13px; font-weight: 500; color: var(--text);
-      box-shadow: var(--shadow-lg);
-      animation: toastIn .25s ease;
-      pointer-events: auto; min-width: 260px; max-width: 360px;
-      backdrop-filter: blur(12px);
+      border-radius: 8px; padding: 10px 14px;
+      font-size: 12px; font-weight: 500; color: var(--text);
+      box-shadow: var(--shadow-lg); animation: toastIn .2s ease;
+      pointer-events: auto; min-width: 230px; max-width: 320px;
+      backdrop-filter: blur(10px);
     }
-    .toast.success { border-color: rgba(0,184,148,.3); }
+    .toast.success { border-color: rgba(0,212,170,.25); }
     .toast.success .toast-icon { color: var(--green2); }
-    .toast.error   { border-color: rgba(214,48,49,.3); }
+    .toast.error   { border-color: rgba(255,69,96,.25); }
     .toast.error   .toast-icon { color: var(--red2); }
-    .toast.info    { border-color: rgba(108,92,231,.3); }
+    .toast.info    { border-color: rgba(98,114,255,.25); }
     .toast.info    .toast-icon { color: var(--accent2); }
-    .toast-icon { font-size: 16px; flex-shrink: 0; }
+    .toast-icon { font-size: 13px; flex-shrink: 0; }
     .toast-msg  { flex: 1; line-height: 1.4; }
 
-    /* ── Auto-refresh countdown badge ── */
+    /* ── Refresh badge + keyboard hints ── */
     .refresh-badge {
       font-family: 'JetBrains Mono', monospace; font-size: 10px;
-      color: var(--dim); background: var(--glass);
-      border: 1px solid var(--border); border-radius: 20px;
-      padding: 4px 10px; white-space: nowrap;
+      color: var(--dim); background: rgba(255,255,255,.03);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 3px 8px; white-space: nowrap;
     }
-
-    /* ── Keyboard shortcut hints ── */
-    .kbd {
-      display: inline-block; background: var(--card3); border: 1px solid var(--border3);
-      border-radius: 4px; padding: 1px 6px; font-size: 10px;
-      font-family: 'JetBrains Mono', monospace; color: var(--dim);
-    }
+    .kbd { display: inline-block; background: rgba(255,255,255,.05); border: 1px solid var(--border2); border-radius: 4px; padding: 1px 5px; font-size: 9px; font-family: 'JetBrains Mono', monospace; color: var(--dim); }
 
     /* ── Modal overlay ── */
-    @keyframes modalIn { from { opacity:0; } to { opacity:1; } }
+    @keyframes modalIn  { from { opacity:0; } to { opacity:1; } }
     @keyframes drawerIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
     .modal-overlay {
       position: fixed; inset: 0; z-index: 8000;
-      background: rgba(0,0,0,.7);
-      backdrop-filter: blur(4px);
-      animation: modalIn .2s ease;
-      display: flex; justify-content: flex-end;
+      background: rgba(0,0,0,.75); backdrop-filter: blur(3px);
+      animation: modalIn .18s ease; display: flex; justify-content: flex-end;
     }
     .modal-drawer {
-      width: 560px; max-width: 95vw; height: 100vh;
+      width: 520px; max-width: 95vw; height: 100vh;
       background: var(--surface); border-left: 1px solid var(--border2);
       display: flex; flex-direction: column;
-      animation: drawerIn .25s cubic-bezier(.4,0,.2,1);
-      box-shadow: -8px 0 40px rgba(0,0,0,.5);
-      overflow: hidden;
+      animation: drawerIn .22s cubic-bezier(.4,0,.2,1);
+      box-shadow: -6px 0 40px rgba(0,0,0,.65); overflow: hidden;
     }
     .modal-head {
-      display: flex; align-items: center; gap: 14px;
-      padding: 18px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 11px;
+      padding: 13px 15px; border-bottom: 1px solid var(--border);
       flex-shrink: 0; background: var(--card);
     }
     .modal-close {
-      margin-left: auto; background: var(--card3); border: 1px solid var(--border2);
-      color: var(--muted); border-radius: 8px; padding: 6px 10px;
-      cursor: pointer; font-size: 14px; transition: all .15s; flex-shrink: 0;
+      margin-left: auto; background: rgba(255,255,255,.04); border: 1px solid var(--border2);
+      color: var(--muted); border-radius: 6px; padding: 5px 9px;
+      cursor: pointer; font-size: 12px; transition: all .12s; flex-shrink: 0;
     }
-    .modal-close:hover { background: rgba(214,48,49,.15); color: var(--red2); border-color: rgba(214,48,49,.3); }
-    .modal-body {
-      flex: 1; overflow-y: auto; padding: 22px 22px 40px;
-      display: flex; flex-direction: column; gap: 18px;
-    }
+    .modal-close:hover { background: rgba(255,69,96,.12); color: var(--red2); border-color: rgba(255,69,96,.25); }
+    .modal-body { flex: 1; overflow-y: auto; padding: 16px 16px 36px; display: flex; flex-direction: column; gap: 14px; }
 
-    /* ── Modal image banner ── */
-    .modal-image {
-      width: 100%; height: 200px; border-radius: var(--radius-sm);
-      object-fit: cover; display: block;
-      border: 1px solid var(--border);
-    }
+    /* ── Modal image ── */
+    .modal-image { width: 100%; height: 180px; border-radius: 8px; object-fit: cover; display: block; border: 1px solid var(--border); }
     .modal-image-loading {
-      height: 200px; border-radius: var(--radius-sm);
+      height: 180px; border-radius: 8px;
       background: linear-gradient(90deg, var(--card2) 25%, var(--card3) 50%, var(--card2) 75%);
-      background-size: 200% 100%;
-      animation: shimmer 1.5s linear infinite;
-      border: 1px solid var(--border);
+      background-size: 200% 100%; animation: shimmer 1.5s linear infinite; border: 1px solid var(--border);
     }
 
     /* ── Modal sections ── */
-    .modal-title { font-size: 17px; font-weight: 800; color: var(--text); line-height: 1.35; letter-spacing: -.3px; }
-    .modal-section { display: flex; flex-direction: column; gap: 8px; }
-    .modal-section-label {
-      font-size: 9px; text-transform: uppercase; letter-spacing: 1px;
-      color: var(--dim); font-weight: 700;
-    }
-    .modal-section-content {
-      font-size: 13px; color: var(--text2); line-height: 1.6;
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius-sm); padding: 14px 16px;
-    }
-    .modal-section-content.pump {
-      color: var(--orange); border-color: rgba(225,112,85,.2);
-      background: rgba(225,112,85,.06);
-    }
-    .modal-stats-grid {
-      display: grid; grid-template-columns: repeat(3,1fr); gap: 10px;
-    }
-    .modal-stat {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius-sm); padding: 12px 14px;
-      display: flex; flex-direction: column; gap: 6px;
-    }
-    .modal-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: .8px; color: var(--dim); font-weight: 600; }
-    .modal-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+    .modal-title { font-size: 15px; font-weight: 800; color: var(--text); line-height: 1.35; letter-spacing: -.25px; }
+    .modal-section { display: flex; flex-direction: column; gap: 7px; }
+    .modal-section-label { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); font-weight: 700; }
+    .modal-section-content { font-size: 12px; color: var(--text2); line-height: 1.55; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 11px 13px; }
+    .modal-section-content.pump { color: var(--orange); border-color: rgba(255,159,67,.15); background: rgba(255,159,67,.05); }
+    .modal-stats-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 7px; }
+    .modal-stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; display: flex; flex-direction: column; gap: 5px; }
+    .modal-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: .7px; color: var(--dim); font-weight: 600; }
+    .modal-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 2px; }
 
-    /* ── Sentiment badge ── */
+    /* ── Sentiment ── */
     .sentiment-pos { color: var(--green2); font-weight: 600; }
     .sentiment-neg { color: var(--red2);   font-weight: 600; }
     .sentiment-neu { color: var(--muted); }
+
+    /* ── Dashboard 3-column grid — app-shell, only feed scrolls ── */
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: 240px 1fr 300px;
+      height: calc(100vh - 50px - 28px); /* viewport - nav - statusbar */
+      overflow: hidden;
+    }
+    .dashboard-grid > .sidebar {
+      position: static !important;
+      height: 100%;
+      width: auto;
+      overflow-y: auto;
+      border-right: 1px solid var(--border);
+      padding: 14px 10px 10px;
+    }
+    .dashboard-grid > .main-feed {
+      height: 100%;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      min-width: 0;
+      padding: 12px 12px 28px;
+    }
+    /* right panel: natural height, no scroll — fits in viewport */
+    .dashboard-grid > .right-panel-sticky {
+      height: 100%;
+      overflow: hidden;
+      border-left: 1px solid var(--border);
+      background: var(--bg);
+    }
+    .right-panel-inner {
+      padding: 12px 10px;
+      height: 100%;
+    }
+
+    /* ── Feed panel ── */
+    .feed-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      position: relative;
+    }
+    /* Top progress bar shown while refreshing — kept subtle (stale-while-revalidate) */
+    .feed-panel.is-refreshing::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg,
+        transparent 0%,
+        rgba(98,114,255,.6) 50%,
+        transparent 100%);
+      background-size: 40% 100%;
+      background-repeat: no-repeat;
+      animation: feedProgress 1.1s ease-in-out infinite;
+      z-index: 2; pointer-events: none;
+    }
+    @keyframes feedProgress {
+      0%   { background-position: -40% 0; }
+      100% { background-position: 140% 0; }
+    }
+    /* Gentle fade on the stale list while refreshing — disabled if user prefers reduced motion */
+    .feed-list.is-refreshing { opacity: .85; transition: opacity .18s ease; }
+    @media (prefers-reduced-motion: reduce) {
+      .feed-panel.is-refreshing::before { animation: none; opacity: .5; }
+      .feed-list.is-refreshing { opacity: 1; }
+    }
+    .feed-panel-head {
+      padding: 14px 16px 12px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(98,114,255,.03), transparent);
+    }
+    .feed-panel-top {
+      display: flex; align-items: center; gap: 12px; margin-bottom: 11px;
+    }
+    .feed-panel-icon {
+      width: 32px; height: 32px; border-radius: 9px;
+      background: var(--accent-glow);
+      border: 1px solid rgba(98,114,255,.28);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px; flex-shrink: 0;
+    }
+    .feed-panel-title {
+      font-size: 14.5px; font-weight: 800; color: var(--text);
+      letter-spacing: -.2px; display: flex; align-items: center; gap: 8px;
+    }
+    .feed-panel-count {
+      font-family: 'JetBrains Mono', monospace; font-size: 10px;
+      color: var(--accent2); background: var(--accent-glow);
+      border: 1px solid rgba(98,114,255,.22); border-radius: 5px;
+      padding: 2px 7px; font-weight: 700;
+    }
+    .feed-panel-sub {
+      font-size: 10.5px; color: var(--dim); margin-top: 3px;
+      font-weight: 500; letter-spacing: .1px;
+    }
+    .feed-panel-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+    .feed-search {
+      flex: 1; max-width: 280px;
+      position: relative;
+    }
+    .feed-search input {
+      width: 100%; padding: 7px 10px 7px 30px;
+      background: rgba(255,255,255,.025); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); font-size: 12px;
+      font-weight: 500;
+      font-family: 'Inter', sans-serif;
+      transition: all .15s;
+    }
+    .feed-search input::placeholder { color: var(--dim); }
+    .feed-search input:hover { border-color: var(--border2); }
+    .feed-search input:focus {
+      outline: none; border-color: rgba(98,114,255,.3);
+      background: var(--accent-glow);
+      box-shadow: 0 0 0 1px rgba(98,114,255,.2);
+    }
+    .feed-search-icon {
+      position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+      font-size: 11px; color: var(--dim); pointer-events: none;
+    }
+
+    /* ── Feed filter chips (canonical: matches seg-btn style) ── */
+    .feed-filters-bar {
+      display: flex; gap: 5px; flex-wrap: wrap; align-items: center;
+      background: rgba(255,255,255,.02); border: 1px solid var(--border);
+      border-radius: 9px; padding: 3px;
+    }
+    .feed-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 5px 10px; border-radius: 6px;
+      background: transparent; border: none;
+      color: var(--muted); font-size: 11px; font-weight: 600;
+      cursor: pointer; transition: all .15s;
+      font-family: inherit;
+    }
+    .feed-chip:hover { color: var(--text2); background: rgba(255,255,255,.03); }
+    .feed-chip.active {
+      background: var(--accent-glow);
+      color: var(--accent2);
+      box-shadow: 0 0 0 1px rgba(98,114,255,.2);
+    }
+    .feed-chip .chip-count {
+      font-family: 'JetBrains Mono', monospace; font-size: 9.5px;
+      color: var(--dim); margin-left: 2px; font-weight: 700;
+    }
+    .feed-chip.active .chip-count { color: var(--accent2); opacity: .9; }
+
+    /* ── Feedback bar (like / dislike) — same language as seg-group ── */
+    .fb-bar {
+      display: inline-flex; gap: 3px;
+      background: rgba(255,255,255,.025); border: 1px solid var(--border);
+      border-radius: 8px; padding: 2px;
+      align-items: center;
+    }
+    .fb-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      background: transparent; border: none; cursor: pointer;
+      padding: 4px 9px; border-radius: 6px;
+      font-family: inherit; font-size: 11px; font-weight: 700;
+      color: var(--muted); transition: all .15s;
+      line-height: 1;
+    }
+    .fb-btn .fb-ico {
+      font-size: 12px; filter: saturate(.75) brightness(.95);
+      transition: filter .15s, transform .15s;
+    }
+    .fb-btn .fb-count {
+      font-family: 'JetBrains Mono', monospace; font-size: 10.5px;
+      font-weight: 700; min-width: 10px; text-align: center;
+    }
+    .fb-btn:hover:not(:disabled) {
+      background: rgba(255,255,255,.04); color: var(--text2);
+    }
+    .fb-btn:hover:not(:disabled) .fb-ico { filter: saturate(1) brightness(1); transform: scale(1.08); }
+    .fb-btn:active:not(:disabled) { transform: translateY(1px); }
+    .fb-btn:disabled { opacity: .6; cursor: wait; }
+
+    .fb-like.active {
+      background: rgba(0,212,170,.12);
+      color: var(--green2);
+      box-shadow: 0 0 0 1px rgba(0,212,170,.25);
+    }
+    .fb-like.active .fb-ico { filter: saturate(1.1) brightness(1.05); }
+
+    .fb-dislike.active {
+      background: rgba(255,69,96,.1);
+      color: var(--red2);
+      box-shadow: 0 0 0 1px rgba(255,69,96,.22);
+    }
+    .fb-dislike.active .fb-ico { filter: saturate(1.1) brightness(1.05); }
+
+    /* Modal variant — larger, full-width */
+    .fb-bar-modal {
+      display: flex; gap: 4px; padding: 3px;
+      border-radius: 9px;
+    }
+    .fb-bar-modal .fb-btn {
+      flex: 1; padding: 7px 12px; font-size: 12px; gap: 7px;
+      justify-content: center;
+    }
+    .fb-bar-modal .fb-btn .fb-ico { font-size: 14px; }
+    .fb-bar-modal .fb-btn .fb-count { font-size: 12px; }
+
+    /* ── Feed list / cards ── */
+    .feed-list {
+      display: flex; flex-direction: column; gap: 8px;
+      padding: 10px;
+    }
+    .feed-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      transition: all .15s;
+      cursor: pointer;
+      position: relative;
+    }
+    .feed-card:hover {
+      border-color: var(--border3);
+      background: var(--card2);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(0,0,0,.2);
+    }
+    .feed-card-head {
+      display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px;
+    }
+    .feed-avatar {
+      width: 38px; height: 38px; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; flex-shrink: 0; font-weight: 800;
+      border: 1px solid var(--border2);
+    }
+    .feed-avatar.reddit  { background: linear-gradient(135deg, #ff6a33, #ff4500); color: white; }
+    .feed-avatar.twitter { background: linear-gradient(135deg, #1a1a1a, #000); color: white; }
+    .feed-avatar.tiktok  { background: linear-gradient(135deg, #25f4ee, #fe2c55); color: white; }
+    .feed-avatar.google_trends { background: linear-gradient(135deg, #4285f4, #34a853); color: white; }
+    .feed-avatar.default { background: var(--card3); color: var(--muted); }
+
+    .feed-meta { flex: 1; min-width: 0; }
+    .feed-user-row {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; line-height: 1.2; margin-bottom: 2px;
+      flex-wrap: wrap;
+    }
+    .feed-user { font-weight: 700; color: var(--text); }
+    .feed-handle { color: var(--dim); font-size: 11px; }
+    .feed-dot { width: 2px; height: 2px; background: var(--dim); border-radius: 50%; flex-shrink: 0; }
+    .feed-time { color: var(--dim); font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    .feed-badges { display: flex; gap: 5px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+
+    .feed-title {
+      font-size: 14px; font-weight: 700; color: var(--text);
+      line-height: 1.35; letter-spacing: -.1px; margin: 2px 0 4px;
+      word-break: break-word;
+    }
+    .feed-orig {
+      font-size: 11px; color: var(--dim); font-style: italic;
+      margin-bottom: 6px; line-height: 1.4;
+    }
+    .feed-desc {
+      font-size: 12px; color: var(--text2); line-height: 1.5;
+      margin-bottom: 8px;
+    }
+    .feed-desc.pump {
+      background: linear-gradient(90deg, rgba(255,159,67,.06), transparent);
+      border-left: 2px solid var(--orange);
+      padding: 6px 10px; border-radius: 4px;
+      color: var(--orange); font-weight: 500;
+    }
+
+    .feed-image-wrap {
+      border-radius: 8px; overflow: hidden;
+      margin: 8px 0 10px; max-height: 260px;
+      background: var(--card3); border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .feed-image {
+      width: 100%; height: auto; max-height: 260px; object-fit: cover; display: block;
+    }
+    .feed-image-placeholder {
+      height: 140px; width: 100%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 36px; opacity: .35;
+      background: linear-gradient(135deg, var(--card2), var(--card3));
+    }
+
+    /* ── Feed score strip ── */
+    .feed-scores {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+      padding: 8px 10px; margin: 6px 0 10px;
+      background: rgba(0,0,0,.18); border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .feed-score { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .feed-score-top {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .6px;
+    }
+    .feed-score-label { color: var(--muted); display: flex; align-items: center; gap: 4px; }
+    .feed-score-num { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 800; }
+    .feed-score-track {
+      height: 4px; background: rgba(255,255,255,.05); border-radius: 2px; overflow: hidden;
+    }
+    .feed-score-fill { height: 100%; border-radius: 2px; transition: width .4s ease; }
+
+    /* ── Feed actions ── */
+    .feed-actions {
+      display: flex; gap: 6px; flex-wrap: wrap; padding-top: 2px;
+    }
+    .feed-action-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 5px 10px; border-radius: 7px;
+      background: rgba(255,255,255,.03); border: 1px solid var(--border2);
+      color: var(--muted); font-size: 11px; font-weight: 600;
+      cursor: pointer; text-decoration: none;
+      transition: all .12s; font-family: inherit;
+    }
+    .feed-action-btn:hover {
+      background: rgba(255,255,255,.06); color: var(--text);
+      border-color: var(--border3); transform: translateY(-1px);
+    }
+    .feed-action-btn.primary {
+      background: linear-gradient(135deg, rgba(98,114,255,.15), rgba(98,114,255,.05));
+      border-color: rgba(98,114,255,.3); color: var(--accent2);
+    }
+    .feed-action-btn.primary:hover {
+      background: linear-gradient(135deg, rgba(98,114,255,.25), rgba(98,114,255,.1));
+      border-color: var(--accent);
+    }
+    .feed-action-btn.tg { color: #3b9dff; border-color: rgba(59,157,255,.25); }
+    .feed-action-btn.tg:hover { background: rgba(59,157,255,.1); border-color: rgba(59,157,255,.5); }
+    .feed-action-btn.details-hint { margin-left: auto; color: var(--dim); font-family: 'JetBrains Mono', monospace; }
+
+    .empty-feed {
+      padding: 60px 20px; text-align: center;
+      color: var(--dim);
+    }
+    .empty-feed-icon { font-size: 44px; opacity: .3; margin-bottom: 12px; }
+    .empty-feed-text { font-size: 13px; }
+    .empty-feed-sub { font-size: 11px; margin-top: 4px; opacity: .7; }
+
+    /* ── Right panel ── */
+    .right-panel {
+      display: flex; flex-direction: column;
+    }
+    .right-sep {
+      height: 1px;
+      background: rgba(255,255,255,.07);
+      margin: 14px 4px;
+    }
+    .right-section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .right-section-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 12px 9px;
+      border-bottom: 1px solid var(--border);
+    }
+    .right-section-title {
+      font-size: 10px; font-weight: 700; color: var(--accent);
+      letter-spacing: 1.3px; text-transform: uppercase;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .right-section-count {
+      margin-left: auto;
+      font-family: 'JetBrains Mono', monospace; font-size: 9.5px;
+      color: var(--muted); background: rgba(255,255,255,.03);
+      border: 1px solid var(--border); border-radius: 5px;
+      padding: 2px 7px; font-weight: 700; letter-spacing: 0;
+      text-transform: none;
+    }
+    .right-section-body { padding: 6px 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+
+    /* ── Top item (Top Narratives) ── */
+    .top-item {
+      display: flex; align-items: center; gap: 9px;
+      padding: 7px 8px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all .15s;
+      border: 1px solid transparent;
+    }
+    .top-item:hover {
+      background: rgba(255,255,255,.03);
+      border-color: var(--border);
+      transform: translateX(1px);
+    }
+    .top-item-rank {
+      width: 22px; height: 22px; border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 800;
+      background: rgba(255,255,255,.04); color: var(--muted);
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .top-item-rank.top-1 { background: linear-gradient(135deg, #ffd93d, #f59e0b); color: #1a1200; border-color: rgba(245,158,11,.4); }
+    .top-item-rank.top-2 { background: linear-gradient(135deg, #cbd5e1, #94a3b8); color: #1a1a2a; border-color: rgba(148,163,184,.4); }
+    .top-item-rank.top-3 { background: linear-gradient(135deg, #d97706, #92400e); color: #fff; border-color: rgba(217,119,6,.4); }
+    .top-item-info { flex: 1; min-width: 0; }
+    .top-item-title {
+      font-size: 12px; font-weight: 600; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      line-height: 1.3; letter-spacing: -.1px;
+    }
+    .top-item-meta {
+      display: flex; align-items: center; gap: 5px;
+      font-size: 10px; color: var(--dim); margin-top: 3px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .top-item-score {
+      font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700;
+      color: var(--accent2); flex-shrink: 0;
+      padding: 2px 7px; background: var(--accent-glow);
+      border-radius: 5px; border: 1px solid rgba(98,114,255,.22);
+      min-width: 28px; text-align: center;
+    }
+
+    /* ── Pulse rows (Source Pulse) — mirrors .source-item ── */
+    .pulse-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 9px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all .15s;
+      border: 1px solid transparent;
+    }
+    .pulse-row:hover {
+      background: rgba(255,255,255,.03);
+      border-color: var(--border);
+      transform: translateX(1px);
+    }
+    .pulse-row.off { opacity: .5; }
+    .pulse-row.off .pulse-icon { filter: grayscale(1); }
+    .pulse-row.off .pulse-count { opacity: .5; }
+    .pulse-icon {
+      width: 22px; height: 22px; border-radius: 6px;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 12px; flex-shrink: 0;
+      background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.05);
+      transition: all .18s;
+    }
+    .pulse-row[data-src="reddit"] .pulse-icon        { background: rgba(255,88,0,.14); border-color: rgba(255,88,0,.25); }
+    .pulse-row[data-src="google_trends"] .pulse-icon { background: rgba(66,133,244,.14); border-color: rgba(66,133,244,.28); }
+    .pulse-row[data-src="twitter"] .pulse-icon       { background: rgba(255,255,255,.07); border-color: rgba(255,255,255,.12); }
+    .pulse-row[data-src="tiktok"] .pulse-icon        { background: rgba(255,0,80,.14); border-color: rgba(255,0,80,.25); }
+    .pulse-name {
+      flex: 1; font-size: 12px; font-weight: 600; color: var(--text2);
+      letter-spacing: -.1px;
+    }
+    .pulse-count {
+      font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 600;
+      color: var(--text2); background: rgba(255,255,255,.04);
+      padding: 2px 7px; border-radius: 5px; min-width: 26px; text-align: center;
+      border: 1px solid var(--border);
+    }
+    .pulse-count.hot { color: var(--accent2); background: var(--accent-glow); border-color: rgba(98,114,255,.22); }
+
+    /* ── Activity summary ── */
+    .activity-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+      padding: 2px;
+    }
+    .activity-cell {
+      background: rgba(255,255,255,.025);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 10px;
+      display: flex; flex-direction: column; gap: 4px;
+      transition: all .15s;
+    }
+    .activity-cell:hover { background: rgba(255,255,255,.04); border-color: var(--border2); }
+    .activity-cell.full { grid-column: 1 / -1; }
+    .activity-label {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 1.2px;
+      color: var(--muted); font-weight: 700;
+    }
+    .activity-val {
+      font-family: 'JetBrains Mono', monospace; font-size: 17px;
+      font-weight: 800; color: var(--text); letter-spacing: -.5px;
+    }
+    .activity-val.accent { color: var(--accent2); }
+    .activity-val.green  { color: var(--green2); }
+    .activity-val.orange { color: var(--orange); }
+    .activity-sub { font-size: 10px; color: var(--dim); font-weight: 500; }
+
+    /* ── Category mini-legend in right panel ── */
+    .cat-row {
+      display: flex; align-items: center; gap: 7px;
+      padding: 4px 6px; border-radius: 6px;
+      transition: all .12s;
+    }
+    .cat-row:hover { background: var(--card2); }
+    .cat-bar-wrap {
+      flex: 1; height: 4px; background: rgba(255,255,255,.05);
+      border-radius: 2px; overflow: hidden;
+    }
+    .cat-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 2px; }
+    .cat-name { font-size: 11px; color: var(--text2); min-width: 74px; display: flex; gap: 5px; align-items: center; }
+    .cat-count { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--dim); min-width: 20px; text-align: right; }
+
+    /* ── Responsive grid collapses ── */
+    @media (max-width: 1280px) {
+      .dashboard-grid { grid-template-columns: 210px 1fr; }
+      .dashboard-grid > .right-panel { display: none; }
+    }
+    @media (max-width: 960px) {
+      .dashboard-grid { grid-template-columns: 1fr; padding: 10px; }
+      .dashboard-grid > .sidebar { display: none; }
+    }
+
+    /* ── Bottom status bar ── */
+    .statusbar {
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 300;
+      height: 28px; background: rgba(8,8,15,.96); border-top: 1px solid var(--border);
+      backdrop-filter: blur(10px); display: flex; align-items: center; gap: 14px;
+      padding: 0 14px; font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--dim);
+    }
+    .statusbar-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green2); box-shadow: 0 0 5px var(--green); animation: pulse 2.5s ease-in-out infinite; flex-shrink: 0; }
+    .statusbar-dot.paused { background: var(--red2); box-shadow: none; animation: none; }
+    .statusbar-item { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .statusbar-sep { width: 1px; height: 12px; background: var(--border2); }
+    .statusbar-hint { margin-left: auto; color: var(--dim); opacity: .5; }
 
     /* ── Responsive ── */
     @media (max-width: 1100px) { .card-meta { flex-wrap: wrap; } }
     @media (max-width: 900px) {
       .sidebar { display: none; }
-      .stat-val { font-size: 22px; }
-      .card-header { flex-direction: column; align-items: flex-start; gap: 8px; }
+      .stats-grid, .stats-top-grid { grid-template-columns: 1fr; }
+      .stat-val { font-size: 20px; }
+      .card-header { flex-direction: column; align-items: flex-start; gap: 6px; }
       .card-meta { width: 100%; }
-      .card-stats { gap: 10px; }
+      .card-stats { gap: 8px; }
       .card-footer { flex-wrap: wrap; }
-      .trend-link { flex: 1; justify-content: center; min-width: 120px; }
+      .trend-link { flex: 1; justify-content: center; min-width: 100px; }
       .modal-drawer { width: 100vw; }
     }
     @media (max-width: 600px) {
-      .trends-list { padding: 8px; gap: 8px; }
-      .card-header { padding: 10px 14px 8px; }
-      .card-body { padding: 10px 14px; }
-      .card-footer { padding: 10px 14px; }
-      .card-stats { flex-direction: column; gap: 12px; }
-      .meme-num { font-size: 16px; }
+      .hero-main, .hero-side, .stats-block { padding: 12px; }
+      .trends-list { padding: 6px; gap: 4px; }
+      .card-header { padding: 9px 12px 7px; }
+      .card-body { padding: 9px 12px; }
+      .card-footer { padding: 7px 12px; }
+      .card-stats { flex-direction: column; gap: 10px; }
+      .meme-num { font-size: 15px; }
     }
   </style>
 </head>
@@ -1393,9 +1916,28 @@ if (!API_KEY) {
     localStorage.setItem('ts_api_key', API_KEY);
   }
 }
+// Stable per-browser user id for feedback attribution.
+// Prefixed "dashboard:" so it can never collide with real Telegram chat_ids.
+let USER_ID = '';
+try {
+  USER_ID = localStorage.getItem('ts_user_id') || '';
+  if (!USER_ID) {
+    const rnd = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    USER_ID = 'dashboard:' + rnd;
+    localStorage.setItem('ts_user_id', USER_ID);
+  }
+} catch (e) { USER_ID = 'dashboard:anon'; }
+
 const api = (path, opts = {}) =>
-  fetch('/api' + path, { headers: { 'X-API-Key': API_KEY, 'Content-Type': 'application/json' }, ...opts })
-    .then(r => r.json());
+  fetch('/api' + path, {
+    headers: {
+      'X-API-Key': API_KEY,
+      'X-User-Id': USER_ID,
+      'Content-Type': 'application/json'
+    },
+    ...opts
+  })
+    .then(r => r.json().then(data => { if (!r.ok) throw new Error(data && data.error ? data.error : ('HTTP ' + r.status)); return data; }));
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const SOURCE_ICONS  = { reddit: '🟠', google_trends: '🔍', twitter: '𝕏', tiktok: '🎵' };
@@ -1529,7 +2071,7 @@ function MarketStageBadge({ stage }) {
   }, m.icon + ' ' + m.label);
 }
 
-// ── ImageThumb ─────────────────────────────────────────────────────────────────
+// ── ImageThumb (legacy — still used in modal-equivalent contexts) ────────────
 function ImageThumb({ trend, size = 80 }) {
   const [imgUrl, setImgUrl] = useState(trend.imageUrl || null);
   const [tried, setTried] = useState(!!trend.imageUrl);
@@ -1556,31 +2098,129 @@ function ImageThumb({ trend, size = 80 }) {
   );
 }
 
-// ── TrendCard ──────────────────────────────────────────────────────────────────
-function TrendCard({ trend, onOpen, onCopy }) {
+// ── FeedImage — inline image for feed cards (lazy-fetch with placeholder) ────
+function FeedImage({ trend }) {
+  const [imgUrl, setImgUrl] = useState(trend.imageUrl || null);
+  const [tried,  setTried]  = useState(!!trend.imageUrl);
+  const [failed, setFailed] = useState(false);
+  const srcIco = SOURCE_ICONS[trend.source] || '📡';
+
+  useEffect(() => {
+    if (!tried && !imgUrl && trend.url) {
+      setTried(true);
+      fetch('/api/preview?url=' + encodeURIComponent(trend.url), { headers: { 'X-API-Key': API_KEY } })
+        .then(r => r.json())
+        .then(d => { if (d.imageUrl) setImgUrl(d.imageUrl); else setFailed(true); })
+        .catch(() => setFailed(true));
+    }
+  }, [trend.url]);
+
+  if (failed || (!imgUrl && tried)) return null;
+  if (!imgUrl) return null;
+
+  return h('div', { className: 'feed-image-wrap' },
+    h('img', {
+      className: 'feed-image',
+      src: imgUrl, alt: '',
+      onError: () => { setImgUrl(null); setFailed(true); },
+      loading: 'lazy',
+    })
+  );
+}
+
+// ── FeedCard — new social-feed-style narrative card ──────────────────────────
+// ── Feedback bar (👍 / 👎) — canonical pill style ────────────────────────────
+function FeedbackBar({ trend, variant }) {
+  const initial = trend.feedback || { likes: 0, dislikes: 0, userVote: 0 };
+  const [likes,    setLikes]    = useState(initial.likes    || 0);
+  const [dislikes, setDislikes] = useState(initial.dislikes || 0);
+  const [userVote, setUserVote] = useState(initial.userVote || 0);
+  const [busy, setBusy] = useState(false);
+
+  // Resync when the trend prop changes (e.g. list refresh)
+  useEffect(() => {
+    const fb = trend.feedback || { likes: 0, dislikes: 0, userVote: 0 };
+    setLikes(fb.likes || 0);
+    setDislikes(fb.dislikes || 0);
+    setUserVote(fb.userVote || 0);
+  }, [trend.id, trend.feedback && trend.feedback.likes, trend.feedback && trend.feedback.dislikes, trend.feedback && trend.feedback.userVote]);
+
+  const vote = async (next) => {
+    if (busy) return;
+    // Optimistic update
+    const prev = { likes, dislikes, userVote };
+    const willToggleOff = prev.userVote === next;
+    const finalVote = willToggleOff ? 0 : next;
+    let nextLikes = likes, nextDislikes = dislikes;
+    if (prev.userVote === 1) nextLikes = Math.max(0, nextLikes - 1);
+    if (prev.userVote === -1) nextDislikes = Math.max(0, nextDislikes - 1);
+    if (finalVote === 1) nextLikes += 1;
+    if (finalVote === -1) nextDislikes += 1;
+    setLikes(nextLikes); setDislikes(nextDislikes); setUserVote(finalVote);
+    setBusy(true);
+    try {
+      const res = await api('/trends/' + trend.id + '/feedback', {
+        method: 'POST',
+        body: JSON.stringify({ vote: next }),
+      });
+      setLikes(res.likes || 0);
+      setDislikes(res.dislikes || 0);
+      setUserVote(res.userVote || 0);
+      // Keep trend.feedback cache in sync (affects resync on unrelated updates)
+      if (trend.feedback) {
+        trend.feedback.likes = res.likes || 0;
+        trend.feedback.dislikes = res.dislikes || 0;
+        trend.feedback.userVote = res.userVote || 0;
+      }
+    } catch (err) {
+      // Revert on failure
+      setLikes(prev.likes); setDislikes(prev.dislikes); setUserVote(prev.userVote);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return h('div', {
+    className: 'fb-bar' + (variant === 'modal' ? ' fb-bar-modal' : ''),
+    onClick: e => e.stopPropagation()
+  },
+    h('button', {
+      className: 'fb-btn fb-like' + (userVote === 1 ? ' active' : ''),
+      onClick: e => { e.stopPropagation(); vote(1); },
+      disabled: busy,
+      title: userVote === 1 ? 'Убрать лайк' : 'Лайк'
+    },
+      h('span', { className: 'fb-ico' }, '👍'),
+      h('span', { className: 'fb-count' }, likes)
+    ),
+    h('button', {
+      className: 'fb-btn fb-dislike' + (userVote === -1 ? ' active' : ''),
+      onClick: e => { e.stopPropagation(); vote(-1); },
+      disabled: busy,
+      title: userVote === -1 ? 'Убрать дизлайк' : 'Дизлайк'
+    },
+      h('span', { className: 'fb-ico' }, '👎'),
+      h('span', { className: 'fb-count' }, dislikes)
+    )
+  );
+}
+
+function FeedCard({ trend, onOpen, onCopy }) {
   const catCls = CAT_CLS[trend.category] || 'cat-other';
   const catIco = CAT_ICONS[trend.category] || '📌';
   const srcIco = SOURCE_ICONS[trend.source] || '📡';
   const srcLbl = SOURCE_LABELS[trend.source] || trend.source;
-  const linkLabel = SOURCE_LINK_LABELS[trend.source] || 'Источник';
-  const srcLinkCls = trend.source === 'reddit' ? ' trend-link-reddit'
-    : trend.source === 'twitter' ? ' trend-link-twitter'
-    : trend.source === 'tiktok' ? ' trend-link-tiktok' : '';
+  const linkLabel = SOURCE_LINK_LABELS[trend.source] || 'Open';
 
-  const phase       = trend.narrativePhase || null;
-  const emergence   = trend.emergenceScore || 0;
-  const adoption    = trend.adoptionScore  || trend.memePotential || 0;
-  const velocity    = trend.velocity       || 0;
-  const platforms   = trend.uniquePlatforms || 1;
-  const phaseMeta   = phase ? (PHASE_META[phase] || PHASE_META.early) : null;
+  const phase     = trend.narrativePhase || null;
+  const emergence = trend.emergenceScore || 0;
+  const adoption  = trend.adoptionScore  || trend.memePotential || 0;
+  const velocity  = trend.velocity       || 0;
+  const platforms = trend.uniquePlatforms || 1;
 
-  // Compact meta: "2 плат · 0.8/ч ↑"
-  const metaParts = [];
-  if (platforms > 1) metaParts.push(platforms + ' плат');
-  const vel = fmtVelocity(velocity);
-  if (vel) metaParts.push(vel);
-  if (trend.timesSeen > 1) metaParts.push(trend.timesSeen + 'x видели');
-  const metaStr = metaParts.join(' · ');
+  const handle = '@' + (trend.source === 'google_trends' ? 'google'
+                    : trend.source === 'twitter' ? 'twitter_x'
+                    : trend.source || 'source');
 
   const descText = trend.whyItWillPump || trend.aiExplanation || '';
   const isPump = !!trend.whyItWillPump;
@@ -1590,69 +2230,207 @@ function TrendCard({ trend, onOpen, onCopy }) {
     onOpen && onOpen(trend);
   };
 
-  // Left phase accent border color
-  const accentColor = phaseMeta ? phaseMeta.color : 'var(--border)';
+  const emergenceColor = barColor(emergence);
+  const adoptionColor  = barColor(adoption);
 
-  return h('div', {
-    className: 'trend-card',
-    onClick: handleClick,
-    style: { borderLeft: '3px solid ' + accentColor }
-  },
-    // Header: phase badge + market stage badge + title + meta
-    h('div', { className: 'card-header' },
-      phase ? h(PhaseBadge, { phase }) : null,
-      h(MarketStageBadge, { stage: trend.marketStage }), // [MARKET_STAGE] remove to disable
-      h('div', { className: 'card-title', style: { flex: 1 } }, trend.title),
-      h('div', { className: 'card-meta' },
-        h('span', { className: 'badge ' + catCls }, catIco + ' ' + (trend.category || 'other')),
-        h('div', { className: 'source-chip' }, srcIco, ' ', srcLbl),
-        h('span', { className: 'time-cell' }, fmtTime(trend.firstSeen)),
-        h('button', {
-          className: 'card-copy-btn',
-          onClick: e => { e.stopPropagation(); onCopy && onCopy(trend.title); },
-          title: 'Копировать заголовок'
-        }, '📋')
+  const avatarCls = SOURCE_ICONS[trend.source] ? (trend.source) : 'default';
+
+  // meta parts for sub row
+  const metaParts = [];
+  if (platforms > 1) metaParts.push(platforms + 'p');
+  const vel = fmtVelocity(velocity);
+  if (vel) metaParts.push(vel);
+  if (trend.timesSeen > 1) metaParts.push(trend.timesSeen + 'x');
+
+  return h('div', { className: 'feed-card', onClick: handleClick },
+    h('div', { className: 'feed-card-head' },
+      h('div', { className: 'feed-avatar ' + avatarCls }, srcIco),
+      h('div', { className: 'feed-meta' },
+        h('div', { className: 'feed-user-row' },
+          h('span', { className: 'feed-user' }, srcLbl),
+          h('span', { className: 'feed-handle' }, handle),
+          h('span', { className: 'feed-dot' }),
+          h('span', { className: 'feed-time' }, fmtTime(trend.firstSeen)),
+          h('div', { className: 'feed-badges' },
+            phase ? h(PhaseBadge, { phase }) : null,
+            h(MarketStageBadge, { stage: trend.marketStage }),
+            h('span', { className: 'badge ' + catCls, title: 'Категория' }, catIco + ' ' + (trend.category || 'other'))
+          )
+        ),
+        h('div', { className: 'feed-title' }, trend.title),
+        trend.originalTitle && trend.originalTitle !== trend.title
+          ? h('div', { className: 'feed-orig' }, trend.originalTitle)
+          : null
       )
     ),
 
-    // Body
-    h('div', { className: 'card-body', style: { display: 'flex', gap: 14 } },
-      h('div', { style: { flex: 1, minWidth: 0 } },
-        trend.originalTitle && trend.originalTitle !== trend.title
-          ? h('div', { className: 'card-orig' }, trend.originalTitle)
-          : null,
-        descText
-          ? h('div', { className: 'card-desc' + (isPump ? ' pump' : '') }, isPump ? '⚡ ' + descText : descText)
-          : null,
+    descText
+      ? h('div', { className: 'feed-desc' + (isPump ? ' pump' : '') }, isPump ? '⚡ ' + descText : descText)
+      : null,
 
-        // Two bars: Emergence + Adoption
-        h('div', { className: 'card-score-bars' },
-          h(ScoreBar, {
-            label: '🌊 Emergence',
-            value: emergence,
-            sub: metaStr || null,
-          }),
-          h(ScoreBar, {
-            label: '💊 Adoption',
-            value: adoption,
-            sub: LIFESPAN_LABELS[trend.predictedLifespan] || null,
-          })
+    h(FeedImage, { trend }),
+
+    // Score strip
+    h('div', { className: 'feed-scores' },
+      h('div', { className: 'feed-score' },
+        h('div', { className: 'feed-score-top' },
+          h('span', { className: 'feed-score-label' }, '🌊 Emergence'),
+          h('span', { className: 'feed-score-num', style: { color: emergenceColor } }, emergence)
+        ),
+        h('div', { className: 'feed-score-track' },
+          h('div', { className: 'feed-score-fill', style: { width: Math.min(emergence, 100) + '%', background: emergenceColor } })
         )
       ),
-      h(ImageThumb, { trend, size: 76 })
+      h('div', { className: 'feed-score' },
+        h('div', { className: 'feed-score-top' },
+          h('span', { className: 'feed-score-label' }, '💊 Adoption'),
+          h('span', { className: 'feed-score-num', style: { color: adoptionColor } }, adoption)
+        ),
+        h('div', { className: 'feed-score-track' },
+          h('div', { className: 'feed-score-fill', style: { width: Math.min(adoption, 100) + '%', background: adoptionColor } })
+        )
+      )
     ),
 
-    // Footer
-    (trend.url || trend.tgMessageUrl)
-      ? h('div', { className: 'card-footer' },
-          trend.url ? h('a', { className: 'trend-link' + srcLinkCls, href: trend.url, target: '_blank', rel: 'noopener', onClick: e => e.stopPropagation() }, linkLabel + ' →') : null,
-          trend.tgMessageUrl ? h('a', { className: 'trend-link trend-link-tg', href: trend.tgMessageUrl, target: '_blank', rel: 'noopener', onClick: e => e.stopPropagation() }, '📨 Telegram') : null,
-          h('span', { style: { marginLeft: 'auto', fontSize: 11, color: 'var(--dim)' } }, '↗ детали')
-        )
-      : h('div', { className: 'card-footer' },
-          h('span', { style: { fontSize: 11, color: 'var(--dim)' } }, '↗ детали')
-        )
+    // Actions row
+    h('div', { className: 'feed-actions' },
+      h('button', {
+        className: 'feed-action-btn primary',
+        onClick: e => { e.stopPropagation(); onOpen && onOpen(trend); }
+      }, '📖 Details'),
+      trend.url ? h('a', {
+        className: 'feed-action-btn',
+        href: trend.url, target: '_blank', rel: 'noopener',
+        onClick: e => e.stopPropagation()
+      }, '↗ ' + linkLabel) : null,
+      trend.tgMessageUrl ? h('a', {
+        className: 'feed-action-btn tg',
+        href: trend.tgMessageUrl, target: '_blank', rel: 'noopener',
+        onClick: e => e.stopPropagation()
+      }, '📨 TG') : null,
+      h('button', {
+        className: 'feed-action-btn',
+        onClick: e => { e.stopPropagation(); onCopy && onCopy(trend.title); },
+        title: 'Copy title'
+      }, '📋'),
+      h(FeedbackBar, { trend }),
+      metaParts.length
+        ? h('span', { className: 'feed-action-btn details-hint', style: { cursor: 'default' } }, metaParts.join(' · '))
+        : null
+    )
   );
+}
+
+// Backward-compat alias so existing JSX keeps working if any remains
+const TrendCard = FeedCard;
+
+// ── RightPanel — AIO Feeds-style column with Top narratives / Pulse / Activity ─
+function RightPanel({ stats, sources, allSourceStats, hours, hiddenSources, onOpenTrend, onToggleSource }) {
+  // Top narratives from server-side stats (real top by adoption for the full window)
+  // stats.topTrends is populated by /api/stats — same data as /top in TG bot
+  const topTrends = (stats && stats.topTrends ? stats.topTrends : []).slice(0, 5);
+
+  const topCategories = (stats && stats.byCategory ? stats.byCategory : []).slice(0, 5);
+  const maxCatCount = topCategories.length ? Math.max(...topCategories.map(c => c.count)) : 1;
+
+  const totalSignals = stats ? stats.total || 0 : 0;
+  const totalAlerts  = stats ? stats.alerts || 0 : 0;
+  const avgScore     = stats ? stats.avgScore || 0 : 0;
+  const hidden = hiddenSources || new Set();
+  const activeSources = (sources || []).filter(s => !hidden.has(s.source)).length;
+
+  return h('div', { className: 'right-panel-sticky' },
+   h('div', { className: 'right-panel' },  // inner scroll container via right-panel-inner wrapper below
+    h('div', { className: 'right-panel-inner' },
+
+    // ── Top Narratives ──
+    h('div', { className: 'right-section' },
+      h('div', { className: 'right-section-head' },
+        h('span', { className: 'right-section-title' }, '🏆 Top Narratives'),
+        h('span', { className: 'right-section-count' }, hours + 'h · top ' + topTrends.length)
+      ),
+      h('div', { className: 'right-section-body' },
+        topTrends.length
+          ? topTrends.map((t, i) => {
+              const adoptionVal = t.adoptionScore || t.memePotential || 0;
+              return h('div', { key: t.id, className: 'top-item', onClick: () => onOpenTrend && onOpenTrend(t) },
+                h('div', { className: 'top-item-rank' + (i < 3 ? ' top-' + (i + 1) : '') }, i + 1),
+                h('div', { className: 'top-item-info' },
+                  h('div', { className: 'top-item-title', title: t.title }, t.title),
+                  h('div', { className: 'top-item-meta' },
+                    h('span', null, SOURCE_ICONS[t.source] || '📡'),
+                    t.narrativePhase ? h('span', null, PHASE_DOT[t.narrativePhase] + ' ' + (PHASE_META[t.narrativePhase] || {}).label) : null,
+                    h('span', null, (t.score || t.virality || 0) + ' vrl')
+                  )
+                ),
+                h('div', { className: 'top-item-score' }, adoptionVal)
+              );
+            })
+          : h('div', { className: 'empty-feed', style: { padding: '22px 10px' } },
+              h('div', { className: 'empty-feed-icon' }, '📭'),
+              h('div', { className: 'empty-feed-text' }, 'No signals yet')
+            )
+      )
+    ),
+
+    h('div', { className: 'right-sep' }),
+
+    // ── Source Pulse ──
+    h('div', { className: 'right-section' },
+      h('div', { className: 'right-section-head' },
+        h('span', { className: 'right-section-title' }, '📡 Source Pulse'),
+        h('span', { className: 'right-section-count' }, activeSources + '/' + (sources || []).length + ' live')
+      ),
+      h('div', { className: 'right-section-body' },
+        (allSourceStats || []).map(row => {
+          const visible = !hidden.has(row.source);
+          const cnt = row.count || 0;
+          return h('div', {
+            key: row.source,
+            'data-src': row.source,
+            className: 'pulse-row' + (visible ? '' : ' off'),
+            onClick: () => onToggleSource && onToggleSource(row.source),
+            title: visible ? 'Скрыть из фида (визуально)' : 'Показать в фиде'
+          },
+            h('span', { className: 'pulse-icon' }, SOURCE_ICONS[row.source] || '📡'),
+            h('span', { className: 'pulse-name' }, SOURCE_LABELS[row.source] || row.source),
+            h('span', { className: 'pulse-count' + (cnt >= 50 ? ' hot' : '') }, cnt)
+          );
+        })
+      )
+    ),
+
+    h('div', { className: 'right-sep' }),
+
+    // ── Activity summary ──
+    h('div', { className: 'right-section' },
+      h('div', { className: 'right-section-head' },
+        h('span', { className: 'right-section-title' }, '📊 Activity'),
+        h('span', { className: 'right-section-count' }, hours + 'h')
+      ),
+      h('div', { className: 'right-section-body' },
+        h('div', { className: 'activity-grid' },
+          h('div', { className: 'activity-cell' },
+            h('span', { className: 'activity-label' }, 'Signals'),
+            h('span', { className: 'activity-val accent' }, totalSignals)
+          ),
+          h('div', { className: 'activity-cell' },
+            h('span', { className: 'activity-label' }, 'Alerts'),
+            h('span', { className: 'activity-val orange' }, totalAlerts)
+          ),
+          h('div', { className: 'activity-cell full' },
+            h('span', { className: 'activity-label' }, 'Avg virality'),
+            h('span', { className: 'activity-val green' }, avgScore, h('span', { style: { fontSize: 11, color: 'var(--dim)', marginLeft: 4 } }, '/100'))
+          )
+        )
+      )
+    ),
+
+    // Categories removed — moved to Stats page to keep right panel compact
+
+   ) // right-panel-inner
+   ) // right-panel
+  );  // right-panel-sticky
 }
 
 // ── TrendModal (side drawer) ───────────────────────────────────────────────────
@@ -1781,6 +2559,12 @@ function TrendModal({ trend, onClose }) {
           )
         ),
 
+        // Feedback
+        h('div', { className: 'modal-section' },
+          h('div', { className: 'modal-section-label' }, '💬 Ваша оценка'),
+          h(FeedbackBar, { trend, variant: 'modal' })
+        ),
+
         // Actions
         h('div', { className: 'modal-section' },
           h('div', { className: 'modal-section-label' }, '🔗 Ссылки'),
@@ -1801,6 +2585,54 @@ function Toasts({ toasts }) {
       h('span', { className: 'toast-icon' }, t.type === 'success' ? '✅' : t.type === 'error' ? '❌' : 'ℹ️'),
       h('span', { className: 'toast-msg' }, t.msg)
     ))
+  );
+}
+
+// ── NavClock — isolated 1-second ticker (no App re-render) ───────────────────
+function NavClock({ refreshAt }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const refreshIn = Math.max(0, Math.ceil((refreshAt - now) / 1000));
+  return h(React.Fragment, null,
+    h('span', { className: 'refresh-badge' }, '\u21bb ' + refreshIn + 's'),
+    h('span', { className: 'nav-time' }, new Date(now).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }))
+  );
+}
+
+// ── StatusBar — bottom strip ─────────────────────────────────────────────────
+function StatusBar({ stats, scanning, sources }) {
+  const active = (sources || []).filter(function(s) { return s.enabled; }).length;
+  const total  = (sources || []).length;
+  return h('div', { className: 'statusbar' },
+    h('div', { className: 'statusbar-dot' + (stats && stats.paused ? ' paused' : '') }),
+    h('span', {
+      className: 'statusbar-item',
+      style: { color: stats && stats.paused ? 'var(--red2)' : 'var(--green2)', fontWeight: 700 }
+    }, stats && stats.paused ? 'PAUSED' : 'LIVE'),
+    h('div', { className: 'statusbar-sep' }),
+    h('span', { className: 'statusbar-item' }, 'signals: ',
+      h('span', { style: { color: 'var(--text2)' } }, String(stats ? stats.total || 0 : 0))
+    ),
+    h('div', { className: 'statusbar-sep' }),
+    h('span', { className: 'statusbar-item' }, 'alerts: ',
+      h('span', { style: { color: 'var(--text2)' } }, String(stats ? stats.alerts || 0 : 0))
+    ),
+    h('div', { className: 'statusbar-sep' }),
+    h('span', { className: 'statusbar-item' }, 'sources: ',
+      h('span', { style: { color: active === total && total > 0 ? 'var(--green2)' : 'var(--orange)' } },
+        active + '/' + total
+      )
+    ),
+    scanning
+      ? h(React.Fragment, null,
+          h('div', { className: 'statusbar-sep' }),
+          h('span', { className: 'statusbar-item', style: { color: 'var(--accent2)' } }, '\u23f3 scanning...')
+        )
+      : null,
+    h('span', { className: 'statusbar-hint' }, 'R=refresh  S=scan  Esc=close')
   );
 }
 
@@ -1825,6 +2657,8 @@ function ControlPanel({ scanning, onScan, sources, onCollectorToggle, addToast }
       }
     } else if (action === 'reload') {
       location.reload();
+    } else if (action === 'stats') {
+      window.dispatchEvent(new CustomEvent('dashboard:navigate', { detail: { view: 'stats' } }));
     }
   };
 
@@ -1873,6 +2707,119 @@ function ControlPanel({ scanning, onScan, sources, onCollectorToggle, addToast }
 }
 
 // ── SettingsPanel ─────────────────────────────────────────────────────────────
+function HeroPanel({ stats, hours, refreshIn, scanning, onScan, onOpenStats }) {
+  return h('div', { className: 'session-bar' },
+    h('span', { className: 'session-tag' }, stats && stats.paused ? 'PAUSED' : 'LIVE'),
+    h('div', { className: 'session-title' }, 'Catalyst — Narrative Terminal'),
+    h('div', { className: 'session-chips' },
+      h('div', { className: 'session-chip' },
+        'Window ', h('span', { className: 'chip-val' }, hours + 'h')
+      ),
+      h('div', { className: 'session-chip' },
+        'Signals ', h('span', { className: 'chip-val' }, String(stats ? stats.total || 0 : 0))
+      ),
+      h('div', { className: 'session-chip' },
+        'Alerts ', h('span', { className: 'chip-val' }, String(stats ? stats.alerts || 0 : 0))
+      ),
+      h('div', { className: 'session-chip', style: { cursor: 'pointer' }, onClick: onOpenStats },
+        '\ud83d\udcca Stats'
+      ),
+      h('button', {
+        className: 'btn btn-primary',
+        onClick: onScan,
+        disabled: scanning,
+        style: { fontSize: 11, padding: '4px 11px' }
+      }, scanning ? '\u23f3 Scanning...' : '\u26a1 Scan now')
+    )
+  );
+}
+
+function StatsPanel({ stats, hours, onBack, onOpenTrend }) {
+  const sourceOrder = ['reddit', 'google_trends', 'twitter', 'tiktok'];
+  const allSources = sourceOrder.map(name => {
+    const hit = (stats?.bySource || []).find(s => s.source === name);
+    return { source: name, count: hit ? hit.count : 0 };
+  });
+  const topCategories = (stats?.byCategory || []).slice(0, 6);
+  const topTrends = (stats?.topTrends || []).slice(0, 4);
+
+  return h('div', { className: 'stats-view' },
+    h('div', { className: 'settings-header' },
+      h('button', { className: 'btn btn-ghost', onClick: onBack }, '← Back'),
+      h('span', { className: 'settings-title' }, '📊 Stats overview')
+    ),
+    h('div', { className: 'stats-grid' },
+      h('section', { className: 'section-shell stats-block' },
+        h('div', { className: 'stats-block-head' },
+          h('div', { className: 'stats-block-title' }, 'Sources'),
+          h('div', { className: 'stats-block-sub' }, hours + 'h window')
+        ),
+        h('div', { className: 'stats-list' },
+          allSources.map(row =>
+            h('div', { key: row.source, className: 'stats-list-row' },
+              h('div', { className: 'stats-list-main' },
+                h('span', null, SOURCE_ICONS[row.source] || '📡'),
+                h('span', { className: 'stats-list-name' }, SOURCE_LABELS[row.source] || row.source)
+              ),
+              h('span', { className: 'stats-list-value' }, String(row.count))
+            )
+          )
+        )
+      ),
+      h('section', { className: 'section-shell stats-block' },
+        h('div', { className: 'stats-block-head' },
+          h('div', { className: 'stats-block-title' }, 'Categories'),
+          h('div', { className: 'stats-block-sub' }, 'Top focus areas')
+        ),
+        h('div', { className: 'stats-list' },
+          topCategories.length
+            ? topCategories.map(row =>
+                h('div', { key: row.category || 'other', className: 'stats-list-row' },
+                  h('div', { className: 'stats-list-main' },
+                    h('span', null, CAT_ICONS[row.category] || '📌'),
+                    h('div', null,
+                      h('div', { className: 'stats-list-name' }, row.category || 'other'),
+                      h('div', { className: 'stats-list-meta' }, 'Narrative cluster count')
+                    )
+                  ),
+                  h('span', { className: 'stats-list-value' }, String(row.count))
+                )
+              )
+            : h('div', { className: 'stats-list-row' },
+                h('span', { className: 'stats-list-meta' }, 'No category data yet')
+              )
+        )
+      ),
+      h('section', { className: 'section-shell stats-block' },
+        h('div', { className: 'stats-block-head' },
+          h('div', { className: 'stats-block-title' }, 'Top narratives'),
+          h('div', { className: 'stats-block-sub' }, 'Highest adoption now')
+        ),
+        h('div', { className: 'stats-top-grid' },
+          topTrends.length
+            ? topTrends.map(trend =>
+                h('div', {
+                  key: trend.id,
+                  className: 'stats-top-card',
+                  onClick: () => onOpenTrend && onOpenTrend(trend),
+                },
+                  h('div', { className: 'stats-top-title' }, trend.title),
+                  h('div', { className: 'stats-top-meta' },
+                    h('span', null, SOURCE_ICONS[trend.source] || '📡'),
+                    h('span', null, SOURCE_LABELS[trend.source] || trend.source),
+                    h('span', null, (trend.adoptionScore || trend.memePotential || 0) + '/100')
+                  )
+                )
+              )
+            : h('div', { className: 'stats-list-row' },
+                h('span', { className: 'stats-list-meta' }, 'No trend data yet')
+              )
+        )
+      )
+    )
+  );
+}
+
 function SettingsPanel({ onBack }) {
   const [draft,   setDraft]   = useState(null);
   const [saving,  setSaving]  = useState(false);
@@ -2016,20 +2963,17 @@ function App() {
   const [scanning,   setScanning]   = useState(false);
   const [sort,       setSort]       = useState('rank');
   const [phase,      setPhase]      = useState('');
-  const [tick,       setTick]       = useState(0);
   const [view,       setView]       = useState('trends');
   const [modalTrend, setModalTrend] = useState(null);
   const [toasts,     setToasts]     = useState([]);
   const [search,     setSearch]     = useState('');
   const [refreshAt,  setRefreshAt]  = useState(Date.now() + 90000);
+  const [hiddenSources, setHiddenSources] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('ts_hidden_sources') || '[]')); }
+    catch (e) { return new Set(); }
+  });
   const toastId = useRef(0);
   const LIMIT = 25;
-
-  // 1-second tick for countdown + clock
-  useEffect(() => {
-    const t = setInterval(() => setTick(n => n + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   // addToast helper — auto-dismiss after 4s
   const addToast = useCallback((msg, type = 'info') => {
@@ -2074,6 +3018,14 @@ function App() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
   useEffect(() => { const t = setInterval(fetchData, 90000); return () => clearInterval(t); }, [fetchData]);
+  useEffect(() => {
+    const handleNavigate = (event) => {
+      const nextView = event && event.detail ? event.detail.view : null;
+      if (nextView) setView(nextView);
+    };
+    window.addEventListener('dashboard:navigate', handleNavigate);
+    return () => window.removeEventListener('dashboard:navigate', handleNavigate);
+  }, []);
 
   // Keyboard shortcuts: R=refresh, S=scan, Esc=close modal
   useEffect(() => {
@@ -2088,12 +3040,29 @@ function App() {
     return () => window.removeEventListener('keydown', fn);
   }, [scanning, fetchData, addToast, scan]);
 
-  const toggle = async (name) => {
-    await api('/collectors/' + name + '/toggle', { method: 'POST' });
-    setSources(prev => prev.map(s => s.source === name ? { ...s, enabled: !s.enabled } : s));
-    const src = sources.find(s => s.source === name);
-    const nowEnabled = src ? !src.enabled : true;
-    addToast((nowEnabled ? '✅ Включён: ' : '🔴 Отключён: ') + (SOURCE_LABELS[name] || name), nowEnabled ? 'success' : 'info');
+  // Visual-only source filter. Does NOT touch the collectors —
+  // real enable/disable lives in the admin panel. This only hides
+  // trends from the selected source in the dashboard feed.
+  const toggle = (name) => {
+    setHiddenSources(prev => {
+      const next = new Set(prev);
+      const willHide = !next.has(name);
+      if (willHide) next.add(name); else next.delete(name);
+      try { localStorage.setItem('ts_hidden_sources', JSON.stringify([...next])); } catch (e) {}
+      addToast((willHide ? '🙈 Скрыт в фиде: ' : '👁 Показан: ') + (SOURCE_LABELS[name] || name), 'info');
+      return next;
+    });
+  };
+
+  const showAllSources = () => {
+    if (!hiddenSources.size) return;
+    setHiddenSources(new Set());
+    try { localStorage.setItem('ts_hidden_sources', '[]'); } catch (e) {}
+    addToast('👁 Все источники видимы', 'info');
+  };
+  const resetFilters = () => {
+    setHours(24); setMinMeme(0); setCategory(''); setSource(''); setSort('rank'); setOffset(0);
+    addToast('♻️ Фильтры сброшены', 'info');
   };
 
   const copyToClipboard = useCallback((text) => {
@@ -2105,10 +3074,14 @@ function App() {
 
   const pages = Math.ceil(total / LIMIT);
   const page  = Math.floor(offset / LIMIT);
-  const refreshIn = Math.max(0, Math.ceil((refreshAt - Date.now()) / 1000));
+  const fixedSourceOrder = ['reddit', 'google_trends', 'twitter', 'tiktok'];
+  const allSourceStats = fixedSourceOrder.map(name => {
+    const hit = (stats?.bySource || []).find(s => s.source === name);
+    return { source: name, count: hit ? hit.count : 0 };
+  });
 
-  // Client-side search filter (doesn't reset pagination)
-  const visibleTrends = search.trim()
+  // Client-side search filter (doesn't reset pagination) + visual source filter
+  const searchFiltered = search.trim()
     ? trends.filter(t => {
         const q = search.toLowerCase();
         return (t.title || '').toLowerCase().includes(q)
@@ -2117,10 +3090,16 @@ function App() {
           || (t.category || '').toLowerCase().includes(q);
       })
     : trends;
+  const visibleTrends = hiddenSources.size
+    ? searchFiltered.filter(t => !hiddenSources.has(t.source))
+    : searchFiltered;
 
   return h('div', null,
     // Toast notifications (fixed top-right)
     h(Toasts, { toasts }),
+
+    // Bottom status bar
+    h(StatusBar, { stats, scanning, sources }),
 
     // Side drawer modal
     modalTrend ? h(TrendModal, { trend: modalTrend, onClose: () => setModalTrend(null) }) : null,
@@ -2129,176 +3108,312 @@ function App() {
     h('nav', { className: 'nav' },
       h('div', { className: 'nav-logo' },
         h('span', { className: 'nav-logo-icon' }, '🔥'),
-        'TrendScout'
+        'Catalyst'
       ),
+      h('span', { className: 'nav-version' }, 'v3'),
       h('div', { className: 'nav-sep' }),
-      h('span', { className: 'nav-subtitle' }, 'Trend Intelligence'),
+      h('span', { className: 'nav-subtitle' }, 'Narrative Terminal'),
       h('div', { className: 'nav-right' },
         h('div', { className: 'status-pill' },
-          h('div', { className: 'status-dot' + (stats?.paused ? ' paused' : '') }),
-          stats?.paused ? 'Пауза' : 'Активен'
+          h('div', { className: 'status-dot' + (stats && stats.paused ? ' paused' : '') }),
+          stats && stats.paused ? 'Paused' : 'Live'
         ),
-        h('span', { className: 'refresh-badge' }, '↻ ' + refreshIn + 'с'),
-        h('span', { className: 'nav-time' }, new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }))
+        h(NavClock, { refreshAt })
       )
     ),
 
-    // ── Layout ──
-    h('div', { className: 'layout' },
+    // ── Layout: trends view gets 3-col dashboard-grid, others get classic layout ──
+    view === 'trends'
+      ? h('div', { className: 'dashboard-grid' },
 
-      // ── Sidebar ──
-      h('aside', { className: 'sidebar' },
-        h('div', { className: 'sidebar-section' }, 'Источники'),
-        ...sources.map(s =>
-          h('div', {
-            key: s.source,
-            className: 'source-item ' + (s.enabled ? 'on' : 'off'),
-            onClick: () => toggle(s.source),
-            title: s.enabled ? 'Кликни чтобы отключить' : 'Кликни чтобы включить'
-          },
-            h('div', { className: 'source-dot ' + (s.enabled ? 'on' : 'off') }),
-            h('span', { className: 'source-name' }, SOURCE_ICONS[s.source] + ' ' + (SOURCE_LABELS[s.source] || s.source)),
-            h('span', { className: 'source-count' }, s.last24h || 0)
-          )
-        ),
-        h('div', { className: 'sidebar-divider' }),
-        h('div', { className: 'sidebar-section' }, 'Фильтры'),
-        h('div', { className: 'sidebar-filters' },
-          h('select', { value: hours, onChange: ev => { setHours(+ev.target.value); setOffset(0); }, style: { width: '100%' } },
-            h('option', { value: 6 },   '6 часов'),
-            h('option', { value: 24 },  '24 часа'),
-            h('option', { value: 72 },  '3 дня'),
-            h('option', { value: 168 }, '7 дней')
-          ),
-          h('select', { value: minMeme, onChange: ev => { setMinMeme(+ev.target.value); setOffset(0); }, style: { width: '100%' } },
-            h('option', { value: 0 },  'Adoption ≥ 0'),
-            h('option', { value: 30 }, 'Adoption ≥ 30'),
-            h('option', { value: 50 }, 'Adoption ≥ 50'),
-            h('option', { value: 70 }, 'Adoption ≥ 70'),
-            h('option', { value: 85 }, 'Adoption ≥ 85')
-          ),
-          h('select', { value: category, onChange: ev => { setCategory(ev.target.value); setOffset(0); }, style: { width: '100%' } },
-            h('option', { value: '' }, 'Все категории'),
-            Object.keys(CAT_ICONS).map(c => h('option', { key: c, value: c }, CAT_ICONS[c] + ' ' + c))
-          )
-        ),
-        h('div', { style: { flex: 1 } }),
-        h('div', {
-          className: 'sidebar-settings-btn' + (view === 'settings' ? ' active' : ''),
-          onClick: () => setView(v => v === 'settings' ? 'trends' : 'settings')
-        }, '⚙️', h('span', null, ' Настройки'))
-      ),
+          // ── Sidebar ──
+          h('aside', { className: 'sidebar' },
+            h('div', { className: 'sidebar-section' },
+              h('span', null, 'Sources'),
+              hiddenSources.size
+                ? h('span', { className: 'sidebar-section-link', onClick: showAllSources, title: 'Показать все' }, 'Show all')
+                : null
+            ),
+            ...sources.map(s => {
+              const visible = !hiddenSources.has(s.source);
+              const cnt = s.last24h || 0;
+              return h('div', {
+                key: s.source,
+                'data-src': s.source,
+                className: 'source-item ' + (visible ? 'on' : 'off'),
+                onClick: () => toggle(s.source),
+                title: visible ? 'Скрыть из фида (визуально)' : 'Показать в фиде'
+              },
+                h('span', { className: 'source-icon' }, SOURCE_ICONS[s.source] || '📡'),
+                h('span', { className: 'source-name' }, SOURCE_LABELS[s.source] || s.source),
+                h('span', { className: 'source-count' + (cnt >= 50 ? ' hot' : '') }, cnt),
+                h('span', { className: 'source-eye' }, visible ? '👁' : '🙈')
+              );
+            }),
 
-      // ── Main ──
-      h('main', { className: 'main' },
-        view === 'settings'
-          ? h(SettingsPanel, { onBack: () => setView('trends') })
-          : h(React.Fragment, null,
+            h('div', { className: 'sidebar-divider' }),
 
-        // Error
-        error ? h('div', { className: 'error-bar' }, '⚠️ ', error) : null,
+            h('div', { className: 'sidebar-section' },
+              h('span', null, 'Filters'),
+              (hours !== 24 || minMeme !== 0 || category || sort !== 'rank')
+                ? h('span', { className: 'sidebar-section-link', onClick: resetFilters, title: 'Сбросить' }, 'Reset')
+                : null
+            ),
+            h('div', { className: 'sidebar-filters' },
 
-        // Stats
-        stats ? h('div', { className: 'stats-row' },
-          h(StatCard, { icon: '📊', value: stats.total, label: 'Трендов за ' + hours + 'ч', sub: stats.alerts + ' алертов' }),
-          h(StatCard, { icon: '🎯', value: stats.avgScore, suffix: '/100', label: 'Средний score' }),
-          ...(stats.bySource || []).map(s =>
-            h(StatCard, { key: s.source, icon: SOURCE_ICONS[s.source] || '📡', value: s.count, label: SOURCE_LABELS[s.source] || s.source, sub: 'за ' + hours + 'ч' })
-          )
-        ) : null,
-
-        // Control Panel
-        h(ControlPanel, {
-          scanning,
-          onScan: scan,
-          sources,
-          onCollectorToggle: toggle,
-          addToast,
-        }),
-
-        // Toolbar with search
-        h('div', { className: 'toolbar' },
-          h('span', { className: 'toolbar-label' }, 'Источник:'),
-          h('select', { value: source, onChange: ev => { setSource(ev.target.value); setOffset(0); } },
-            h('option', { value: '' }, 'Все источники'),
-            ['reddit','google_trends','twitter','tiktok'].map(s => h('option', { key: s, value: s }, SOURCE_ICONS[s] + ' ' + (SOURCE_LABELS[s] || s)))
-          ),
-          h('div', { className: 'toolbar-sep' }),
-          h('span', { className: 'toolbar-label' }, 'Фаза:'),
-          h('select', { value: phase, onChange: ev => { setPhase(ev.target.value); setOffset(0); } },
-            h('option', { value: '' }, 'Все фазы'),
-            h('option', { value: 'early'     }, '🔵 Early'),
-            h('option', { value: 'forming'   }, '🟡 Forming'),
-            h('option', { value: 'strong'    }, '🟢 Strong'),
-            h('option', { value: 'saturated' }, '🔴 Saturated')
-          ),
-          h('div', { className: 'toolbar-sep' }),
-          h('span', { className: 'toolbar-label' }, 'Сортировка:'),
-          h('select', { value: sort, onChange: ev => { setSort(ev.target.value); setOffset(0); } },
-            h('option', { value: 'rank'      }, '⚡ Rank (Emergence+Adoption)'),
-            h('option', { value: 'meme'      }, '💊 Топ Adoption'),
-            h('option', { value: 'emergence' }, '🌊 Топ Emergence'),
-            h('option', { value: 'time'      }, '🕐 Новые сначала'),
-            h('option', { value: 'virality'  }, '📊 Виральность')
-          ),
-          h('div', { className: 'toolbar-sep' }),
-          h('div', { className: 'search-wrap' },
-            h('span', { className: 'search-icon' }, '🔍'),
-            h('input', {
-              type: 'text',
-              className: 'search-input',
-              placeholder: 'Поиск по заголовку...',
-              value: search,
-              onChange: e => setSearch(e.target.value),
-            })
-          ),
-          h('div', { style: { marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' } },
-            h('span', { className: 'kbd', title: 'R = обновить, S = сканировать, Esc = закрыть' }, 'R / S / Esc'),
-            h('button', { className: 'btn btn-ghost', onClick: () => { fetchData(); addToast('Обновляю...', 'info'); } }, '↻ Обновить'),
-            h('button', { className: 'btn btn-primary', onClick: scan, disabled: scanning },
-              scanning ? '⏳ Скан...' : '⚡ Сканировать'
-            )
-          )
-        ),
-
-        // Trends list
-        h('div', { className: 'table-wrap' },
-          h('div', { className: 'table-header' },
-            h('span', { className: 'table-title' }, '🔥 Нарративы'),
-            h('span', { className: 'table-count' },
-              search.trim() ? visibleTrends.length + ' / ' + total + ' найдено' : total + ' найдено'
-            )
-          ),
-          loading
-            ? h('div', { className: 'loading-wrap' },
-                h('div', { className: 'loading-spinner' }),
-                h('div', { className: 'loading-text' }, 'Загружаю тренды...')
-              )
-            : visibleTrends.length === 0
-              ? h('div', { className: 'empty-wrap' },
-                  h('div', { className: 'empty-icon' }, '🔍'),
-                  h('div', { className: 'empty-text' },
-                    search.trim()
-                      ? 'Нет совпадений по запросу «' + search + '»'
-                      : 'Нарративов не найдено — попробуй другие фильтры'
+              // Time window (segmented)
+              h('div', { className: 'filter-group' },
+                h('div', { className: 'filter-label' },
+                  h('span', null, '⏱ Window'),
+                  h('span', { className: 'filter-val' }, hours < 24 ? hours + 'h' : (hours / 24) + 'd')
+                ),
+                h('div', { className: 'seg-group seg-compact' },
+                  [{ v: 6, l: '6h' }, { v: 24, l: '24h' }, { v: 72, l: '3d' }, { v: 168, l: '7d' }].map(o =>
+                    h('button', {
+                      key: o.v,
+                      className: 'seg-btn' + (hours === o.v ? ' active' : ''),
+                      onClick: () => { setHours(o.v); setOffset(0); }
+                    }, o.l)
                   )
                 )
-              : h(React.Fragment, null,
-                  h('div', { className: 'trends-list' },
-                    visibleTrends.map(t => h(TrendCard, { key: t.id, trend: t, onOpen: setModalTrend, onCopy: copyToClipboard }))
+              ),
+
+              // Adoption threshold (segmented)
+              h('div', { className: 'filter-group' },
+                h('div', { className: 'filter-label' },
+                  h('span', null, '💎 Adoption'),
+                  h('span', { className: 'filter-val' }, '≥ ' + minMeme)
+                ),
+                h('div', { className: 'seg-group seg-compact' },
+                  [0, 30, 50, 70, 85].map(v =>
+                    h('button', {
+                      key: v,
+                      className: 'seg-btn' + (minMeme === v ? ' active' : ''),
+                      onClick: () => { setMinMeme(v); setOffset(0); }
+                    }, v)
+                  )
+                )
+              ),
+
+              // Category (dropdown — too many options for segments)
+              h('div', { className: 'filter-group' },
+                h('div', { className: 'filter-label' }, h('span', null, '📂 Category')),
+                h('select', {
+                  value: category,
+                  onChange: ev => { setCategory(ev.target.value); setOffset(0); },
+                  style: { width: '100%' }
+                },
+                  h('option', { value: '' }, 'All categories'),
+                  Object.keys(CAT_ICONS).map(c => h('option', { key: c, value: c }, CAT_ICONS[c] + ' ' + c))
+                )
+              ),
+
+              // Sort order (segmented icons)
+              h('div', { className: 'filter-group' },
+                h('div', { className: 'filter-label' }, h('span', null, '🔀 Sort')),
+                h('div', { className: 'seg-group seg-compact' },
+                  [
+                    { v: 'rank',      l: '⚡', t: 'Rank' },
+                    { v: 'meme',      l: '💎', t: 'Top adoption' },
+                    { v: 'emergence', l: '🌊', t: 'Top emergence' },
+                    { v: 'time',      l: '🕐', t: 'Newest' },
+                    { v: 'virality',  l: '📊', t: 'Virality' },
+                  ].map(o =>
+                    h('button', {
+                      key: o.v,
+                      title: o.t,
+                      className: 'seg-btn' + (sort === o.v ? ' active' : ''),
+                      onClick: () => { setSort(o.v); setOffset(0); }
+                    }, o.l)
+                  )
+                )
+              )
+            ),
+
+            h('div', { style: { flex: 1 } }),
+
+            // Footer with Stats + Settings
+            h('div', { className: 'sidebar-footer' },
+              h('div', {
+                className: 'sb-foot-btn' + (view === 'stats' ? ' active' : ''),
+                onClick: () => setView('stats'),
+                title: 'Stats'
+              },
+                h('span', { className: 'sb-foot-ico' }, '📊'),
+                h('span', null, 'Stats')
+              ),
+              h('div', {
+                className: 'sb-foot-btn' + (view === 'settings' ? ' active' : ''),
+                onClick: () => setView('settings'),
+                title: 'Settings'
+              },
+                h('span', { className: 'sb-foot-ico' }, '⚙️'),
+                h('span', null, 'Settings')
+              )
+            )
+          ),
+
+          // ── Main feed ──
+          h('main', { className: 'main-feed' },
+            error ? h('div', { className: 'error-bar', style: { marginBottom: 12 } }, '⚠️ ', error) : null,
+
+            h('div', { className: 'feed-panel' + (loading && trends.length > 0 ? ' is-refreshing' : '') },
+
+              // ── Feed panel header ──
+              h('div', { className: 'feed-panel-head' },
+                h('div', { className: 'feed-panel-top' },
+                  h('div', { className: 'feed-panel-icon' }, '🔥'),
+                  h('div', null,
+                    h('div', { className: 'feed-panel-title' },
+                      'Narrative Feed',
+                      h('span', { className: 'feed-panel-count' },
+                        search.trim()
+                          ? visibleTrends.length + ' / ' + total
+                          : total + ' signals'
+                      )
+                    ),
+                    h('div', { className: 'feed-panel-sub' },
+                      'Live narrative tracker across ', (sources || []).filter(s => s.enabled).length, '/', (sources || []).length, ' sources · ', hours, 'h window'
+                    )
+                  ),
+                  h('div', { className: 'feed-panel-actions' },
+                    h('div', { className: 'feed-search' },
+                      h('span', { className: 'feed-search-icon' }, '🔍'),
+                      h('input', {
+                        type: 'text',
+                        placeholder: 'Search narratives...',
+                        value: search,
+                        onChange: e => setSearch(e.target.value),
+                      })
+                    ),
+                    h('button', {
+                      className: 'btn btn-ghost' + (loading ? ' is-spinning' : ''),
+                      onClick: () => { if (!loading) { fetchData(); addToast('Refreshing...', 'info'); } },
+                      disabled: loading,
+                      style: { fontSize: 11, padding: '6px 10px' },
+                      title: 'Refresh (R)'
+                    }, h('span', { className: 'btn-refresh-ico' }, '↻')),
+                    h('button', {
+                      className: 'btn btn-primary',
+                      onClick: scan,
+                      disabled: scanning,
+                      style: { fontSize: 11, padding: '6px 12px' },
+                      title: 'Scan now (S)'
+                    }, scanning ? '⏳ Scanning...' : '⚡ Scan')
                   )
                 ),
-          // Pagination (hidden when searching)
-          !search.trim() && pages > 1 ? h('div', { className: 'pagination' },
-            h('button', { className: 'btn btn-ghost', onClick: () => setOffset(Math.max(0, offset - LIMIT)), disabled: page === 0 }, '← Назад'),
-            h('span', { className: 'page-info' }, (page + 1) + ' / ' + pages),
-            h('button', { className: 'btn btn-ghost', onClick: () => setOffset(offset + LIMIT), disabled: page >= pages - 1 }, 'Вперёд →')
-          ) : null
-        )
 
-      ) // end Fragment
-      ) // end main
-    )
+                // ── Phase filter chips ──
+                h('div', { className: 'feed-filters-bar' },
+                  h('button', {
+                    className: 'feed-chip' + (phase === '' ? ' active' : ''),
+                    onClick: () => { setPhase(''); setOffset(0); }
+                  }, 'All ', h('span', { className: 'chip-count' }, total)),
+                  ['early','forming','strong','saturated'].map(p =>
+                    h('button', {
+                      key: p,
+                      className: 'feed-chip' + (phase === p ? ' active' : ''),
+                      onClick: () => { setPhase(phase === p ? '' : p); setOffset(0); }
+                    },
+                      PHASE_DOT[p], ' ', PHASE_META[p].label
+                    )
+                  )
+                )
+              ),
+
+              // ── Feed list (stale-while-revalidate) ──
+              // Full spinner only on the first load (no cached trends yet).
+              // On subsequent refreshes keep the existing list visible
+              // and show a subtle top progress bar.
+              (loading && trends.length === 0)
+                ? h('div', { className: 'loading-wrap', style: { padding: '60px 20px' } },
+                    h('div', { className: 'loading-spinner' }),
+                    h('div', { className: 'loading-text' }, 'Loading narratives...')
+                  )
+                : visibleTrends.length === 0
+                  ? h('div', { className: 'empty-feed' },
+                      h('div', { className: 'empty-feed-icon' }, '🔍'),
+                      h('div', { className: 'empty-feed-text' },
+                        search.trim()
+                          ? 'No matches for "' + search + '"'
+                          : 'No narratives found — try different filters or ⚡ Scan'
+                      ),
+                      h('div', { className: 'empty-feed-sub' }, 'Hint: widen the time window or clear filters')
+                    )
+                  : h('div', { className: 'feed-list' + (loading ? ' is-refreshing' : '') },
+                      visibleTrends.map(t => h(FeedCard, { key: t.id, trend: t, onOpen: setModalTrend, onCopy: copyToClipboard }))
+                    ),
+
+              // Pagination
+              !search.trim() && pages > 1 ? h('div', { className: 'pagination', style: { padding: '10px 14px 14px' } },
+                h('button', { className: 'btn btn-ghost', onClick: () => setOffset(Math.max(0, offset - LIMIT)), disabled: page === 0 }, '← Prev'),
+                h('span', { className: 'page-info' }, (page + 1) + ' / ' + pages),
+                h('button', { className: 'btn btn-ghost', onClick: () => setOffset(offset + LIMIT), disabled: page >= pages - 1 }, 'Next →')
+              ) : null
+            )
+          ),
+
+          // ── Right panel ──
+          h(RightPanel, {
+            stats,
+            sources,
+            allSourceStats,
+            hours,
+            hiddenSources,
+            onOpenTrend: setModalTrend,
+            onToggleSource: toggle,
+          })
+        )
+      : h('div', { className: 'layout' },
+          // Classic 2-col layout for settings / stats views
+          h('aside', { className: 'sidebar' },
+            h('div', { className: 'sidebar-section' },
+              h('span', null, 'Sources'),
+              hiddenSources.size
+                ? h('span', { className: 'sidebar-section-link', onClick: showAllSources }, 'Show all')
+                : null
+            ),
+            ...sources.map(s => {
+              const visible = !hiddenSources.has(s.source);
+              const cnt = s.last24h || 0;
+              return h('div', {
+                key: s.source,
+                'data-src': s.source,
+                className: 'source-item ' + (visible ? 'on' : 'off'),
+                onClick: () => toggle(s.source),
+                title: visible ? 'Скрыть из фида (визуально)' : 'Показать в фиде'
+              },
+                h('span', { className: 'source-icon' }, SOURCE_ICONS[s.source] || '📡'),
+                h('span', { className: 'source-name' }, SOURCE_LABELS[s.source] || s.source),
+                h('span', { className: 'source-count' + (cnt >= 50 ? ' hot' : '') }, cnt),
+                h('span', { className: 'source-eye' }, visible ? '👁' : '🙈')
+              );
+            }),
+            h('div', { className: 'sidebar-divider' }),
+            h('div', { style: { flex: 1 } }),
+            h('div', { className: 'sidebar-footer' },
+              h('div', {
+                className: 'sb-foot-btn active',
+                onClick: () => setView('trends')
+              },
+                h('span', { className: 'sb-foot-ico' }, '🔥'),
+                h('span', null, 'Feed')
+              ),
+              h('div', {
+                className: 'sb-foot-btn' + (view === 'settings' ? ' active' : ''),
+                onClick: () => setView('settings')
+              },
+                h('span', { className: 'sb-foot-ico' }, '⚙️'),
+                h('span', null, 'Settings')
+              )
+            )
+          ),
+          h('main', { className: 'main' },
+            view === 'settings'
+              ? h(SettingsPanel, { onBack: () => setView('trends') })
+              : h(StatsPanel, { stats, hours, onBack: () => setView('trends'), onOpenTrend: setModalTrend })
+          )
+        )
   );
 }
 

@@ -1,4 +1,4 @@
-# TrendScout v3.0 - Production Dockerfile
+# Catalyst v3.0 - Production Dockerfile
 # Multi-stage build для оптимизации размера образа
 
 # ─── Stage 1: Builder ───────────────────────────────────────────────────────
@@ -21,7 +21,7 @@ RUN npm ci --only=production && \
 
 FROM node:20-alpine
 
-LABEL maintainer="TrendScout Team <dev@trendscout.io>"
+LABEL maintainer="Catalyst Team <dev@catalyst.io>"
 LABEL version="3.0"
 LABEL description="24/7 AI-powered trend monitoring for memecoin narratives"
 
@@ -56,8 +56,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Переменные окружения по умолчанию
 ENV NODE_ENV=production \
     NODE_OPTIONS="--max-old-space-size=1024" \
-    DB_PATH=/data/trendscout.db \
-    LOG_FILE=/logs/trendscout.log \
+    DB_PATH=/data/catalyst.db \
+    LOG_FILE=/logs/catalyst.log \
     DASHBOARD_PORT=8080 \
     ADMIN_PORT=8081 \
     DASHBOARD_HOST=0.0.0.0

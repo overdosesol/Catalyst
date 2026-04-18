@@ -19,7 +19,7 @@ import { getTranslations } from './i18n/index.js';
 const logger = new Logger(config.logLevel);
 
 logger.info('═══════════════════════════════════════════');
-logger.info('  🔥 TrendScout v3.0 — Starting up...');
+logger.info('  🔥 Catalyst v3.0 — Starting up...');
 logger.info('═══════════════════════════════════════════');
 
 // ── Initialize core components ──────────────────────────────────────────────
@@ -225,7 +225,8 @@ async function runScanCycle() {
       (t.score || 0) >= minScoreToSave || (t.memePotential || 0) >= minScoreToSave
     );
     for (const trend of allToSave) {
-      const trendId = db.saveTrend(trend);
+      // Mark as 'scored' so they are never re-sent through the AI pipeline
+      const trendId = db.saveTrend({ ...trend, pipelineStatus: 'scored' });
       trend._dbId = trendId;
     }
 

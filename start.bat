@@ -1,6 +1,6 @@
 @echo off
-title TrendScout - 24/7 AI Trend Monitoring
-echo Starting TrendScout...
+title Catalyst - 24/7 AI Trend Monitoring
+echo Starting Catalyst...
 echo.
 node src/index.js
 echo.
