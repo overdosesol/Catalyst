@@ -1,5 +1,5 @@
 /**
- * TrendScout Admin Panel — Port 8080
+ * Catalyst Admin Panel — Port 8080
  * Управление пользователями, подписками, статистикой и ботом
  */
 
@@ -740,42 +740,55 @@ class AdminServer {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TrendScout Admin</title>
+<title>Catalyst Admin</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0d0d14;--bg2:#13131f;--bg3:#1a1a2e;--bg4:#1e1e35;
-  --accent:#7c3aed;--accent2:#6d28d9;--green:#10b981;--red:#ef4444;
-  --yellow:#f59e0b;--blue:#3b82f6;--text:#e2e8f0;--text2:#94a3b8;--border:#2d2d4a;
+  --bg:#091018;--bg2:#101a23;--bg3:#162330;--bg4:#1c2b3a;
+  --accent:#14b8a6;--accent2:#0f766e;--green:#22c55e;--red:#f87171;
+  --yellow:#f59e0b;--blue:#38bdf8;--text:#e5eef7;--text2:#97a8ba;--border:#233447;
 }
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:
+linear-gradient(180deg,#081018 0%,#0a1320 100%);color:var(--text);min-height:100vh}
 .layout{display:flex;min-height:100vh}
-.sidebar{width:220px;background:var(--bg2);border-right:1px solid var(--border);padding:20px 0;flex-shrink:0;display:flex;flex-direction:column}
-.logo{padding:0 20px 24px;border-bottom:1px solid var(--border);margin-bottom:16px}
-.logo h1{font-size:17px;font-weight:700;color:#fff}
-.logo span{font-size:11px;color:var(--accent);letter-spacing:1px;text-transform:uppercase}
-.nav-item{display:flex;align-items:center;gap:10px;padding:10px 20px;cursor:pointer;font-size:14px;color:var(--text2);border-radius:0;transition:all .15s}
-.nav-item:hover{background:var(--bg3);color:var(--text)}
-.nav-item.active{background:linear-gradient(90deg,rgba(124,58,237,.2),transparent);color:#fff;border-left:3px solid var(--accent)}
-.nav-item.active{padding-left:17px}
+.sidebar{width:250px;background:linear-gradient(180deg,rgba(12,20,28,.98),rgba(11,18,26,.94));border-right:1px solid rgba(35,52,71,.9);padding:22px 0;flex-shrink:0;display:flex;flex-direction:column;backdrop-filter:blur(18px)}
+.logo{padding:0 22px 22px;border-bottom:1px solid var(--border);margin-bottom:16px}
+.logo h1{font-size:18px;font-weight:800;color:#fff;letter-spacing:-.3px}
+.logo span{font-size:11px;color:var(--accent);letter-spacing:1.2px;text-transform:uppercase}
+.nav-item{display:flex;align-items:center;gap:10px;padding:11px 22px;cursor:pointer;font-size:14px;color:var(--text2);border-radius:0;transition:all .18s}
+.nav-item:hover{background:rgba(255,255,255,.03);color:var(--text)}
+.nav-item.active{background:linear-gradient(90deg,rgba(20,184,166,.18),transparent);color:#fff;border-left:3px solid var(--accent)}
+.nav-item.active{padding-left:19px}
 .nav-icon{font-size:16px;width:20px;text-align:center}
-.main{flex:1;padding:28px;overflow-y:auto}
-.page-header{margin-bottom:24px}
-.page-header h2{font-size:22px;font-weight:700}
-.page-header p{color:var(--text2);font-size:13px;margin-top:4px}
+.main{flex:1;padding:22px 26px 28px;overflow-y:auto}
+.main-topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px;padding:16px 18px;border:1px solid var(--border);border-radius:16px;background:rgba(16,26,35,.78);backdrop-filter:blur(16px)}
+.main-topbar h2{font-size:20px;font-weight:800;letter-spacing:-.4px}
+.main-topbar p{color:var(--text2);font-size:12px;margin-top:4px}
+.topbar-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.shell-badge{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;border:1px solid rgba(20,184,166,.18);background:rgba(20,184,166,.08);font-size:11px;font-weight:700;color:#b8d6d3;text-transform:uppercase;letter-spacing:.7px}
+.page-header{margin-bottom:22px}
+.page-header h2{font-size:24px;font-weight:800;letter-spacing:-.5px}
+.page-header p{color:var(--text2);font-size:13px;margin-top:5px;max-width:72ch;line-height:1.5}
 
 /* Cards */
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:18px}
-.card-label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:8px}
-.card-value{font-size:28px;font-weight:700}
-.card-sub{font-size:12px;color:var(--text2);margin-top:4px}
+.card{background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.01));border:1px solid var(--border);border-radius:16px;padding:18px;box-shadow:0 12px 32px rgba(0,0,0,.12)}
+.card-label{font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:var(--text2);margin-bottom:8px;font-weight:700}
+.card-value{font-size:28px;font-weight:800;letter-spacing:-.8px}
+.card-sub{font-size:12px;color:var(--text2);margin-top:6px;line-height:1.4}
 .card.green .card-value{color:var(--green)}
 .card.purple .card-value{color:var(--accent)}
 .card.yellow .card-value{color:var(--yellow)}
 .card.blue .card-value{color:var(--blue)}
+.stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.stats-bottom-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}
+.info-list{display:flex;flex-direction:column;gap:10px}
+.info-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-radius:12px;background:rgba(255,255,255,.025);border:1px solid rgba(35,52,71,.7);font-size:12px}
+.info-row strong{color:var(--text);font-size:12px}
+.info-row span{color:var(--text2)}
+.muted-note{font-size:12px;color:var(--text2);line-height:1.5}
 
 /* Table */
 .table-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:12px;overflow:hidden}
@@ -829,11 +842,11 @@ tr:hover td{background:rgba(255,255,255,.02)}
 .chart-bar{flex:1;background:var(--accent);border-radius:3px 3px 0 0;opacity:.7;min-width:12px;transition:all .2s;cursor:pointer;position:relative}
 .chart-bar:hover{opacity:1}
 .chart-bar-label{font-size:9px;color:var(--text2);text-align:center;margin-top:3px}
-.chart-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:16px}
-.chart-title{font-size:13px;font-weight:600;margin-bottom:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.chart-wrap{background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.01));border:1px solid var(--border);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:0 12px 32px rgba(0,0,0,.12)}
+.chart-title{font-size:13px;font-weight:700;margin-bottom:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.7px}
 
 /* Broadcast */
-.broadcast-box{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:20px}
+.broadcast-box{background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.01));border:1px solid var(--border);border-radius:16px;padding:20px;margin-bottom:20px;box-shadow:0 12px 32px rgba(0,0,0,.12)}
 .broadcast-box h3{font-size:15px;font-weight:600;margin-bottom:14px}
 textarea.msg-input{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:13px;outline:none;resize:vertical;min-height:100px;font-family:inherit}
 textarea.msg-input:focus{border-color:var(--accent)}
@@ -865,7 +878,7 @@ input:checked+.toggle-slider:before{transform:translateX(20px);background:#fff}
 .collector-status.on{color:var(--green)}
 .collector-status.off{color:var(--red)}
 /* Global scanner status */
-.scanner-status-bar{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:20px 24px;margin-bottom:24px;display:flex;align-items:center;gap:20px}
+.scanner-status-bar{background:linear-gradient(135deg,rgba(20,184,166,.07),rgba(56,189,248,.04));border:1px solid rgba(20,184,166,.16);border-radius:16px;padding:20px 24px;margin-bottom:24px;display:flex;align-items:center;gap:20px;box-shadow:0 12px 32px rgba(0,0,0,.12)}
 .scanner-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
 .scanner-dot.running{background:var(--green);box-shadow:0 0 8px var(--green)}
 .scanner-dot.paused{background:var(--red);box-shadow:0 0 8px var(--red)}
@@ -881,6 +894,14 @@ input:checked+.toggle-slider:before{transform:translateX(20px);background:#fff}
 .sol-addr{font-family:monospace;font-size:11px;color:var(--text2)}
 .success-msg{color:var(--green);font-size:12px}
 .error-msg{color:var(--red);font-size:12px}
+@media (max-width: 980px){
+  .layout{flex-direction:column}
+  .sidebar{width:100%;border-right:none;border-bottom:1px solid var(--border)}
+  .main{padding:18px 14px 24px}
+  .main-topbar{flex-direction:column;align-items:flex-start}
+  .stats-grid,.stats-bottom-grid{grid-template-columns:1fr}
+  .scanner-status-bar{flex-direction:column;align-items:flex-start}
+}
 </style>
 </head>
 <body>
@@ -914,7 +935,7 @@ function AuthOverlay({ onAuth }) {
   return React.createElement('div',{className:'auth-overlay'},
     React.createElement('div',{className:'auth-box'},
       React.createElement('div',{style:{fontSize:32,marginBottom:12}},'🔐'),
-      React.createElement('h2',null,'TrendScout Admin'),
+      React.createElement('h2',null,'Catalyst Admin'),
       React.createElement('p',null,'Введите ADMIN_API_KEY для входа'),
       React.createElement('input',{className:'auth-input',type:'password',placeholder:'Admin API Key',value:key,onChange:e=>setKey(e.target.value),onKeyDown:e=>e.key==='Enter'&&submit()}),
       React.createElement('button',{className:'btn btn-primary',style:{width:'100%',padding:'10px'},onClick:submit},'Войти'),
@@ -1010,11 +1031,20 @@ function UsersPage() {
   const utcDate = dt => { if (!dt) return null; const s = dt.includes('Z')||dt.includes('+') ? dt : dt.replace(' ','T')+'Z'; return new Date(s); };
   const fmt   = dt => { const d = utcDate(dt); return d ? d.toLocaleDateString('ru') : '—'; };
   const fmtDt = dt => { const d = utcDate(dt); return d ? d.toLocaleString('ru',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—'; };
+  const activeUsers = users.filter(u => (u.status || 'active') === 'active').length;
+  const blockedUsers = users.filter(u => u.status === 'blocked').length;
+  const paidUsers = users.filter(u => ['test','pro','admin'].includes(u.plan_name)).length;
 
   return React.createElement('div',null,
     React.createElement('div',{className:'page-header'},
       React.createElement('h2',null,'👥 Пользователи'),
       React.createElement('p',null,'Управление аккаунтами, планами и статусами')
+    ),
+    React.createElement('div',{className:'cards'},
+      React.createElement('div',{className:'card purple'},React.createElement('div',{className:'card-label'},'В выборке'),React.createElement('div',{className:'card-value'},users.length),React.createElement('div',{className:'card-sub'},'С учётом текущих фильтров')),
+      React.createElement('div',{className:'card green'},React.createElement('div',{className:'card-label'},'Active'),React.createElement('div',{className:'card-value'},activeUsers),React.createElement('div',{className:'card-sub'},'Пользователи без блокировки')),
+      React.createElement('div',{className:'card yellow'},React.createElement('div',{className:'card-label'},'Paid / privileged'),React.createElement('div',{className:'card-value'},paidUsers),React.createElement('div',{className:'card-sub'},'Test, Pro и Admin')),
+      React.createElement('div',{className:'card'},React.createElement('div',{className:'card-label'},'Blocked'),React.createElement('div',{className:'card-value'},blockedUsers),React.createElement('div',{className:'card-sub'},blockedUsers===0?'Блокировок нет':'Нужен manual review'))
     ),
     React.createElement('div',{className:'table-wrap'},
       React.createElement('div',{className:'table-toolbar'},
@@ -1135,11 +1165,20 @@ function PaymentsPage() {
     const decimals = c === 'SOL' ? 4 : 2;
     return parseFloat(amount).toFixed(decimals) + ' ' + c;
   };
+  const confirmed = payments.filter(p => p.status === 'confirmed').length;
+  const pending = payments.filter(p => p.status === 'pending').length;
+  const expired = payments.filter(p => p.status === 'expired').length;
 
   return React.createElement('div',null,
     React.createElement('div',{className:'page-header'},
       React.createElement('h2',null,'💳 Платежи'),
       React.createElement('p',null,'История транзакций Solana Pay')
+    ),
+    React.createElement('div',{className:'cards'},
+      React.createElement('div',{className:'card purple'},React.createElement('div',{className:'card-label'},'В выборке'),React.createElement('div',{className:'card-value'},payments.length),React.createElement('div',{className:'card-sub'},'Текущая страница журнала')),
+      React.createElement('div',{className:'card green'},React.createElement('div',{className:'card-label'},'Confirmed'),React.createElement('div',{className:'card-value'},confirmed),React.createElement('div',{className:'card-sub'},'Успешно завершённые платежи')),
+      React.createElement('div',{className:'card yellow'},React.createElement('div',{className:'card-label'},'Pending'),React.createElement('div',{className:'card-value'},pending),React.createElement('div',{className:'card-sub'},'Требуют завершения или истечения')),
+      React.createElement('div',{className:'card'},React.createElement('div',{className:'card-label'},'Expired'),React.createElement('div',{className:'card-value'},expired),React.createElement('div',{className:'card-sub'},expired===0?'Хвост чистый':'Можно подчистить'))
     ),
     React.createElement('div',{className:'table-wrap'},
       React.createElement('div',{className:'table-toolbar'},
@@ -1221,11 +1260,32 @@ function ScannersPage() {
   if (loading) return React.createElement('div', { className: 'loading' }, 'Загрузка...');
 
   const paused = state?.paused;
+  const collectors = state?.collectors || [];
+  const enabledCount = collectors.filter(c => c.enabled).length;
+  const disabledCount = collectors.length - enabledCount;
 
   return React.createElement('div', null,
     React.createElement('div', { className: 'page-header' },
       React.createElement('h2', null, '⚙️ Сканеры'),
-      React.createElement('p', null, 'Управление сбором данных — глобально и по площадкам')
+      React.createElement('p', null, 'Здесь управляется сам heartbeat системы: глобальная пауза и отдельные площадки. Экран нужен для быстрых операционных действий, когда нужно отключить шумный источник или остановить весь пайплайн.')
+    ),
+
+    React.createElement('div', { className: 'cards' },
+      React.createElement('div', { className: 'card green' },
+        React.createElement('div', { className: 'card-label' }, 'Статус пайплайна'),
+        React.createElement('div', { className: 'card-value' }, paused ? 'PAUSE' : 'LIVE'),
+        React.createElement('div', { className: 'card-sub' }, paused ? 'Сбор данных и алерты остановлены' : 'Сканирование идёт по расписанию')
+      ),
+      React.createElement('div', { className: 'card blue' },
+        React.createElement('div', { className: 'card-label' }, 'Включённых источников'),
+        React.createElement('div', { className: 'card-value' }, enabledCount),
+        React.createElement('div', { className: 'card-sub' }, 'Из ' + collectors.length + ' доступных площадок')
+      ),
+      React.createElement('div', { className: 'card yellow' },
+        React.createElement('div', { className: 'card-label' }, 'Отключённых источников'),
+        React.createElement('div', { className: 'card-value' }, disabledCount),
+        React.createElement('div', { className: 'card-sub' }, disabledCount === 0 ? 'Все источники активны' : 'Есть площадки в ручном off режиме')
+      )
     ),
 
     // Global scanner status bar
@@ -1305,21 +1365,28 @@ function StatsPage() {
       })
       .join(' + ');
   };
+  const fmtBytes = (bytes = 0) => {
+    const mb = bytes / (1024 * 1024);
+    if (mb < 1024) return mb.toFixed(1) + ' MB';
+    return (mb / 1024).toFixed(2) + ' GB';
+  };
+  const paidShare = stats.users.total ? Math.round((stats.users.paid / stats.users.total) * 100) : 0;
+  const activeShare = stats.users.total ? Math.round((stats.users.active / stats.users.total) * 100) : 0;
 
   return React.createElement('div',null,
     React.createElement('div',{className:'page-header'},
       React.createElement('h2',null,'📊 Статистика'),
-      React.createElement('p',null,'Пользователи, доход и активность')
+      React.createElement('p',null,'Главный срез по пользователям, оплатам и состоянию базы. Это экран для быстрого sanity-check проекта: рост, монетизация, состав аудитории и нагрузка на хранилище.')
     ),
     React.createElement('div',{className:'cards'},
-      React.createElement('div',{className:'card purple'},React.createElement('div',{className:'card-label'},'Всего юзеров'),React.createElement('div',{className:'card-value'},stats.users.total)),
-      React.createElement('div',{className:'card green'},React.createElement('div',{className:'card-label'},'Активных'),React.createElement('div',{className:'card-value'},stats.users.active)),
-      React.createElement('div',{className:'card blue'},React.createElement('div',{className:'card-label'},'Платных'),React.createElement('div',{className:'card-value'},stats.users.paid)),
-      React.createElement('div',{className:'card yellow'},React.createElement('div',{className:'card-label'},'Доход 30д'),React.createElement('div',{className:'card-value'},fmtRevenueByCurrency(stats.revenue.byCurrency30days))),
-      React.createElement('div',{className:'card'},React.createElement('div',{className:'card-label'},'За сегодня'),React.createElement('div',{className:'card-value'},stats.users.newToday),React.createElement('div',{className:'card-sub'},'+'+stats.users.newWeek+' за неделю')),
-      React.createElement('div',{className:'card'},React.createElement('div',{className:'card-label'},'Доход всего'),React.createElement('div',{className:'card-value'},fmtRevenueByCurrency(stats.revenue.byCurrencyTotal)),React.createElement('div',{className:'card-sub'},'USDC / SOL'))
+      React.createElement('div',{className:'card purple'},React.createElement('div',{className:'card-label'},'Всего юзеров'),React.createElement('div',{className:'card-value'},stats.users.total),React.createElement('div',{className:'card-sub'},activeShare+'% сейчас активны')),
+      React.createElement('div',{className:'card green'},React.createElement('div',{className:'card-label'},'Активных'),React.createElement('div',{className:'card-value'},stats.users.active),React.createElement('div',{className:'card-sub'},'Живые пользователи в active status')),
+      React.createElement('div',{className:'card blue'},React.createElement('div',{className:'card-label'},'Платных'),React.createElement('div',{className:'card-value'},stats.users.paid),React.createElement('div',{className:'card-sub'},paidShare+'% от всей базы')),
+      React.createElement('div',{className:'card yellow'},React.createElement('div',{className:'card-label'},'Доход 30д'),React.createElement('div',{className:'card-value'},fmtRevenueByCurrency(stats.revenue.byCurrency30days)),React.createElement('div',{className:'card-sub'},'Текущий месячный срез')),
+      React.createElement('div',{className:'card'},React.createElement('div',{className:'card-label'},'Новые сегодня'),React.createElement('div',{className:'card-value'},stats.users.newToday),React.createElement('div',{className:'card-sub'},'+'+stats.users.newWeek+' за неделю · +'+stats.users.newMonth+' за месяц')),
+      React.createElement('div',{className:'card'},React.createElement('div',{className:'card-label'},'Размер БД'),React.createElement('div',{className:'card-value'},fmtBytes(stats.storage.dbBytes)),React.createElement('div',{className:'card-sub'},stats.storage.trendsCount+' trends · '+stats.storage.notificationsCount+' notifications'))
     ),
-    React.createElement('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}},
+    React.createElement('div',{className:'stats-grid'},
       React.createElement('div',{className:'chart-wrap'},
         React.createElement('div',{className:'chart-title'},'Новые пользователи (14 дней)'),
         React.createElement(BarChart,{data:stats.dailyNew,color:'#7c3aed'})
@@ -1335,6 +1402,28 @@ function StatsPage() {
       React.createElement('div',{className:'chart-wrap'},
         React.createElement('div',{className:'chart-title'},'Языки'),
         React.createElement(PieLegend,{data:stats.langDist.map(d=>({...d,name:d.language==='ru'?'🇷🇺 Русский':'🇺🇸 English'})),colors:['#7c3aed','#3b82f6']})
+      )
+    ),
+    React.createElement('div',{className:'stats-bottom-grid'},
+      React.createElement('div',{className:'chart-wrap'},
+        React.createElement('div',{className:'chart-title'},'Срез по хранению'),
+        React.createElement('div',{className:'info-list'},
+          React.createElement('div',{className:'info-row'},React.createElement('strong',null,'Размер файла БД'),React.createElement('span',null,fmtBytes(stats.storage.dbBytes))),
+          React.createElement('div',{className:'info-row'},React.createElement('strong',null,'Тренды'),React.createElement('span',null,stats.storage.trendsCount)),
+          React.createElement('div',{className:'info-row'},React.createElement('strong',null,'Notifications'),React.createElement('span',null,stats.storage.notificationsCount)),
+          React.createElement('div',{className:'info-row'},React.createElement('strong',null,'Payments'),React.createElement('span',null,stats.storage.paymentsCount)),
+        )
+      ),
+      React.createElement('div',{className:'chart-wrap'},
+        React.createElement('div',{className:'chart-title'},'Краткие выводы'),
+        React.createElement('div',{className:'info-list'},
+          React.createElement('div',{className:'info-row'},React.createElement('strong',null,'Active rate'),React.createElement('span',null,activeShare + '%')),
+          React.createElement('div',{className:'info-row'},React.createElement('strong',null,'Paid share'),React.createElement('span',null,paidShare + '%')),
+          React.createElement('div',{className:'info-row'},React.createElement('strong',null,'Доход lifetime'),React.createElement('span',null,fmtRevenueByCurrency(stats.revenue.byCurrencyTotal))),
+        ),
+        React.createElement('p',{className:'muted-note',style:{marginTop:14}},
+          'Если нужно быстро проверить здоровье продукта, обычно хватает трёх мест: новые пользователи, доход 30д и размер базы. Они быстрее всего показывают, всё ли идёт в плюс.'
+        )
       )
     )
   );
@@ -1527,11 +1616,18 @@ function BotPage() {
   };
 
   const fmtDt = dt => { if (!dt) return '—'; const s = dt.includes('Z')||dt.includes('+') ? dt : dt.replace(' ','T')+'Z'; return new Date(s).toLocaleString('ru',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}); };
+  const paidPlans = plans.filter(p => ['test','pro'].includes(p.name)).length;
 
   return React.createElement('div',null,
     React.createElement('div',{className:'page-header'},
       React.createElement('h2',null,'🤖 Управление ботом'),
       React.createElement('p',null,'Рассылки, планы и настройки')
+    ),
+    React.createElement('div',{className:'cards'},
+      React.createElement('div',{className:'card purple'},React.createElement('div',{className:'card-label'},'Broadcast history'),React.createElement('div',{className:'card-value'},broadcasts.length),React.createElement('div',{className:'card-sub'},'Последние сохранённые рассылки')),
+      React.createElement('div',{className:'card blue'},React.createElement('div',{className:'card-label'},'Stage 1 provider'),React.createElement('div',{className:'card-value'},(aiCfg?.provider || aiDraft.provider || 'xai').toUpperCase()),React.createElement('div',{className:'card-sub'},aiCfg?.model || aiDraft.model || '—')),
+      React.createElement('div',{className:'card green'},React.createElement('div',{className:'card-label'},'Stage 2'),React.createElement('div',{className:'card-value'},(aiCfg?.stage2Enabled ?? aiDraft.stage2Enabled) ? 'ON' : 'OFF'),React.createElement('div',{className:'card-sub'},'x_search через Grok')),
+      React.createElement('div',{className:'card yellow'},React.createElement('div',{className:'card-label'},'Paid plans'),React.createElement('div',{className:'card-value'},paidPlans),React.createElement('div',{className:'card-sub'},'Редактируемые тарифы с оплатой'))
     ),
 
     React.createElement('div',{className:'broadcast-box'},
@@ -1593,6 +1689,27 @@ function BotPage() {
       React.createElement('div',{className:'broadcast-footer'},
         React.createElement('select',{className:'filter',value:bcastPlan,onChange:e=>setBcastPlan(e.target.value)},
           React.createElement('option',{value:'all'},'Все пользователи'),
+          React.createElement('option',{value:'free'},'Только Free'),
+          React.createElement('option',{value:'test'},'Только Test'),
+          React.createElement('option',{value:'pro'},'Только Pro'),
+        ),
+        React.createElement('button',{className:'btn btn-primary',onClick:sendBroadcast,disabled:sending||!bcast.trim()},sending?'Отправка...':'📤 Отправить'),
+        bcastResult&&!bcastResult.error&&React.createElement('span',{className:'success-msg'},'✓ Отправлено: '+bcastResult.sent+', ошибок: '+bcastResult.failed),
+        bcastResult&&bcastResult.error&&React.createElement('span',{className:'error-msg'},'Ошибка: '+bcastResult.error)
+      )
+    ),
+
+    React.createElement('div',{className:'broadcast-box'},
+      React.createElement('h3',null,'🛠 Управление последней рассылкой'),
+      React.createElement('p',{style:{fontSize:12,color:'var(--text2)',marginBottom:10}},'Работает с последним закрепленным рассылочным сообщением у каждого пользователя.'),
+      React.createElement('textarea',{
+        className:'msg-input',
+        placeholder:'Новый текст для кнопки "Обновить текст" (HTML поддерживается)',
+        value:manageText,
+        onChange:e=>setManageText(e.target.value)
+      }),
+      React.createElement('div',{className:'broadcast-footer'},
+        React.createElement('select',{className:'filter',value:managePlan,onChange:e=>setManagePlan(e.target.value)},
           React.createElement('option',{value:'free'},'Только Free'),
           React.createElement('option',{value:'test'},'Только Test'),
           React.createElement('option',{value:'pro'},'Только Pro'),
@@ -1753,7 +1870,7 @@ function App() {
   return React.createElement('div',{className:'layout'},
     React.createElement('aside',{className:'sidebar'},
       React.createElement('div',{className:'logo'},
-        React.createElement('h1',null,'TrendScout'),
+        React.createElement('h1',null,'Catalyst'),
         React.createElement('span',null,'Admin Panel')
       ),
       TABS.map(t=>React.createElement('div',{key:t.id,className:'nav-item'+(tab===t.id?' active':''),onClick:()=>setTab(t.id)},

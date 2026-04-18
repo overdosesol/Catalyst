@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-REMOTE_DIR="${REMOTE_DIR:-/opt/trendscout}"
+REMOTE_DIR="${REMOTE_DIR:-/opt/catalyst}"
 
 echo ""
 echo "=== Docker ==="
@@ -34,7 +34,7 @@ echo ""
 echo "=== Extracting project ==="
 mkdir -p "$REMOTE_DIR"
 set +e
-unzip -o /tmp/trendscout.zip -d "$REMOTE_DIR" >/dev/null
+unzip -o /tmp/catalyst.zip -d "$REMOTE_DIR" >/dev/null
 UNZIP_EXIT=$?
 set -e
 if [ "$UNZIP_EXIT" -gt 1 ]; then
@@ -43,8 +43,8 @@ if [ "$UNZIP_EXIT" -gt 1 ]; then
 fi
 echo "Files extracted"
 
-if [ -f /tmp/trendscout.env ]; then
-  cp /tmp/trendscout.env "$REMOTE_DIR/.env"
+if [ -f /tmp/catalyst.env ]; then
+  cp /tmp/catalyst.env "$REMOTE_DIR/.env"
   chmod 600 "$REMOTE_DIR/.env"
   echo ".env copied"
 fi
@@ -63,10 +63,19 @@ echo "=== Starting containers ==="
 cd "$REMOTE_DIR"
 
 if command -v pm2 >/dev/null 2>&1; then
+  pm2 delete catalyst >/dev/null 2>&1 || true
   pm2 delete trendscout >/dev/null 2>&1 || true
   pm2 save >/dev/null 2>&1 || true
 fi
 
+# Stop & remove any legacy containers that may still hold ports
+echo "Stopping legacy containers..."
+for c in trendscout-app trendscout catalyst-app catalyst; do
+  docker stop "$c" 2>/dev/null || true
+  docker rm   "$c" 2>/dev/null || true
+done
+
+# Stop current compose stack (handles catalyst-app and any other services)
 $DC down || true
 $DC build
 $DC up -d
@@ -86,7 +95,7 @@ else
   echo "Health check not ready yet (container may still be starting)"
 fi
 
-rm -f /tmp/trendscout.zip /tmp/trendscout.env /tmp/trendscout_setup.sh
+rm -f /tmp/catalyst.zip /tmp/catalyst.env /tmp/catalyst_setup.sh
 
 echo ""
 echo "DEPLOY_SUCCESS"

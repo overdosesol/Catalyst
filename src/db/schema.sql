@@ -1,5 +1,5 @@
 -- ---------------------------------------------------------
---  TrendScout Database Schema  v3.0
+--  Catalyst Database Schema  v3.0
 --  Multi-user SaaS with Solana Pay
 -- ---------------------------------------------------------
 

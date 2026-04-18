@@ -90,8 +90,8 @@ class SolanaPayMonitor {
     const params = new URLSearchParams({
       amount: String(amount),
       reference,
-      label: 'TrendScout',
-      message: `TrendScout ${planName} plan`,
+      label: 'Catalyst',
+      message: `Catalyst ${planName} plan`,
     });
 
     if (currency === 'USDC') {

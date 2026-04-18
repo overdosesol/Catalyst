@@ -1,7 +1,7 @@
 #!/bin/bash
-# TrendScout v3.0 — Проверка статуса системы
+# Catalyst v3.0 — Проверка статуса системы
 
-echo "🔍 Проверка статуса TrendScout..."
+echo "🔍 Проверка статуса Catalyst..."
 echo ""
 
 if command -v docker-compose &> /dev/null; then
@@ -10,7 +10,7 @@ if command -v docker-compose &> /dev/null; then
   echo ""
   
   echo "💾 Использование ресурсов:"
-  docker stats --no-stream trendscout-app 2>/dev/null || echo "Контейнер не запущен"
+  docker stats --no-stream catalyst-app 2>/dev/null || echo "Контейнер не запущен"
   echo ""
 fi
 

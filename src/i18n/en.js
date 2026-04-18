@@ -3,7 +3,7 @@
  */
 export default {
   // ── Bot welcome & commands ─────────────────────────────────────────────
-  welcome: `\u{1F680} <b>Welcome to TrendScout!</b>
+  welcome: `\u{1F680} <b>Welcome to Catalyst!</b>
 
 24/7 AI-powered trend monitoring for memecoin narratives.
 
@@ -14,7 +14,7 @@ Use the menu below to configure your preferences.`,
   welcomeBack: (plan) => `\u{1F44B} <b>Welcome back!</b>\nYour plan: <b>${plan}</b>\nUse /menu to manage settings.`,
 
   // ── Main menu ──────────────────────────────────────────────────────────
-  menuTitle: '\u{2699}\u{FE0F} <b>Settings</b>\n\nManage your TrendScout preferences:',
+  menuTitle: '\u{2699}\u{FE0F} <b>Settings</b>\n\nManage your Catalyst preferences:',
   btnSources: '\u{1F4E1} Sources',
   btnLanguage: '\u{1F310} Language',
   btnThreshold: '\u{1F3AF} Alert Threshold',
@@ -67,8 +67,8 @@ Use the menu below to configure your preferences.`,
   btnPaySOL: '\u{25C9} Pay with SOL',
   btnPayUSDC: '\u{25C9} Pay with USDC',
   btnPayStars: (amount) => '\u2B50 Telegram Stars (' + amount + ' \u2B50)',
-  starsInvoiceTitle: (plan) => 'TrendScout \u2014 ' + plan,
-  starsInvoiceDesc: (plan) => 'Access to TrendScout ' + plan + '. Payment is confirmed instantly.',
+  starsInvoiceTitle: (plan) => 'Catalyst \u2014 ' + plan,
+  starsInvoiceDesc: (plan) => 'Access to Catalyst ' + plan + '. Payment is confirmed instantly.',
   paymentInstructions: (amount, currency, address, reference) =>
     `\u{1F4B0} <b>Payment Instructions</b>\n\n` +
     `<b>Option 1 (Recommended):</b>\nScan the QR code below using your wallet (Phantom / Solflare). Amount and details will be filled automatically.\n\n` +
