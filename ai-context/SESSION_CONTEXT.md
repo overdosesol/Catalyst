@@ -109,3 +109,30 @@
   - dashboard has a right-side intelligence rail (`Session Pulse`, `Hot Now`, `Sources`, `Category Focus`); on narrow screens this rail uses internal scroll to avoid clipping
   - temporary explanatory copy that was briefly added to dashboard/admin was removed after review
   - quick rollback files exist: `.codex-backups/dashboard.server.before-2026-04-18.js`, `.codex-backups/admin.server.before-2026-04-18.js`
+
+## Dashboard v3.2 UX (2026-04-20)
+
+- **Темизация**: 7 dark-тем через `body[data-theme="..."]` (Midnight / Teal / Abyss / Violet / Acid / Sunset / Cyberpunk). Ключ localStorage: `ts_theme`. Все акценты используют CSS var `--accent-rgb` для `rgba(var(--accent-rgb), α)` паттерна — нового hardcoded rgba быть не должно
+- **Layout**: CSS Grid с draggable column dividers (`.col-resizer` между sidebar/main/rail); prefs в `ts_prefs_v1.colLeft/.colRight`; limits 180–540 / 240–630px; double-click = reset
+- **Навигация**:
+  - Top-right: Account button (аватарка + `@username`, открывает Account sheet) + ⚙️ Settings gear
+  - Bottom-left nav: Feed + Stats (Settings перенесены наверх, чтобы не дублировались)
+  - Phase filter (All/Early/Forming/Strong/Saturated) — в sidebar, не в тулбаре
+  - Esc: закрывает модалку / модальный trend / возвращает в Feed из Stats
+- **Modal sheets**: Settings / Account / Stats открываются как центрированные модальные окна с `backdrop-filter: blur(14px)` и затемнением; body scroll lock; закрываются по Esc, клику по фону или ✕. Лента (`dashboard-grid`) всегда рендерится под оверлеем. Компонент: `Sheet`. Классический 2-col layout удалён
+- **AccountPanel** — отдельная панель (hero card + аватар + plan badge + подписка + threshold + logout). `Row`/`Toggle` на module-scope (ранее были внутри SettingsPanel — приводило к ReferenceError)
+
+## Telegram avatar → dashboard (2026-04-20)
+
+- **БД**: `users.avatar_file_id`, `users.avatar_file_unique_id`, `users.avatar_checked_at` (миграция через PRAGMA-guarded ALTER); метод `db.setUserAvatar(userId, fileId, fileUniqueId)`
+- **Бот** (`notifications/telegram.js`):
+  - `refreshUserAvatar(chatId, userId, {force})` — `getUserProfilePhotos` → max size → save to DB; throttle 6ч; тихий fail на privacy-locked юзерах
+  - `getFileUrl(fileId)` — `bot.getFile` → `api.telegram.org/file/bot<TOKEN>/...` (токен остаётся на сервере)
+  - Hook в `/start` (включая deep-link `auth_<sessionId>`) — fire-and-forget
+- **Dashboard**:
+  - `GET /api/auth/avatar` — прокси с disk cache в `data/avatars/<fileUniqueId>.jpg`, TTL 7 дней через `Cache-Control: private, max-age=604800, immutable`
+  - `_handleAuthMe` запускает фоновый `refreshUserAvatar` (throttled)
+  - `_publicUser` отдаёт `hasAvatar: boolean`, `avatarKey: string|null` (= fileUniqueId)
+  - UI (hero card + top-right): `<img src="/api/auth/avatar?token=...&k=<avatarKey>">`; onError → fallback на букву / 👤
+  - `.gitignore`: `data/avatars/`
+- **Смена фото в TG**: `fileUniqueId` меняется → `avatarKey` в ответе `/me` меняется → браузер перекачивает (cache-bust через query param); диск-кэш хранит обе версии (старую можно периодически чистить)
