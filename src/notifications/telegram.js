@@ -19,7 +19,7 @@ class TelegramNotifier {
     this.db = db;
     this.config = config;
     this.solanaMonitor = solanaMonitor; // injected after creation, or passed directly
-    this.twitterChecker = new TwitterChecker(config, logger);
+    this.twitterChecker = new TwitterChecker(config, logger, db);
     this.enabled = !!this.botToken;
     // Rate limiter: max 30 interactions per user per minute
     this._rateLimiter = new UserRateLimiter({ windowMs: 60_000, maxRequests: 30 });

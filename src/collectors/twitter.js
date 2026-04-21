@@ -10,9 +10,43 @@ import BaseCollector from './base-collector.js';
  *  - Clusters tweets by hashtag/topic to surface emerging narratives
  */
 
-const ACTOR_ID = 'apidojo~tweet-scraper';
 const MAX_ITEMS = 20;
 const TIMEOUT_SECS = 90;
+
+// ── Actor registry ──────────────────────────────────────────────────────────
+// Each entry is a pluggable Apify Twitter scraper. The active actor is picked
+// at runtime from DB setting 'twitterActor' (admin-configurable without
+// restart). Both current actors happen to return identical engagement fields
+// (viewCount / likeCount / retweetCount), so _normalize stays actor-agnostic.
+// Default is 'kaitoeasyapi' — the more mature one (20+ months, 17K users).
+//
+// To add a new actor: drop a new key here + its token in .env (APIFY_API_<X>),
+// wire it into config.js → apify.twitterKeys, and add it to admin-side
+// VALID_TWITTER_ACTORS. No changes needed elsewhere.
+const ACTORS = {
+  kaitoeasyapi: {
+    id: 'kaitoeasyapi~twitter-x-data-tweet-scraper-pay-per-result-cheapest',
+    // Kaito accepts EITHER twitterContent (single string) OR searchTerms (array).
+    // We use searchTerms — safer because `twitterContent: ""` triggers input
+    // validation errors on some schema revisions. Empty lang field also
+    // intermittently fails validation → only include it when non-empty.
+    buildInput: (query, maxItems) => ({
+      searchTerms: [query],
+      maxItems,
+      queryType: 'Top',
+    }),
+  },
+  xquik: {
+    id: 'xquik~x-tweet-scraper',
+    buildInput: (query, maxItems) => ({
+      searchTerms: [query],
+      maxItems,
+      queryType: 'Top',
+      includeSearchTerms: false,
+    }),
+  },
+};
+const DEFAULT_ACTOR = 'kaitoeasyapi';
 
 // ── Search presets ────────────────────────────────────────────────────────────
 // Each preset = 6 queries. Per cycle we run 2 (rotated).
@@ -75,16 +109,29 @@ class TwitterCollector extends BaseCollector {
   constructor(config, logger, db) {
     super('Twitter', logger);
     this.enabled = config.twitter?.enabled ?? false;
-    this.apifyKeys = [config.apify?.apiKey, config.apify?.apiKey2].filter(Boolean);
-    this._keyIndex = 0;
+    this.twitterKeys = config.apify?.twitterKeys || {};
     this.customQueries = config.twitter?.queries || null; // manual override via .env
     this.maxItemsPerQuery = config.twitter?.maxItemsPerQuery || MAX_ITEMS;
     this.db = db;
 
-    if (this.enabled && this.apifyKeys.length === 0) {
-      this.logger.warn('[Twitter] enabled=true but APIFY_API not set — disabling');
+    // Validate: at least one actor key must be present.
+    const configuredActors = Object.entries(this.twitterKeys).filter(([, v]) => v).map(([k]) => k);
+    if (this.enabled && configuredActors.length === 0) {
+      this.logger.warn('[Twitter] enabled=true but no actor keys (APIFY_API_KAITO / APIFY_API_XQUIK) set — disabling');
       this.enabled = false;
     }
+  }
+
+  /**
+   * Resolve the active actor definition + its API key.
+   * Falls back to default if the configured actor has no key or is unknown.
+   */
+  _activeActor() {
+    const chosen = (this.db?.getSetting('twitterActor', DEFAULT_ACTOR) || DEFAULT_ACTOR).toLowerCase();
+    const def = ACTORS[chosen] || ACTORS[DEFAULT_ACTOR];
+    const key = this.twitterKeys[chosen] || this.twitterKeys[DEFAULT_ACTOR] || '';
+    const name = ACTORS[chosen] ? chosen : DEFAULT_ACTOR;
+    return { name, def, key };
   }
 
   _getQueries() {
@@ -92,12 +139,6 @@ class TwitterCollector extends BaseCollector {
     const preset = this.db?.getSetting('activePreset', 'general') || 'general';
     const queries = PRESET_QUERIES[preset] || PRESET_QUERIES.general;
     return queries;
-  }
-
-  _nextKey() {
-    const key = this.apifyKeys[this._keyIndex % this.apifyKeys.length];
-    this._keyIndex++;
-    return key;
   }
 
   async collect() {
@@ -131,12 +172,13 @@ class TwitterCollector extends BaseCollector {
   }
 
   /**
-   * Pick 2 queries per cycle (rotates through the list to balance Apify usage)
+   * Pick 2 queries per cycle (rotates through the list over successive calls)
    */
   _pickQueries() {
     const queries = this._getQueries();
     const cycleSize = 2;
-    const start = (this._keyIndex * cycleSize) % queries.length;
+    this._cycleCounter = (this._cycleCounter || 0) + 1;
+    const start = (this._cycleCounter * cycleSize) % queries.length;
     const picked = [];
     for (let i = 0; i < cycleSize; i++) {
       picked.push(queries[(start + i) % queries.length]);
@@ -145,16 +187,14 @@ class TwitterCollector extends BaseCollector {
   }
 
   async _searchQuery(query) {
-    const apiKey = this._nextKey();
-    const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/run-sync-get-dataset-items?token=${apiKey}&timeout=${TIMEOUT_SECS}`;
+    const { name: actorName, def: actor, key: apiKey } = this._activeActor();
+    if (!apiKey) {
+      throw new Error(`[Twitter] No API key configured for actor '${actorName}'`);
+    }
+    const runUrl = `https://api.apify.com/v2/acts/${actor.id}/run-sync-get-dataset-items?token=${apiKey}&timeout=${TIMEOUT_SECS}`;
 
-    const input = {
-      searchTerms: [query],
-      maxItems: this.maxItemsPerQuery,
-      queryType: 'Top',     // Top tweets sorted by engagement by Twitter itself
-      addUserInfo: true,    // include follower counts for viralScore calculation
-      minimumFavorites: 5000, // native Apify filter as safety net
-    };
+    // Per-actor input shape. Both return identical engagement fields.
+    const input = actor.buildInput(query, this.maxItemsPerQuery);
 
     const response = await fetch(runUrl, {
       method: 'POST',
@@ -164,7 +204,9 @@ class TwitterCollector extends BaseCollector {
 
     if (!response.ok) {
       const err = await response.text();
-      throw new Error(`Apify ${response.status}: ${err.substring(0, 200)}`);
+      // Bump the log slice up — Apify's 400 responses carry nested JSON with
+      // the actual validation reason beyond the first 200 chars.
+      throw new Error(`Apify ${response.status} [${actorName}]: ${err.substring(0, 600)}`);
     }
 
     const tweets = await response.json();

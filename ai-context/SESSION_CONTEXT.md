@@ -38,11 +38,24 @@
 - Stage 1 scoring использует выбранный provider/model, Stage 2 `x_search` принудительно через Grok (xAI, `grok-4-1-fast-non-reasoning`)
 - Для OpenAI `gpt-5-mini` добавлен авто-ретрай без `temperature` (иначе модель отвечает 400)
 - Тикерная логика удалена end-to-end: `suggestedTicker` больше не запрашивается у AI, не сохраняется в `raw_metrics`, не выводится в dashboard/telegram
-- В рассылке алертов введён двухступенчатый gate:
-  - `memePotential >= max(user.alert_threshold, global alertThreshold)`
-  - `score (virality) >= global viralityThreshold`
-- `alertThreshold` из dashboard теперь реально применяется как global floor (раньше фактически не участвовал в send-loop)
-- Добавлен глобальный setting `viralityThreshold` (default: 70), доступен в dashboard settings API/UI
+- **Alert gate переведён на единую метрику `alertScore`** (2026-04-22, заменил 3 независимых гейта):
+  - `alertScore = w_meme·memePotential + w_viral·virality + w_emerg·emergence + w_x·twitterScore + w_fb·feedbackBoost − w_junk·junkPenalty − staleDecay`
+  - Положительные веса (POSITIVE = meme/viral/emergence/twitter/feedback) в сумме **≤ 1.0** → скор остаётся в шкале 0-100
+  - Dashboard: юзер крутит **один** ползунок «Чувствительность алертов» (0-100, stored в `users.alert_threshold`)
+  - Admin: крутит веса, junk-multiplier, staleDecay (perHour/grace/cap), hardJunkStop — всё через `/api/scanner-config`
+  - Gate: `alertScore >= max(user.alert_threshold, global alertThreshold)` **AND** `junkPenalty < alertHardJunkStop`
+  - Формула/дефолты: `src/analysis/scorer.js` → `DEFAULT_ALERT_WEIGHTS`, `loadAlertWeights(db)`, `computeAlertScore(trend, w)`; возвращает `{ alertScore, hardJunk, breakdown }`; применено в Stage1/Stage2/heuristic/fallback путях
+  - `feedbackBoost` (0-100, 50 = нейтрально) считается из live `feedback_votes` на момент gate-loop'а в `src/index.js`; < 5 голосов — pull towards 50
+  - `staleDecay`: штраф `perHour * max(0, ageHours - grace)`, capped at `cap`
+  - Dynamic slider limits в admin: track всегда 0..1, в `onChange` clamp к budget = `1 − Σ(других весов)`; FP quantization через integer grid (`Math.round(v * 20)`)
+  - Server-side guard: sum of POSITIVE ≤ 1.0 проверяется в `_setScannerConfig` **до** commit'а любого из весов
+  - `viralityThreshold` остаётся как legacy setting (используется в скоринге, не в gate)
+- **Alert decisions ring buffer + viewer** (2026-04-22):
+  - `appState.alertDecisions[]` (cap 500, in-memory, reset при рестарте); `recordAlertDecision(rec)` в `src/index.js`
+  - Каждое решение: `{ ts, decision: 'sent'|'skipped', reason, gates[], title, source, category, alertScore, threshold, breakdown, userChatId, url }`
+  - Gate-loop в `src/index.js` оценивает **все** гейты (threshold / hard_junk / source / dedup / daily / cap / send) и пишет массив `gates[{ name, passed, detail }]` — не short-circuit'ит на первом провале (кроме cap/daily — там `break`)
+  - Admin page `DecisionsPage` (`src/admin/server.js`): карточки с clickable source URL, gate-chips ✓/✗ (title=detail на ховере), breakdown в моно-боксе, left-border accent по вердикту; auto-refresh 10s; filter chips (all/sent/skipped) + reason counts
+  - Endpoint: `GET /api/alert-decisions?filter=&reason=&limit=` → `{ total, counts, items }`
 - **NarrativeClusterer** (pre-AI слой): Aggregator → Clusterer → Scorer; Jaccard threshold=0.40; routing: `priority`/`stage1`/`save_only`/`drop`; routing теперь через `emergenceScore` (не прямые условия)
 - **EmergenceScore** (0–100): три пути — `max(spread, breakout) + ideaBoost`, cap 100
   - Spread: платформы(0–30)+velocity(0–25)+organicSpread(0–20)+noveltyStage(0–15)+authorDiversity(0–10)
@@ -187,4 +200,25 @@
 
 ## Ловушка server.js — backticks в комментариях
 
-`src/dashboard/server.js` — единый огромный inline React SPA внутри одного template literal. **Любой бэктик в `//` комментарии ломает outer literal** с `SyntaxError: Unexpected identifier '<token>'`. Уже трижды ловили (id, videoUrl, ref). Правило: в этом файле **никогда** не писать `` `token` `` в комментариях. Всегда `node -c src/dashboard/server.js` перед деплоем.
+И `src/dashboard/server.js`, и `src/admin/server.js` — огромные inline React SPA внутри template literal. **Любой бэктик в `//` комментарии ломает outer literal** с `SyntaxError: Unexpected identifier '<token>'`. Ловили уже 4 раза (id, videoUrl, ref, id в admin). Правило: в этих файлах **никогда** не писать `` `token` `` в комментариях. Всегда `node -c <file>` перед деплоем.
+
+## Twitter/X scraper — pluggable actor registry (2026-04-22)
+
+- **Проблема**: старый `apidojo~tweet-scraper` почти не отдавал `viewCount` (X закрыл публичный доступ к просмотрам) — posts с 1M+ views практически не доходили до пайплайна
+- **Решение**: актёр стал runtime-переключаемым из админки. Два варианта:
+  - `kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest` — **default**, $0.25/1K, 17K users, 20 месяцев истории, 99%+ success
+  - `xquik/x-tweet-scraper` — $0.15/1K, 1-2 месяца истории, 145 users, экспериментальный (но GitHub/сайт есть, не scam)
+- **Реестр**: `ACTORS` объект в `src/collectors/twitter.js` (дубль в `twitter-check.js`) — каждая запись имеет `id` + `buildInput(query, maxItems)`. Kaito принимает `twitterContent: <string>`, xquik — `searchTerms: [<string>]`; output у обоих идентичный (`viewCount`, `likeCount`, `retweetCount`) → `_normalize` actor-agnostic
+- **Per-actor tokens**: `config.apify.twitterKeys = { kaitoeasyapi, xquik }` (из `APIFY_API_KAITO` / `APIFY_API_XQUIK` в `.env`); `apiKey2` удалён полностью (был legacy-фоллбэк на второй Apify-аккаунт, больше не нужен)
+- **Runtime setting**: `db.getSetting('twitterActor', 'kaitoeasyapi')` — читается в `_activeActor()` collector'а/checker'а на каждом запросе; применяется со следующего цикла без рестарта
+- **Admin UI**: секция «🐦 Twitter/X scraper» в ScannerConfigSection, карточки-переключатель (как пресеты поиска); `VALID_TWITTER_ACTORS` server-side валидация
+- **Key rotation removed**: старая логика `_nextKey()` / `_keyIndex` вырезана — теперь каждый актёр работает со своим одним ключом, rotation не нужна (для rate-limit'а есть delay между запросами)
+- **Как добавить актёр**: (1) записать в `ACTORS` в `twitter.js` + `twitter-check.js`, (2) в `config.js` под `apify.twitterKeys`, (3) в `VALID_TWITTER_ACTORS` в admin `_setScannerConfig`, (4) карточку в `TWITTER_ACTORS` в `ScannerConfigSection`
+- **Security**: Apify `General resource access` должен быть **Restricted** (не Anonymous) — иначе runId/datasetId даёт анонимный доступ к твоим данным без токена
+
+## Env keys (2026-04-22)
+
+- `APIFY_API` — primary Apify token (TikTok collector использует его)
+- `APIFY_API_KAITO` — dedicated token for kaitoeasyapi Twitter actor
+- `APIFY_API_XQUIK` — dedicated token for xquik Twitter actor
+- `APIFY_API2` — **удалён** (был legacy-фоллбэк на второй аккаунт)

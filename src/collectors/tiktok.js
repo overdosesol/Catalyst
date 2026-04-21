@@ -26,7 +26,7 @@ class TikTokCollector extends BaseCollector {
   constructor(config, logger, db) {
     super('TikTok', logger);
     this.enabled = config.tiktok?.enabled ?? false;
-    this.apifyKeys = [config.apify?.apiKey, config.apify?.apiKey2].filter(Boolean);
+    this.apifyKeys = [config.apify?.apiKey].filter(Boolean);
     this._keyIndex = 0;
     this.customHashtags = config.tiktok?.hashtags || null;
     this.maxVideosPerTag = config.tiktok?.maxVideosPerTag || MAX_VIDEOS_PER_TAG;

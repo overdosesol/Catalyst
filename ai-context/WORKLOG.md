@@ -860,3 +860,60 @@
   - На свежей БД `why_now` пустой у всех старых записей — заполняется постепенно по мере того, как новые тренды проходят AI scoring
   - Клиент кэширует бандл JS агрессивно — при выкатке UI-фич нужно просить ctrl+shift+R или добавить cache-busting (TODO при росте аудитории)
   - Персонализация требует минимум ~5-10 голосов per category чтобы быть заметной; для нового юзера ранжирование идентично глобальному
+
+---
+
+## 2026-04-21 — 2026-04-22 (unified alertScore + decisions viewer + twitter actor switch)
+
+- Model/session: Claude Sonnet 4.7
+- Цель: единая метрика для алерт-гейта (вместо 3 независимых условий), диагностический viewer «почему этот тренд не улетел в алерт», и переключаемый Twitter scraper (пользователь жаловался что никогда не видит постов с >1M просмотров)
+- Изменения (файлы):
+  - **`src/analysis/scorer.js`**:
+    - `DEFAULT_ALERT_WEIGHTS`: meme=0.35, viral=0.25, emerg=0.20, twitter=0.10, feedback=0.10, junk=0.50 (multiplier), staleDecay {perHour=2, grace=24, cap=30}, hardJunkStop=70
+    - `loadAlertWeights(db)` — читает все веса из settings с дефолтами
+    - `feedbackBoostFromStats(likes, dislikes)` — 0-100, 50 = нейтрально, < 5 голосов pull towards 50
+    - `computeAlertScore(trend, w)` — возвращает `{ alertScore, hardJunk, breakdown }`
+    - Применено в Stage1 / Stage2 / heuristic / fallback путях; пишет `trend.alertScore` и `trend.alertBreakdown`
+  - **`src/index.js`**:
+    - Заменены 3 независимых гейта (memePotential / score / junk) на единый `alertScore ≥ effectiveAlertThreshold` + hardJunk stop
+    - Pre-gate loop пересчитывает fresh `_feedbackBoost` (live из `feedback_votes`) и `_ageHours` для каждого тренда — gate использует актуальные данные, не snapshot из scoring'а
+    - Gate loop теперь оценивает **все** гейты (threshold / hard_junk / source / dedup / daily / cap) и пишет `gates[{ name, passed, detail }]` — короткое замыкание только для cap/daily (`break`), остальные `continue` чтобы диагностика видела полный провал
+    - `appState.alertDecisions[]` (cap 500) + `recordAlertDecision(rec)` — in-memory ring buffer
+    - `decisionBase` включает `url: trend.url || null` для ссылки на источник в admin UI
+    - Импорт: `import Scorer, { loadAlertWeights, computeAlertScore, feedbackBoostFromStats } from './analysis/scorer.js';`
+  - **`src/db/database.js`**: `alertScore` + `alertBreakdown` сохраняются в `trends.raw_metrics` JSON
+  - **`src/admin/server.js`**:
+    - `/api/alert-decisions` endpoint — фильтр по `filter`/`reason`, агрегация `counts`, `limit` до 500
+    - `_getScannerConfig` / `_setScannerConfig` — 6 весов (meme/viral/emerg/twitter/feedback/junk) + 3 stale-decay поля + hardJunkStop
+    - Server-side guard: **sum of positive weights ≤ 1.0** проверяется **до** commit'а — иначе откат всех pending writes
+    - `ScannerConfigSection`: новые ползунки весов с **динамическим лимитом** — track 0..1 визуально, но `onChange` clamp'ит к budget = `1 − Σ(других)`. FP quantization через integer grid: `Math.round(v * 20)` / 20 (иначе 0.65 → 0.6500000000000001 съедал шаг и UI показывал ⛔ при сумме 0.95)
+    - Счётчик Σ внизу, цвет зависит от суммы (red если > 1.0001, green если > 0.95)
+    - `DecisionsPage` — карточки с clickable source URL (↗ в новой вкладке), gate-chips ✓/✗ (green/red) с `title=detail` на ховере, breakdown в моно-боксе с dashed border, left-border accent колоран под вердикт, auto-refresh 10s, filter chips (all/sent/skipped), reason count chips
+    - `DECISION_LABELS` и `GATE_LABELS` переписаны под новую схему reason'ов (threshold / hard_junk / source / dedup / daily / cap / sent / send_failed)
+    - Навигация: новая вкладка `{id:'decisions', icon:'🔔', label:'Алерты'}`
+  - **`src/dashboard/server.js`**:
+    - Один ползунок «Чувствительность алертов» (0-100, integer) в Account/Settings panel → POST `/api/user/threshold` → `users.alert_threshold`
+    - `AlertSensitivityRow` React компонент; сохранение по pointerup/keyup
+    - `_formatTrend` отдаёт `alertScore` + `alertBreakdown` (для будущего UI)
+    - Переводы RU/EN
+- Twitter actor switch (продолжение той же сессии):
+  - Research: fetch'нуты 4 Apify actor store pages + профили мейнтейнеров. Выбраны:
+    - `kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest` — $0.25/1K, 17K users, 20 месяцев, 99% success → default
+    - `xquik/x-tweet-scraper` — $0.15/1K, 1 месяц истории, 145 users, 97.9% success, активный GitHub/домен → экспериментальный
+    - Input-схемы обоих чистые (никаких exec/webhook/eval полей); output с одинаковыми field names (`viewCount`, `likeCount`, `retweetCount`) → `_normalize` actor-agnostic
+  - **`.env`**: добавлены `APIFY_API_KAITO` + `APIFY_API_XQUIK` (per-actor tokens). `APIFY_API2` удалён из `config.js` (второй аккаунт больше не нужен)
+  - **`src/config.js`**: `apify.twitterKeys = { kaitoeasyapi, xquik }` вместо `apiKey2`
+  - **`src/collectors/twitter.js`**: `ACTORS` registry + `_activeActor()` читает `db.getSetting('twitterActor', 'kaitoeasyapi')`; rotation `_keyIndex` удалён, вместо него `_cycleCounter` для ротации **запросов** (2 query/cycle); `buildInput(query, maxItems)` per-actor чтобы развести разные input-форматы
+  - **`src/collectors/twitter-check.js`**: зеркало ACTORS (дубль, без shared import); принимает `db` в конструктор
+  - **`src/notifications/telegram.js`**: `new TwitterChecker(config, logger, db)` — одна строка
+  - **`src/collectors/tiktok.js`**: `apify.apiKey2` удалён из builder списка ключей
+  - **`src/admin/server.js`**: `twitterActor` в get/set scanner config; `VALID_TWITTER_ACTORS` валидация; секция «🐦 Twitter/X scraper» с двумя карточками (🏯 KaitoEasyAPI / ⚡ Xquik) с ценой + подсказкой
+- Проверка:
+  - `node -c` на всех 6 затронутых файлах → OK (дважды поймали SyntaxError от backticks в admin template literal — 4-й раз этот баг срабатывает; правило про backticks в комментариях обновлено в SESSION_CONTEXT)
+  - Syntax check всего дерева src/ pre-deploy
+- Риски / заметки:
+  - **Пользователь вставил оба Apify-токена в чат** — рекомендовано их ротировать в Apify UI после тестирования
+  - Apify account имел `General resource access: Anonymous` → любой runId/datasetId даёт доступ без токена. Рекомендовано переключить на **Restricted** в security settings
+  - `xquik` — свежий мейнтейнер (1 месяц, 1 актёр, 145 users); риск не security, а operational — может пропасть или прекратить обновлять при блокировках X. Admin toggle решает: 2 клика — откат на Kaito
+  - Gate-loop теперь делает несколько DB `getFeedbackStats` вызовов в цикле (по одному на тренд) — при больших кластерах тренды (>100/цикл) может стать заметно; пока не критично
+  - FP quantization баг в слайдерах ловили в проде ⛔ при сумме 0.95 / 1.00 — зафиксирован integer grid подход
