@@ -3,25 +3,42 @@
  * Called on user request (button click), NOT automatically on every scan.
  */
 
-const ACTOR_ID = 'apidojo~tweet-scraper';
 const MAX_TWEETS = 5;
 const TIMEOUT_SECS = 60;
 
+// Mirror of the main collector's actor registry. Kept in-sync manually —
+// when you add an actor here, also add it in src/collectors/twitter.js.
+const ACTORS = {
+  kaitoeasyapi: {
+    id: 'kaitoeasyapi~twitter-x-data-tweet-scraper-pay-per-result-cheapest',
+    // Use searchTerms[] — see comment in twitter.js ACTORS for the why.
+    buildInput: (query, maxItems) => ({
+      searchTerms: [query], maxItems, queryType: 'Top',
+    }),
+  },
+  xquik: {
+    id: 'xquik~x-tweet-scraper',
+    buildInput: (query, maxItems) => ({
+      searchTerms: [query], maxItems, queryType: 'Top', includeSearchTerms: false,
+    }),
+  },
+};
+const DEFAULT_ACTOR = 'kaitoeasyapi';
+
 class TwitterChecker {
-  constructor(config, logger) {
-    // Build list of available API keys for round-robin rotation
-    const keys = [config?.apify?.apiKey, config?.apify?.apiKey2].filter(Boolean);
-    this.apiKeys = keys;
-    this._keyIndex = 0;
+  constructor(config, logger, db = null) {
+    this.twitterKeys = config?.apify?.twitterKeys || {};
     this.logger = logger;
-    this.enabled = keys.length > 0;
+    this.db = db;
+    this.enabled = Object.values(this.twitterKeys).some(Boolean);
   }
 
-  /** Returns the next API key in rotation */
-  _nextKey() {
-    const key = this.apiKeys[this._keyIndex % this.apiKeys.length];
-    this._keyIndex++;
-    return key;
+  _activeActor() {
+    const chosen = (this.db?.getSetting('twitterActor', DEFAULT_ACTOR) || DEFAULT_ACTOR).toLowerCase();
+    const def = ACTORS[chosen] || ACTORS[DEFAULT_ACTOR];
+    const key = this.twitterKeys[chosen] || this.twitterKeys[DEFAULT_ACTOR] || '';
+    const name = ACTORS[chosen] ? chosen : DEFAULT_ACTOR;
+    return { name, def, key };
   }
 
   /**
@@ -30,19 +47,17 @@ class TwitterChecker {
    */
   async searchNarrative(query) {
     if (!this.enabled) {
-      throw new Error('Apify API key not configured (APIFY_API missing from .env)');
+      throw new Error('Apify API key not configured (APIFY_API_KAITO / APIFY_API_XQUIK missing from .env)');
     }
 
-    const apiKey = this._nextKey();
-    this.logger.info(`[Twitter/X] Searching Apify for: "${query}" (key #${this._keyIndex})`);
+    const { name: actorName, def: actor, key: apiKey } = this._activeActor();
+    if (!apiKey) {
+      throw new Error(`[Twitter/X] No API key configured for actor '${actorName}'`);
+    }
+    this.logger.info(`[Twitter/X] Searching via '${actorName}' for: "${query}"`);
 
-    const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/run-sync-get-dataset-items?token=${apiKey}&timeout=${TIMEOUT_SECS}`;
-
-    const input = {
-      searchTerms: [query],
-      maxItems: MAX_TWEETS,
-      queryType: 'Top',  // 'Top' = most viral/liked tweets, better for virality analysis
-    };
+    const runUrl = `https://api.apify.com/v2/acts/${actor.id}/run-sync-get-dataset-items?token=${apiKey}&timeout=${TIMEOUT_SECS}`;
+    const input = actor.buildInput(query, MAX_TWEETS);
 
     const response = await fetch(runUrl, {
       method: 'POST',

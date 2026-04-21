@@ -670,6 +670,8 @@ class TrendDatabase {
       marketStage:    trend.marketStage     ?? null, // [MARKET_STAGE] remove to disable
       junkPenalty:    trend.junkPenalty     ?? trend.clusterMetrics?.junkPenalty  ?? 0, // [JUNK_FILTER]
       junkReasons:    trend.clusterMetrics?.junkReasons ?? [],                           // [JUNK_FILTER]
+      alertScore:     trend.alertScore      ?? null,
+      alertBreakdown: trend.alertBreakdown  ?? null,
     });
 
     // UPSERT: if the trend already exists in DB (re-analysis after window expiry),

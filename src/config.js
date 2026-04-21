@@ -47,7 +47,13 @@ const config = {
   // Apify — on-demand X/Twitter analysis + collectors
   apify: {
     apiKey:  process.env.APIFY_API  || '',
-    apiKey2: process.env.APIFY_API2 || '',
+    // Per-actor tokens. The active Twitter actor is a runtime admin setting
+    // ('twitterActor' in DB, values: 'kaitoeasyapi' | 'xquik'), and we look
+    // up the matching token here when instantiating the collector.
+    twitterKeys: {
+      kaitoeasyapi: process.env.APIFY_API_KAITO || '',
+      xquik:        process.env.APIFY_API_XQUIK || '',
+    },
     twitterAuthToken: process.env.TWITTER_AUTH_TOKEN || '',
     twitterCt0:       process.env.TWITTER_CT0        || '',
   },

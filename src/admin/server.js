@@ -5,6 +5,13 @@
 
 import http from 'http';
 import { timingSafeEqual } from 'crypto';
+import {
+  FILTER_PROFILES,
+  PRESET_KEYS,
+  PROFILE_FIELD_RANGES,
+  getEffectiveProfiles,
+  validateProfileOverrides,
+} from '../analysis/filter-profiles.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -200,13 +207,36 @@ class AdminServer {
   }
 
   _getScannerConfig() {
-    const numDefaults = { alertThreshold: 60, viralityThreshold: 70, minScoreToSave: 0, maxAlertsPerCycle: 0 };
+    // Int settings — thresholds + legacy gates (kept for back-compat)
+    const numDefaults = {
+      alertThreshold: 60, viralityThreshold: 70, minScoreToSave: 0, maxAlertsPerCycle: 0,
+      alertHardJunkStop: 70,
+      alertStaleDecayPerHour: 2,
+      alertStaleDecayGrace:   24,
+      alertStaleDecayCap:     30,
+    };
     const merged = {};
     for (const [k, v] of Object.entries(numDefaults)) {
       const s = this.db.getSetting(k);
       merged[k] = (s !== undefined && s !== null && s !== '') ? Number(s) : v;
     }
     merged.activePreset = this.db.getSetting('activePreset', 'general') || 'general';
+    // Which Twitter/X scraper is active (maps to an actor in src/collectors/twitter.js)
+    merged.twitterActor = (this.db.getSetting('twitterActor', 'kaitoeasyapi') || 'kaitoeasyapi').toLowerCase();
+
+    // Float settings — alertScore component weights
+    const floatDefaults = {
+      alertWeightMemePotential: 0.35,
+      alertWeightVirality:      0.25,
+      alertWeightEmergence:     0.20,
+      alertWeightTwitter:       0.10,
+      alertWeightFeedback:      0.10,
+      alertWeightJunk:          0.50,
+    };
+    for (const [k, v] of Object.entries(floatDefaults)) {
+      const s = this.db.getSetting(k);
+      merged[k] = (s !== undefined && s !== null && s !== '') ? Number(s) : v;
+    }
     return merged;
   }
 
@@ -216,19 +246,96 @@ class AdminServer {
       if (!VALID_PRESETS.has(body.activePreset)) throw new Error('Invalid preset');
       this.db.setSetting('activePreset', body.activePreset);
     }
-    const allowed = {
+    // Twitter/X scraper actor — must match keys in src/collectors/twitter.js ACTORS.
+    // When adding a new actor there, also extend this set.
+    const VALID_TWITTER_ACTORS = new Set(['kaitoeasyapi', 'xquik']);
+    if ('twitterActor' in body) {
+      const a = String(body.twitterActor || '').toLowerCase();
+      if (!VALID_TWITTER_ACTORS.has(a)) throw new Error('Invalid twitterActor');
+      this.db.setSetting('twitterActor', a);
+    }
+    const allowedInt = {
       alertThreshold:    { min: 0, max: 100 },
       viralityThreshold: { min: 0, max: 100 },
       minScoreToSave:    { min: 0, max: 100 },
       maxAlertsPerCycle: { min: 0, max: 50  },
+      alertHardJunkStop: { min: 0, max: 100 },
+      alertStaleDecayPerHour: { min: 0, max: 20 },
+      alertStaleDecayGrace:   { min: 0, max: 168 },
+      alertStaleDecayCap:     { min: 0, max: 100 },
     };
-    for (const [key, rules] of Object.entries(allowed)) {
+    for (const [key, rules] of Object.entries(allowedInt)) {
       if (!(key in body)) continue;
       const val = Number(body[key]);
       if (isNaN(val) || val < rules.min || val > rules.max) {
         throw new Error(`${key}: must be ${rules.min}-${rules.max}`);
       }
       this.db.setSetting(key, Math.round(val));
+    }
+    const allowedFloat = {
+      alertWeightMemePotential: { min: 0, max: 2 },
+      alertWeightVirality:      { min: 0, max: 2 },
+      alertWeightEmergence:     { min: 0, max: 2 },
+      alertWeightTwitter:       { min: 0, max: 2 },
+      alertWeightFeedback:      { min: 0, max: 2 },
+      alertWeightJunk:          { min: 0, max: 3 },
+    };
+    // Collect float writes, validate per-field ranges, then enforce the
+    // "sum of positive weights ≤ 1.0" invariant BEFORE committing anything.
+    const pendingFloats = {};
+    for (const [key, rules] of Object.entries(allowedFloat)) {
+      if (!(key in body)) continue;
+      const val = Number(body[key]);
+      if (isNaN(val) || val < rules.min || val > rules.max) {
+        throw new Error(`${key}: must be ${rules.min}-${rules.max}`);
+      }
+      pendingFloats[key] = val;
+    }
+
+    const POSITIVE = ['alertWeightMemePotential','alertWeightVirality','alertWeightEmergence','alertWeightTwitter','alertWeightFeedback'];
+    const defaults = { alertWeightMemePotential:0.35, alertWeightVirality:0.25, alertWeightEmergence:0.20, alertWeightTwitter:0.10, alertWeightFeedback:0.10 };
+    const effective = (k) => {
+      if (k in pendingFloats) return pendingFloats[k];
+      const stored = this.db.getSetting(k);
+      return (stored !== undefined && stored !== null && stored !== '') ? Number(stored) : defaults[k];
+    };
+    const sum = POSITIVE.reduce((s, k) => s + (Number(effective(k)) || 0), 0);
+    if (sum > 1.0001) {
+      throw new Error(`sum of positive weights would be ${sum.toFixed(2)} > 1.00 — reduce other weights first`);
+    }
+
+    // Passed validation — now commit
+    for (const [key, val] of Object.entries(pendingFloats)) {
+      this.db.setSetting(key, String(val));
+    }
+  }
+
+  // ── Filter profiles (per-preset junk-filter tuning) ─────────────────────────
+  // Returns the full effective table (defaults merged with overrides) plus the
+  // raw overrides blob + field metadata, so the UI can render inputs + reset.
+  _getFilterProfiles() {
+    let overrides = {};
+    const raw = this.db.getSetting('filterProfiles', null);
+    if (raw) {
+      try { overrides = JSON.parse(raw) || {}; }
+      catch (_) { overrides = {}; }
+    }
+    return {
+      defaults:  FILTER_PROFILES,
+      effective: getEffectiveProfiles(overrides),
+      overrides,                       // what's actually stored (sparse)
+      fields:    PROFILE_FIELD_RANGES, // { field: {min,max,step,label,desc} }
+      presets:   PRESET_KEYS,
+    };
+  }
+
+  _setFilterProfiles(body) {
+    const cleaned = validateProfileOverrides(body?.overrides);
+    // Empty blob → delete the setting to avoid confusing "stored but empty" state
+    if (Object.keys(cleaned).length === 0) {
+      this.db.setSetting('filterProfiles', '');
+    } else {
+      this.db.setSetting('filterProfiles', JSON.stringify(cleaned));
     }
   }
 
@@ -693,6 +800,41 @@ class AdminServer {
         } catch (e) {
           return json(res, 400, { error: e.message });
         }
+      }
+
+      // ── Filter profiles — per-preset junk-filter weights ──
+      if (path === '/api/filter-profiles' && method === 'GET') {
+        return json(res, 200, this._getFilterProfiles());
+      }
+      if (path === '/api/filter-profiles' && method === 'POST') {
+        try {
+          const body = await parseBody(req);
+          this._setFilterProfiles(body);
+          return json(res, 200, { ok: true, ...this._getFilterProfiles() });
+        } catch (e) {
+          return json(res, 400, { error: e.message });
+        }
+      }
+
+      // Alert decisions — per-trend verdicts from the last N cycles. In-memory
+      // ring buffer on appState.alertDecisions, populated by index.js on every
+      // alert-gate evaluation. Useful to answer "почему нет алертов".
+      if (path === '/api/alert-decisions' && method === 'GET') {
+        const limit  = Math.min(500, parseInt(url.searchParams.get('limit')  || '200', 10));
+        const filter = (url.searchParams.get('filter') || 'all').toLowerCase(); // all | sent | skipped
+        const reason = (url.searchParams.get('reason') || '').trim();
+        const all = Array.isArray(this.appState?.alertDecisions) ? this.appState.alertDecisions : [];
+        let items = all.slice().reverse(); // newest first
+        if (filter === 'sent')    items = items.filter(d => d.decision === 'sent');
+        if (filter === 'skipped') items = items.filter(d => d.decision === 'skipped');
+        if (reason) items = items.filter(d => d.reason === reason);
+        items = items.slice(0, limit);
+
+        // Aggregate reason counts for a header summary
+        const counts = {};
+        for (const d of all) counts[d.reason] = (counts[d.reason] || 0) + 1;
+
+        return json(res, 200, { total: all.length, counts, items });
       }
 
       if (path === '/api/ai-models' && method === 'GET') {
@@ -1416,6 +1558,9 @@ function ScannersPage() {
     // Scanner tuning config (presets, thresholds, storage floor)
     React.createElement(ScannerConfigSection, null),
 
+    // Per-preset junk-filter weights (politics/kpop/celeb/meme-shape/safe-override)
+    React.createElement(FilterProfilesSection, null),
+
     // Per-platform collector cards
     React.createElement('div', { className: 'broadcast-box' },
       React.createElement('h3', { style: { marginBottom: 16 } }, '📡 Площадки'),
@@ -1485,6 +1630,25 @@ function ScannerConfigSection() {
     { id: 'events',      icon: '🌍', label: 'События',      hint: 'Мировые события, спорт, AI-новости' },
   ];
 
+  // Twitter/X scraper actors. The id must match a key in
+  // src/collectors/twitter.js ACTORS + VALID_TWITTER_ACTORS in _setScannerConfig.
+  const TWITTER_ACTORS = [
+    {
+      id: 'kaitoeasyapi',
+      icon: '🏯',
+      label: 'KaitoEasyAPI',
+      price: '$0.25 / 1K',
+      hint: 'Зрелый, 17K юзеров, 99% success. Рекомендуется по умолчанию.',
+    },
+    {
+      id: 'xquik',
+      icon: '⚡',
+      label: 'Xquik',
+      price: '$0.15 / 1K',
+      hint: 'Новый, 1 актёр, 145 юзеров. Дешевле, но меньше истории — экспериментальный.',
+    },
+  ];
+
   const row = (label, key, min, max, step, disp) => h('div', { className: 'scfg-row' },
     h('div', { className: 'scfg-row-top' },
       h('span', { className: 'scfg-label' }, label),
@@ -1517,15 +1681,106 @@ function ScannerConfigSection() {
       ))
     ),
 
+    // Twitter/X scraper picker — applies on next scan cycle. Each actor has
+    // its own Apify token in .env (APIFY_API_KAITO / APIFY_API_XQUIK).
+    h('div', { className: 'scfg-section' },
+      h('h4', { className: 'scfg-h4' }, '🐦 Twitter/X scraper'),
+      h('p', { className: 'scfg-desc' },
+        'Какой Apify-актёр будет скрейпить X. Переключение применяется со следующего цикла. ' +
+        'Оба возвращают одинаковый формат (viewCount, likeCount, retweetCount) — переключать безопасно.'),
+      h('div', { className: 'scfg-preset-grid' },
+        TWITTER_ACTORS.map(a => h('div', {
+          key: a.id,
+          className: 'scfg-preset' + (cfg.twitterActor === a.id ? ' active' : ''),
+          onClick: () => set('twitterActor', a.id),
+        },
+          h('div', { className: 'scfg-preset-icon' }, a.icon),
+          h('div', { className: 'scfg-preset-label' },
+            a.label,
+            h('span', { style: { marginLeft: 6, fontSize: 11, color: 'var(--muted)', fontWeight: 400 } }, a.price)
+          ),
+          h('div', { className: 'scfg-preset-hint' }, a.hint)
+        ))
+      )
+    ),
+
     // Alerts section
     h('div', { className: 'scfg-section' },
-      h('h4', { className: 'scfg-h4' }, '🔔 Алерты'),
+      h('h4', { className: 'scfg-h4' }, '🔔 Алерты — единый alertScore'),
       h('p', { className: 'scfg-desc' },
-        'Нарратив алертит только если проходит оба порога — Meme Potential и Virality.'),
-      row('🔥 Meme Potential — минимум', 'alertThreshold', 0, 100, 5),
-      row('📈 Virality Score — порог',   'viralityThreshold', 0, 100, 5),
+        'alertScore = сумма взвешенных сигналов − штраф за мусор. Тренд уходит в алерт, если alertScore ≥ порога. ' +
+        'Порог пользователи настраивают сами в дашборде; здесь — floor и веса.'),
+      row('🎯 Минимальный alertScore (floor)', 'alertThreshold', 0, 100, 5),
       row('📨 Максимум алертов за цикл', 'maxAlertsPerCycle', 0, 20, 1,
           cfg.maxAlertsPerCycle === 0 ? '∞' : cfg.maxAlertsPerCycle),
+      row('🚫 Hard-stop по junk (никогда не алертить при junk ≥)', 'alertHardJunkStop', 0, 100, 5),
+    ),
+
+    // Alert score weights — positive weights must sum to ≤ 1.0. Slider track
+    // stays 0..1 for visual reference; dragging past the remaining budget is
+    // clamped in onChange (value can't exceed 1 - sum of others).
+    (() => {
+      const POSITIVE = ['alertWeightMemePotential','alertWeightVirality','alertWeightEmergence','alertWeightTwitter','alertWeightFeedback'];
+      const STEP = 0.05;
+      const sumPositive = POSITIVE.reduce((s, k) => s + (Number(cfg[k]) || 0), 0);
+      const budgetFor = (key) => {
+        const others = POSITIVE.reduce((s, k) => k === key ? s : s + (Number(cfg[k]) || 0), 0);
+        // All weights live on the 0.05 grid. Convert via *20 → round → /20 so
+        // FP artefacts like 0.65 → 0.6500000000000001 don't eat a step.
+        const othersSteps = Math.round(others * 20);
+        const freeSteps = Math.max(0, 20 - othersSteps);
+        return freeSteps / 20;
+      };
+      const weightRow = (label, key) => {
+        const budget = budgetFor(key);
+        const curr = Number(cfg[key]) || 0;
+        const atLimit = curr >= budget - 1e-9;
+        return h('div', { className: 'scfg-row' },
+          h('div', { className: 'scfg-row-top' },
+            h('span', { className: 'scfg-label' }, label),
+            h('span', { className: 'scfg-val', style: atLimit ? { color: 'var(--green)' } : null },
+              curr.toFixed(2) + (atLimit ? ' ⛔' : '')
+            )
+          ),
+          h('input', {
+            type: 'range', min: 0, max: 1, step: STEP,
+            value: curr,
+            onChange: e => {
+              const v = Math.min(+e.target.value, budget);
+              set(key, v);
+            },
+            className: 'scfg-slider'
+          })
+        );
+      };
+      const sumColor = sumPositive > 1.0001 ? 'var(--red)' : (sumPositive > 0.95 ? 'var(--green)' : 'var(--muted)');
+      return h('div', { className: 'scfg-section' },
+        h('h4', { className: 'scfg-h4' }, '⚖️ Веса alertScore'),
+        h('p', { className: 'scfg-desc' },
+          'Каждый сигнал (0–100) умножается на свой вес. Сумма положительных весов не больше 1.0 — чтобы результат оставался в шкале 0–100. ' +
+          'Ползунок упрётся в свободный бюджет: если остальные весят 0.80, этот не уедет выше 0.20. Штраф junk и staleDecay вычитаются отдельно.'),
+        weightRow('🔥 Вес Meme Potential (AI)',    'alertWeightMemePotential'),
+        weightRow('📈 Вес Virality Score',         'alertWeightVirality'),
+        weightRow('🚀 Вес Emergence (кластер)',    'alertWeightEmergence'),
+        weightRow('🐦 Вес Twitter virality',       'alertWeightTwitter'),
+        weightRow('👍 Вес Feedback (global 👍/👎)', 'alertWeightFeedback'),
+        h('div', { style: { marginTop: 10, fontSize: 12, color: sumColor, textAlign: 'right' } },
+          'Σ положительных весов: ' + sumPositive.toFixed(2) + ' / 1.00'),
+        h('div', { style: { marginTop: 14 } },
+          row('🗑️ Множитель штрафа junk',    'alertWeightJunk',          0, 2, STEP, cfg.alertWeightJunk?.toFixed(2)),
+        ),
+      );
+    })(),
+
+    // Stale decay — age-based penalty
+    h('div', { className: 'scfg-section' },
+      h('h4', { className: 'scfg-h4' }, '⏳ Stale decay (штраф за возраст)'),
+      h('p', { className: 'scfg-desc' },
+        'Тренд теряет баллы по мере старения. Grace — сколько часов тренд «молодой» и штрафа нет. ' +
+        'Cap — максимум, сколько баллов можно снять.'),
+      row('📉 Баллов штрафа за каждый час после grace', 'alertStaleDecayPerHour', 0, 10, 1),
+      row('🛡️ Grace-период (часов без штрафа)',          'alertStaleDecayGrace',   0, 72, 1),
+      row('🧢 Максимум штрафа (cap)',                    'alertStaleDecayCap',     0, 80, 5),
     ),
 
     // Storage section
@@ -1549,6 +1804,473 @@ function ScannerConfigSection() {
         style: { padding: '10px 20px' }
       }, saving ? '⏳ Сохраняю...' : '💾 Сохранить конфиг')
     )
+  );
+}
+
+// ── Per-preset junk-filter tuning ────────────────────────────────────────────
+// Admin UI for the filterProfiles setting. Each preset (general/animals/...)
+// has its own weights. Overrides are sparse — only fields that differ from
+// the defaults get stored. Shows defaults as hints + a reset chip on modified
+// fields. Changes apply from the next scan cycle (no restart).
+const FILTER_PRESET_META = {
+  general:     { icon: '🌐', label: 'Общий' },
+  animals:     { icon: '🐾', label: 'Животные' },
+  culture:     { icon: '🎭', label: 'Культура' },
+  celebrities: { icon: '⭐', label: 'Знаменитости' },
+  events:      { icon: '🌍', label: 'События' },
+};
+
+function FilterProfilesSection() {
+  const h = React.createElement;
+  const [data, setData]     = useState(null);    // full server response
+  const [draft, setDraft]   = useState({});      // local working copy of overrides
+  const [active, setActive] = useState('general');
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg]       = useState('');
+
+  useEffect(() => {
+    api('/api/filter-profiles')
+      .then(d => { setData(d); setDraft(d.overrides || {}); })
+      .catch(e => setMsg('Ошибка: ' + e.message));
+  }, []);
+
+  const flash = (m) => { setMsg(m); setTimeout(() => setMsg(''), 2500); };
+
+  if (!data) return h('div', { className: 'broadcast-box', style: { marginBottom: 20 } },
+    h('div', { className: 'loading' }, 'Загрузка профилей фильтров...')
+  );
+
+  const defaults = data.defaults;
+  const fields   = data.fields;
+  const presets  = data.presets;
+
+  // Effective value for a field on a preset = draft[preset][field] if set, else default.
+  const effVal = (preset, field) => {
+    if (draft[preset] && draft[preset][field] != null) return draft[preset][field];
+    return defaults[preset][field];
+  };
+  const isOverridden = (preset, field) => draft[preset] && draft[preset][field] != null;
+
+  const setFieldVal = (preset, field, val) => {
+    const num = Number(val);
+    setDraft(prev => {
+      const next = { ...prev };
+      const patch = { ...(next[preset] || {}) };
+      if (num === defaults[preset][field]) {
+        delete patch[field];
+      } else {
+        patch[field] = num;
+      }
+      if (Object.keys(patch).length === 0) delete next[preset];
+      else next[preset] = patch;
+      return next;
+    });
+  };
+
+  const resetField = (preset, field) => {
+    setDraft(prev => {
+      const next = { ...prev };
+      if (!next[preset]) return prev;
+      const patch = { ...next[preset] };
+      delete patch[field];
+      if (Object.keys(patch).length === 0) delete next[preset];
+      else next[preset] = patch;
+      return next;
+    });
+  };
+
+  const resetPreset = (preset) => {
+    setDraft(prev => {
+      const next = { ...prev };
+      delete next[preset];
+      return next;
+    });
+  };
+
+  const resetAll = () => setDraft({});
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const res = await api('/api/filter-profiles', 'POST', { overrides: draft });
+      setData(res);
+      setDraft(res.overrides || {});
+      flash('✓ Профили сохранены');
+    } catch (e) {
+      flash('Ошибка: ' + e.message);
+    }
+    setSaving(false);
+  };
+
+  // Count modifications for header badge
+  const modCount = Object.values(draft).reduce((acc, p) => acc + Object.keys(p).length, 0);
+  const activeMods = draft[active] ? Object.keys(draft[active]).length : 0;
+
+  // ── Field row ──
+  const fieldRow = (field) => {
+    const meta = fields[field];
+    const cur  = effVal(active, field);
+    const def  = defaults[active][field];
+    const mod  = isOverridden(active, field);
+    return h('div', { key: field, className: 'scfg-row' },
+      h('div', { className: 'scfg-row-top' },
+        h('span', { className: 'scfg-label' },
+          meta.label,
+          h('span', { style: { marginLeft: 8, fontSize: 11, color: 'var(--muted)', fontWeight: 400 } },
+            meta.desc)
+        ),
+        h('span', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          mod && h('button', {
+            onClick: () => resetField(active, field),
+            title: 'Сбросить к ' + def,
+            style: {
+              padding: '2px 8px', fontSize: 11, borderRadius: 4,
+              background: 'rgba(239,68,68,.12)', color: 'var(--red)',
+              border: '1px solid rgba(239,68,68,.3)', cursor: 'pointer',
+            },
+          }, '↺ ' + def),
+          h('span', {
+            className: 'scfg-val',
+            style: mod ? { color: 'var(--accent)', fontWeight: 700 } : null,
+          }, cur)
+        )
+      ),
+      h('input', {
+        type: 'range',
+        min: meta.min, max: meta.max, step: meta.step,
+        value: cur,
+        onChange: e => setFieldVal(active, field, e.target.value),
+        className: 'scfg-slider',
+      })
+    );
+  };
+
+  return h('div', { className: 'broadcast-box', style: { marginBottom: 20 } },
+    h('h3', { style: { marginBottom: 6 } },
+      '🎛️ Профили фильтров по пресетам',
+      modCount > 0 && h('span', {
+        style: {
+          marginLeft: 10, padding: '2px 8px', fontSize: 12,
+          borderRadius: 10, background: 'rgba(20,184,166,.15)',
+          color: 'var(--accent)', fontWeight: 600,
+        },
+      }, modCount + ' изменение' + (modCount === 1 ? '' : modCount < 5 ? 'я' : 'й'))
+    ),
+    h('p', { style: { color: 'var(--muted)', fontSize: 13, marginBottom: 16 } },
+      'Штрафы junk-filter для каждого пресета. Изменения применяются со следующего цикла сканера. ' +
+      'Сохраняются только значения, отличающиеся от дефолтных (sparse override).'
+    ),
+
+    // ── Preset tabs ──
+    h('div', {
+      style: {
+        display: 'flex', gap: 6, marginBottom: 18, flexWrap: 'wrap',
+        padding: 6, background: 'var(--bg2)', borderRadius: 10,
+        border: '1px solid var(--border)',
+      },
+    },
+      presets.map(p => {
+        const meta = FILTER_PRESET_META[p] || { icon: '•', label: p };
+        const mods = draft[p] ? Object.keys(draft[p]).length : 0;
+        const isActive = active === p;
+        return h('button', {
+          key: p,
+          onClick: () => setActive(p),
+          style: {
+            flex: '1 1 auto', minWidth: 110, padding: '8px 12px',
+            borderRadius: 8, cursor: 'pointer',
+            background: isActive ? 'var(--accent)' : 'transparent',
+            color: isActive ? '#fff' : 'var(--text)',
+            border: isActive ? '1px solid var(--accent)' : '1px solid transparent',
+            fontWeight: isActive ? 700 : 500,
+            fontSize: 13,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          },
+        },
+          h('span', null, meta.icon + ' ' + meta.label),
+          mods > 0 && h('span', {
+            style: {
+              padding: '1px 6px', fontSize: 10, borderRadius: 8,
+              background: isActive ? 'rgba(255,255,255,.22)' : 'rgba(20,184,166,.18)',
+              color: isActive ? '#fff' : 'var(--accent)',
+              fontWeight: 700,
+            },
+          }, mods)
+        );
+      })
+    ),
+
+    // ── Field rows for active preset ──
+    Object.keys(fields).map(fieldRow),
+
+    // ── Per-preset reset + save ──
+    h('div', {
+      style: {
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        marginTop: 18, gap: 10, flexWrap: 'wrap',
+      },
+    },
+      h('div', { style: { display: 'flex', gap: 8 } },
+        activeMods > 0 && h('button', {
+          onClick: () => resetPreset(active),
+          style: {
+            padding: '8px 14px', borderRadius: 8, fontSize: 12,
+            background: 'transparent', color: 'var(--red)',
+            border: '1px solid rgba(239,68,68,.4)', cursor: 'pointer',
+          },
+        }, '↺ Сбросить этот пресет'),
+        modCount > 0 && h('button', {
+          onClick: resetAll,
+          style: {
+            padding: '8px 14px', borderRadius: 8, fontSize: 12,
+            background: 'transparent', color: 'var(--muted)',
+            border: '1px solid var(--border)', cursor: 'pointer',
+          },
+        }, '↺ Сбросить все пресеты'),
+      ),
+      h('button', {
+        className: 'btn btn-primary',
+        onClick: save, disabled: saving,
+        style: { padding: '10px 20px' },
+      }, saving ? '⏳ Сохраняю...' : '💾 Сохранить профили')
+    ),
+
+    msg && h('div', {
+      style: {
+        marginTop: 14, padding: '10px 14px', borderRadius: 8,
+        background: msg.includes('Ошибка') ? 'rgba(239,68,68,.1)' : 'rgba(16,185,129,.1)',
+        color: msg.includes('Ошибка') ? 'var(--red)' : 'var(--green)',
+        fontSize: 13,
+      },
+    }, msg)
+  );
+}
+
+// ── Alert Decisions page — per-trend verdicts from the gate ──────────────────
+// Minimalist list: one card per trend, with gates + score breakdown + source link.
+// Reason vocabulary (must match index.js recordAlertDecision calls):
+//   sent, send_failed, threshold, hard_junk, source, dedup, daily, cap
+const DECISION_LABELS = {
+  sent:        { color: 'var(--green)', text: '✓ Отправлено' },
+  threshold:   { color: 'var(--red)',   text: '↓ Ниже порога' },
+  hard_junk:   { color: 'var(--red)',   text: '🗑️ Hard-junk' },
+  source:      { color: 'var(--muted)', text: '🔕 Источник отключён' },
+  dedup:       { color: 'var(--muted)', text: '✓✓ Уже отправлено' },
+  daily:       { color: 'var(--muted)', text: '📵 Лимит юзера' },
+  cap:         { color: 'var(--muted)', text: '⏱ Cap на цикл' },
+  send_failed: { color: 'var(--red)',   text: '⚠ Ошибка отправки' },
+};
+
+// Short human labels for each gate chip
+const GATE_LABELS = {
+  threshold: 'порог',
+  hard_junk: 'junk',
+  source:    'источник',
+  dedup:     'dedup',
+  daily:     'лимит',
+  cap:       'cap',
+  send:      'отправка',
+};
+
+function DecisionsPage() {
+  const h = React.createElement;
+  const [data, setData] = useState(null);
+  const [filter, setFilter] = useState('all'); // all | sent | skipped
+  const [reason, setReason] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    const qs = 'filter=' + filter + (reason ? '&reason=' + encodeURIComponent(reason) : '') + '&limit=200';
+    api('/api/alert-decisions?' + qs)
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  };
+  useEffect(load, [filter, reason]);
+  useEffect(() => {
+    const iv = setInterval(load, 10_000); // refresh every 10s
+    return () => clearInterval(iv);
+  }, [filter, reason]);
+
+  if (loading && !data) return h('div', { className: 'loading' }, 'Загрузка решений...');
+  if (!data) return h('div', { className: 'empty' }, 'Нет данных');
+
+  const items = data.items || [];
+  const counts = data.counts || {};
+
+  const fmtTime = (iso) => {
+    try { return new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+    catch { return iso; }
+  };
+  // Compact number formatter — 1234 → 1.2K, 1234567 → 1.2M
+  const fmtNum = (n) => {
+    if (n == null || isNaN(n)) return null;
+    const x = Number(n);
+    if (x >= 1_000_000) return (x / 1_000_000).toFixed(x >= 10_000_000 ? 0 : 1) + 'M';
+    if (x >= 1_000)     return (x / 1_000).toFixed(x >= 10_000 ? 0 : 1) + 'K';
+    return String(x);
+  };
+  const fmtBreakdown = (b) => {
+    if (!b) return '—';
+    const parts = [];
+    if (b.meme != null)       parts.push('meme=' + b.meme);
+    if (b.viral != null)      parts.push('viral=' + b.viral);
+    if (b.emergence != null)  parts.push('emerg=' + b.emergence);
+    if (b.twitter)            parts.push('x=' + b.twitter);
+    if (b.feedback != null && b.feedback !== 50) parts.push('fb=' + b.feedback);
+    if (b.junk)               parts.push('junk=' + b.junk);
+    if (b.staleDecay)         parts.push('stale=' + b.staleDecay);
+    return parts.join(' · ');
+  };
+
+  return h('div', null,
+    h('h2', { style: { marginBottom: 6 } }, '🔔 Решения алерт-гейта'),
+    h('p', { style: { color: 'var(--muted)', fontSize: 13, marginBottom: 16 } },
+      'Последние 500 решений, in-memory (сбрасывается при рестарте). Обновляется каждые 10 сек. ' +
+      'Всего в буфере: ' + (data.total || 0) + '.'),
+
+    // Filter chips + reason counts
+    h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 } },
+      ['all', 'sent', 'skipped'].map(f => h('button', {
+        key: f,
+        className: 'btn ' + (filter === f ? 'btn-primary' : 'btn-ghost') + ' btn-sm',
+        onClick: () => { setFilter(f); setReason(''); }
+      }, f === 'all' ? 'Все' : f === 'sent' ? '✓ Отправлены' : '✗ Отсеяны'))
+    ),
+    h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14, fontSize: 12 } },
+      Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([r, n]) => {
+        const lbl = DECISION_LABELS[r];
+        return h('button', {
+          key: r,
+          className: 'btn btn-sm ' + (reason === r ? 'btn-primary' : 'btn-ghost'),
+          style: { fontSize: 11, padding: '4px 10px', color: reason === r ? '' : (lbl?.color || 'var(--text2)') },
+          onClick: () => setReason(reason === r ? '' : r)
+        }, (lbl?.text || r) + ' · ' + n);
+      })
+    ),
+
+    // List
+    items.length === 0
+      ? h('div', { className: 'empty', style: { padding: 40 } },
+          'Пока нет решений — сканер ещё ни разу не гонял алерт-гейт.')
+      : h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+          items.map((d, i) => {
+            const lbl = DECISION_LABELS[d.reason] || { color: 'var(--text2)', text: d.reason };
+            const isSent = d.decision === 'sent';
+            const accent = isSent ? 'var(--green)' : (lbl.color || 'var(--red)');
+
+            // Fallback for old decisions without gates[] — synthesize from reason
+            const gates = Array.isArray(d.gates) && d.gates.length
+              ? d.gates
+              : (d.reason && d.reason !== 'sent'
+                  ? [{ name: d.reason, passed: false, detail: d.detail || '' }]
+                  : []);
+
+            const titleNode = d.url
+              ? h('a', {
+                  href: d.url, target: '_blank', rel: 'noopener noreferrer',
+                  style: { color: 'var(--text)', textDecoration: 'none', fontWeight: 600, fontSize: 14, lineHeight: 1.35 },
+                  onMouseOver: e => e.currentTarget.style.textDecoration = 'underline',
+                  onMouseOut:  e => e.currentTarget.style.textDecoration = 'none',
+                }, (d.title || '—'), h('span', { style: { color: 'var(--muted)', fontWeight: 400, marginLeft: 6, fontSize: 12 } }, '↗'))
+              : h('span', { style: { color: 'var(--text)', fontWeight: 600, fontSize: 14 } }, d.title || '—');
+
+            return h('div', {
+              key: i,
+              style: {
+                background: 'var(--bg2, rgba(255,255,255,0.02))',
+                border: '1px solid var(--border)',
+                borderLeft: '3px solid ' + accent,
+                borderRadius: 8,
+                padding: '12px 14px',
+              }
+            },
+              // Row 1: time + title + verdict
+              h('div', {
+                style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }
+              },
+                h('span', { style: { color: 'var(--muted)', fontSize: 11, fontFamily: 'monospace', whiteSpace: 'nowrap' } }, fmtTime(d.ts)),
+                h('div', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, titleNode),
+                h('span', {
+                  style: {
+                    color: accent, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
+                    padding: '3px 8px', borderRadius: 4,
+                    background: 'color-mix(in srgb, ' + accent + ' 12%, transparent)',
+                  }
+                }, lbl.text)
+              ),
+              // Row 2: meta (source, category, score, user)
+              h('div', {
+                style: { display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 11, color: 'var(--muted)', marginBottom: 8 }
+              },
+                d.source    && h('span', null, '📡 ', h('b', { style: { color: 'var(--text2)', fontWeight: 500 } }, d.source)),
+                d.category  && h('span', null, '📂 ', d.category),
+                d.alertScore != null && h('span', null,
+                  'score: ',
+                  h('b', { style: { color: 'var(--text2)', fontWeight: 600 } }, d.alertScore),
+                  ' / ', d.threshold
+                ),
+                d.userChatId && h('span', null, '👤 @', d.userChatId)
+              ),
+              // Row 2b: engagement — raw views/likes/retweets/upvotes from
+              // the collector. For Twitter clusters these are sums across
+              // all tweets in the cluster. Hidden if no data at all.
+              (() => {
+                const e = d.engagement || {};
+                const chips = [];
+                if (e.views    != null && fmtNum(e.views)    != null) chips.push({ icon: '👁', label: 'views',    val: fmtNum(e.views) });
+                if (e.likes    != null && fmtNum(e.likes)    != null) chips.push({ icon: '❤️', label: 'likes',    val: fmtNum(e.likes) });
+                if (e.retweets != null && fmtNum(e.retweets) != null) chips.push({ icon: '🔁', label: 'rt',       val: fmtNum(e.retweets) });
+                if (e.replies  != null && fmtNum(e.replies)  != null) chips.push({ icon: '💬', label: 'replies',  val: fmtNum(e.replies) });
+                if (e.upvotes  != null && fmtNum(e.upvotes)  != null) chips.push({ icon: '⬆',  label: 'upvotes',  val: fmtNum(e.upvotes) });
+                if (!chips.length) return null;
+                return h('div', {
+                  style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }
+                },
+                  chips.map((c, ci) => h('span', {
+                    key: ci,
+                    title: c.label,
+                    style: {
+                      fontSize: 11, padding: '2px 8px', borderRadius: 10,
+                      border: '1px solid var(--border)',
+                      color: 'var(--text2)',
+                      background: 'rgba(255,255,255,0.02)',
+                      fontFamily: 'ui-monospace, monospace',
+                    }
+                  }, c.icon + ' ' + c.val))
+                );
+              })(),
+              // Row 3: gate chips
+              gates.length > 0 && h('div', {
+                style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: d.breakdown ? 8 : 0 }
+              },
+                gates.map((g, gi) => {
+                  const c = g.passed ? 'var(--green)' : 'var(--red)';
+                  return h('span', {
+                    key: gi,
+                    title: g.detail || '',
+                    style: {
+                      fontSize: 11, padding: '2px 8px', borderRadius: 10,
+                      border: '1px solid color-mix(in srgb, ' + c + ' 40%, transparent)',
+                      color: c,
+                      background: 'color-mix(in srgb, ' + c + ' 10%, transparent)',
+                      fontFamily: 'ui-monospace, monospace',
+                      cursor: g.detail ? 'help' : 'default',
+                    }
+                  }, (g.passed ? '✓ ' : '✗ ') + (GATE_LABELS[g.name] || g.name));
+                })
+              ),
+              // Row 4: breakdown (monospace, subtle)
+              d.breakdown && h('div', {
+                style: {
+                  color: 'var(--muted)', fontSize: 11, fontFamily: 'ui-monospace, monospace',
+                  padding: '6px 8px', background: 'rgba(255,255,255,0.02)',
+                  borderRadius: 4, border: '1px dashed var(--border)',
+                }
+              }, fmtBreakdown(d.breakdown))
+            );
+          })
+        )
   );
 }
 
@@ -2066,14 +2788,15 @@ function App() {
   if (!authed) return React.createElement(AuthOverlay,{onAuth:()=>setAuthed(true)});
 
   const TABS = [
-    {id:'stats',    icon:'📊', label:'Статистика'},
-    {id:'scanners', icon:'⚙️',  label:'Сканеры'},
-    {id:'users',    icon:'👥', label:'Пользователи'},
-    {id:'payments', icon:'💳', label:'Платежи'},
-    {id:'bot',      icon:'🤖', label:'Бот и планы'},
+    {id:'stats',     icon:'📊', label:'Статистика'},
+    {id:'scanners',  icon:'⚙️',  label:'Сканеры'},
+    {id:'decisions', icon:'🔔', label:'Алерты'},
+    {id:'users',     icon:'👥', label:'Пользователи'},
+    {id:'payments',  icon:'💳', label:'Платежи'},
+    {id:'bot',       icon:'🤖', label:'Бот и планы'},
   ];
 
-  const PAGE = {stats:StatsPage, scanners:ScannersPage, users:UsersPage, payments:PaymentsPage, bot:BotPage};
+  const PAGE = {stats:StatsPage, scanners:ScannersPage, decisions:DecisionsPage, users:UsersPage, payments:PaymentsPage, bot:BotPage};
   const CurrentPage = PAGE[tab];
 
   return React.createElement('div',{className:'layout'},

@@ -9,18 +9,20 @@
  *  - Easy to disable: remove the import + `base.junkPenalty` line in clusterer.js
  *  - Does NOT touch emergence/adoption/rankScore — purely additive metadata
  *
- * Penalty sources (stack additively, then capped at 100):
- *  +40  Politics / government / war
- *  +30  K-pop / fandom / stan culture
- *  +20  Routine celebrity noise (events, interviews, relationships)
- *  +15  No meme-shape detected (no animal / absurdity / visual meme / hook)
+ * Penalty sources (stack additively, then capped at 100). All weights are
+ * supplied by the active FILTER_PROFILE (see filter-profiles.js), which is
+ * chosen based on the active search preset — so e.g. `animals` preset has
+ * a stricter politics penalty than `events`, and `celebrities` treats
+ * celeb-noise as signal (zero penalty).
  *
  * Safe-signal override:
  *  If the cluster contains strong meme-shape signals (animal, absurdity,
- *  visual meme, short punchy hook), ALL penalties are divided by 3.
- *  This prevents false positives like "weird animal at government event"
- *  or "K-pop idol does cursed thing".
+ *  visual meme, short punchy hook), ALL penalties are divided by
+ *  profile.safeOverrideDivisor (or +1 when 2+ signals fire). This prevents
+ *  false positives like "weird animal at government event".
  */
+
+import { DEFAULT_PROFILE, resolveProfile } from './filter-profiles.js';
 
 // ── Pattern library ──────────────────────────────────────────────────────────
 
@@ -50,11 +52,17 @@ const RE_HEARTWARMING = /\b(rescue|rescued|saves?\s+\w+|adopted|adoption|donated
  *
  * @param {Array}  items          — raw cluster items (with .title, .description)
  * @param {object} clusterMetrics — pre-computed cluster metrics (not modified here)
+ * @param {string} [preset]       — active search preset name; selects the
+ *                                  penalty profile. Unknown/missing → `general`.
+ * @param {object} [overrides]    — admin-UI overrides blob (shape defined in
+ *                                  filter-profiles.js). Passed to resolveProfile.
  * @returns {{ junkPenalty: number, junkReasons: string[] }}
  *   junkPenalty  0–100 (0 = clean, 100 = pure junk)
  *   junkReasons  list of triggered rules (for logging/debugging)
  */
-export function calculateJunkPenalty(items, clusterMetrics = {}) {
+export function calculateJunkPenalty(items, clusterMetrics = {}, preset = null, overrides = null) {
+  const profile = preset || overrides ? resolveProfile(preset, overrides) : DEFAULT_PROFILE;
+
   // Collect all text from the cluster
   const texts = items.map(i =>
     [i.title || '', i.description || ''].join(' ')
@@ -64,20 +72,20 @@ export function calculateJunkPenalty(items, clusterMetrics = {}) {
   let raw = 0;
 
   // ── Penalty: Politics ──────────────────────────────────────────────
-  if (RE_POLITICS.test(texts)) {
-    raw += 40;
+  if (profile.politicsPenalty > 0 && RE_POLITICS.test(texts)) {
+    raw += profile.politicsPenalty;
     reasons.push('politics');
   }
 
   // ── Penalty: K-pop / fandom ────────────────────────────────────────
-  if (RE_KPOP.test(texts)) {
-    raw += 30;
+  if (profile.kpopPenalty > 0 && RE_KPOP.test(texts)) {
+    raw += profile.kpopPenalty;
     reasons.push('kpop/fandom');
   }
 
   // ── Penalty: Routine celebrity noise ──────────────────────────────
-  if (RE_CELEB_NOISE.test(texts)) {
-    raw += 20;
+  if (profile.celebNoisePenalty > 0 && RE_CELEB_NOISE.test(texts)) {
+    raw += profile.celebNoisePenalty;
     reasons.push('celeb-noise');
   }
 
@@ -89,8 +97,8 @@ export function calculateJunkPenalty(items, clusterMetrics = {}) {
 
   const hasMemeShape = hasAnimal || hasAbsurd || hasMeme || hasHeartwarming;
 
-  if (!hasMemeShape) {
-    raw += 15;
+  if (profile.noMemeShapePenalty > 0 && !hasMemeShape) {
+    raw += profile.noMemeShapePenalty;
     reasons.push('no-meme-shape');
   }
 
@@ -99,10 +107,10 @@ export function calculateJunkPenalty(items, clusterMetrics = {}) {
   // ── Safe-signal override ───────────────────────────────────────────
   // Strong meme signals heavily offset the junk penalty.
   // E.g. "weird goat at government event" → politics penalty but animal overrides.
-  if (hasAnimal || hasAbsurd || hasMeme || hasHeartwarming) {
-    // Count how many safe signals fired
+  if (hasMemeShape) {
     const safeCount = [hasAnimal, hasAbsurd, hasMeme, hasHeartwarming].filter(Boolean).length;
-    const divisor   = safeCount >= 2 ? 4 : 3;
+    const baseDiv   = profile.safeOverrideDivisor || 3;
+    const divisor   = safeCount >= 2 ? baseDiv + 1 : baseDiv;
     raw = Math.round(raw / divisor);
     reasons.push(`safe-override(÷${divisor})`);
   }

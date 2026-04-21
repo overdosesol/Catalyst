@@ -225,6 +225,7 @@ class DashboardServer {
       if (path === '/api/settings'  && method === 'POST') return this._handleSettingsPost(req, res);
       if (path === '/api/personalization' && method === 'GET')  return this._handlePersonalizationGet(req, res);
       if (path === '/api/personalization' && method === 'POST') return this._handlePersonalizationPost(req, res);
+      if (path === '/api/user/threshold'  && method === 'POST') return this._handleUserThresholdPost(req, res);
       if (path.match(/^\/api\/collectors\/[\w_]+\/toggle$/) && method === 'POST') return this._handleCollectorToggle(req, res, path);
       if (path.match(/^\/api\/trends\/\d+\/feedback$/) && method === 'POST') return this._handleTrendFeedback(req, res, path);
 
@@ -662,6 +663,27 @@ class DashboardServer {
     return json(res, 200, { ok: true, enabled });
   }
 
+  /**
+   * POST /api/user/threshold — user sets their personal alertScore sensitivity.
+   * This is the single slider the user tunes in dashboard settings: higher =
+   * fewer, only very strong alerts; lower = more alerts. Gated by the global
+   * floor (admin's alertThreshold) when applied in the notification pipeline.
+   */
+  async _handleUserThresholdPost(req, res) {
+    const user = req.user;
+    if (!user) return json(res, 401, { error: 'Not authenticated' });
+    let body;
+    try { body = await parseBody(req); }
+    catch { return json(res, 400, { error: 'Invalid JSON' }); }
+    const val = Math.round(Number(body?.threshold));
+    if (isNaN(val) || val < 0 || val > 100) {
+      return json(res, 400, { error: 'threshold must be 0-100' });
+    }
+    this.db.updateUser(user.id, 'alert_threshold', val);
+    this.logger.info(`[Dashboard] user ${user.telegram_chat_id} alert_threshold → ${val}`);
+    return json(res, 200, { ok: true, threshold: val });
+  }
+
   _handleCollectorToggle(req, res, path) {
     const name = path.split('/')[3]; // /api/collectors/:name/toggle
     const disabled = this.appState.disabledCollectors;
@@ -815,6 +837,8 @@ class DashboardServer {
       emergenceScore:  metrics.emergenceScore ?? 0,
       narrativePhase:  metrics.narrativePhase  ?? null,
       rankScore:       metrics.rankScore       ?? null,
+      alertScore:      metrics.alertScore      ?? null,
+      alertBreakdown:  metrics.alertBreakdown  ?? null,
       marketStage:     metrics.marketStage     ?? null, // [MARKET_STAGE]
       junkPenalty:     metrics.junkPenalty     ?? 0,   // [JUNK_FILTER]
       junkReasons:     metrics.junkReasons     ?? [],  // [JUNK_FILTER]
@@ -3489,8 +3513,8 @@ const I18N = {
     'settings.plan_desc': 'Weights your likes/dislikes and unlocks premium features.',
     'account.subscription': 'Subscription',
     'account.subscription_desc': 'Your plan is active until this date.',
-    'account.threshold': 'Alert threshold',
-    'account.threshold_desc': 'Minimum score to trigger a bot alert. Change via /threshold in the Telegram bot.',
+    'account.threshold': 'Alert sensitivity',
+    'account.threshold_desc': 'Minimum alertScore for the bot to notify you. Higher = stricter (fewer, stronger alerts). Applies on top of the admin floor.',
     'settings.logout': 'Log out',
     'settings.logout_desc': "Unlink this browser. You'll need a fresh bot code to sign back in.",
     'settings.logout_confirm': "Log out? You'll need to verify a fresh bot code to sign back in.",
@@ -3747,8 +3771,8 @@ const I18N = {
     'settings.plan_desc': 'Влияет на вес твоих лайков/дизлайков и доступ к премиум-функциям.',
     'account.subscription': 'Подписка',
     'account.subscription_desc': 'Тариф активен до этой даты.',
-    'account.threshold': 'Порог алертов',
-    'account.threshold_desc': 'Минимальный скор для алерта от бота. Меняется командой /threshold в Telegram-боте.',
+    'account.threshold': 'Чувствительность алертов',
+    'account.threshold_desc': 'Минимальный alertScore, при котором бот пришлёт алерт. Выше = строже (меньше, но сильнее). Действует поверх глобального floor админа.',
     'settings.logout': 'Выйти',
     'settings.logout_desc': 'Отвязать этот браузер. Для повторного входа потребуется новый код из бота.',
     'settings.logout_confirm': 'Выйти из аккаунта? Нужно будет снова подтвердить код в Telegram.',
@@ -5100,6 +5124,48 @@ function SettingsPanel({ onBack, onResetHiddenSources, hiddenSourcesCount }) {
   );
 }
 
+// ── AlertSensitivityRow — single interactive slider for the user's alertScore
+// threshold. Slider value is stored locally while dragging, then POSTed to the
+// server on pointerup. This is the ONE knob the user has for alerts: higher =
+// stricter (fewer alerts), lower = looser (more alerts). Admin-tunable weights
+// decide how alertScore is computed.
+function AlertSensitivityRow({ initial }) {
+  const [val, setVal] = useState(typeof initial === 'number' ? initial : 60);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const save = async (v) => {
+    setSaving(true); setErr('');
+    try {
+      const r = await fetch('/api/user/threshold', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + AUTH_TOKEN },
+        body: JSON.stringify({ threshold: v }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+    } catch (e) { setErr(e.message || 'error'); }
+    setSaving(false);
+  };
+
+  return h(Row, {
+    icon: '🎯',
+    title: t('account.threshold'),
+    desc: t('account.threshold_desc'),
+    control: h('div', { className: 'slider-row', style: { gap: 10 } },
+      h('input', {
+        type: 'range', min: 0, max: 100, step: 1,
+        value: val,
+        onChange: e => setVal(Number(e.target.value)),
+        onPointerUp: () => save(val),
+        onKeyUp: (e) => { if (['ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(e.key)) save(val); },
+        className: 'range-slider',
+        disabled: saving,
+      }),
+      h('span', { className: 'slider-val' }, val + (saving ? ' …' : err ? ' ⚠' : ''))
+    )
+  });
+}
+
 // ── AccountPanel — profile / plan / logout (extracted from SettingsPanel) ─────
 function AccountPanel({ onBack, user, onLogout }) {
   useLang();
@@ -5181,11 +5247,7 @@ function AccountPanel({ onBack, user, onLogout }) {
           })
         : null,
       user?.threshold != null
-        ? h(Row, {
-            icon: '🎯', title: t('account.threshold'),
-            desc: t('account.threshold_desc'),
-            control: h('span', { className: 'pref-value' }, user.threshold + '%')
-          })
+        ? h(AlertSensitivityRow, { initial: user.threshold })
         : null,
       h(Row, {
         icon: '🚪', title: t('settings.logout'),

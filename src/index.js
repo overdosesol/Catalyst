@@ -8,7 +8,7 @@ import GoogleTrendsCollector from './collectors/google-trends.js';
 import TwitterCollector from './collectors/twitter.js';
 import TikTokCollector from './collectors/tiktok.js';
 import Aggregator from './analysis/aggregator.js';
-import Scorer from './analysis/scorer.js';
+import Scorer, { loadAlertWeights, computeAlertScore, feedbackBoostFromStats } from './analysis/scorer.js';
 import NarrativeClusterer from './analysis/clusterer.js';
 import TelegramNotifier from './notifications/telegram.js';
 import SolanaPayMonitor from './billing/solana-pay.js';
@@ -85,7 +85,22 @@ function normalizeSourceName(name) {
 }
 
 // ── Shared runtime state (mutated by admin panel and dashboard) ────────────
-const appState = { paused: false, scanRunning: false, disabledCollectors: new Set(), lastStorageCheckAt: 0 };
+const appState = {
+  paused: false,
+  scanRunning: false,
+  disabledCollectors: new Set(),
+  lastStorageCheckAt: 0,
+  // Ring buffer of per-trend alert-gate decisions (last N). Mirrored to the
+  // admin UI so you can see exactly why a trend was or wasn't alerted.
+  alertDecisions: [],
+  alertDecisionsCap: 500,
+};
+
+function recordAlertDecision(rec) {
+  appState.alertDecisions.push({ ts: new Date().toISOString(), ...rec });
+  const over = appState.alertDecisions.length - appState.alertDecisionsCap;
+  if (over > 0) appState.alertDecisions.splice(0, over);
+}
 
 const STORAGE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const LOW_DISK_FREE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -237,25 +252,55 @@ async function runScanCycle() {
 
     // Step 5: Send notifications per-user based on their individual settings
     const activeUsers = db.getActiveUsers();
-    const globalMemeThreshold = normalizeThreshold(
+    const globalAlertThreshold = normalizeThreshold(
       db.getSetting('alertThreshold', config.alertThreshold),
       config.alertThreshold
     );
-    const globalViralityThreshold = normalizeThreshold(
-      db.getSetting('viralityThreshold', config.viralityThreshold),
-      config.viralityThreshold
-    );
+    const alertWeights = loadAlertWeights(db);
+
+    // (Re)compute alertScore for every candidate using LIVE inputs:
+    //  - fresh feedback counts (so a flurry of 👍/👎 shifts the alert gate now)
+    //  - actual age in hours from first_seen_at (drives staleDecay)
+    // The alertScore baked in by the scorer is only a coarse estimate — we
+    // trust the live probe here, right before the gate.
+    const nowMs = Date.now();
+    for (const t of validTrends) {
+      // Feedback: pull stats if trend is persisted; neutral (50) otherwise.
+      let feedbackBoost = 50;
+      if (t._dbId && typeof db.getFeedbackStats === 'function') {
+        try {
+          const fb = db.getFeedbackStats(t._dbId);
+          feedbackBoost = feedbackBoostFromStats(fb?.likes, fb?.dislikes);
+        } catch (e) { /* keep neutral */ }
+      }
+      // Age: use firstSeenAt if present, else treat as fresh (0h).
+      const firstSeen = t.firstSeenAt || t.first_seen_at || null;
+      const ageHours = firstSeen ? Math.max(0, (nowMs - new Date(firstSeen).getTime()) / 3_600_000) : 0;
+
+      t._feedbackBoost = feedbackBoost;
+      t._ageHours = ageHours;
+
+      const probe = computeAlertScore(t, alertWeights);
+      t.alertScore = probe.alertScore;
+      t.alertBreakdown = probe.breakdown;
+      t._alertHardJunk = probe.hardJunk;
+    }
 
     logger.info(
-      `Alert gates: meme>=${globalMemeThreshold} (global floor), virality>=${globalViralityThreshold}`
+      `Alert gate: alertScore>=${globalAlertThreshold} (weights: ` +
+      `meme=${alertWeights.weightMemePotential}, viral=${alertWeights.weightVirality}, ` +
+      `emerge=${alertWeights.weightEmergence}, x=${alertWeights.weightTwitter}, ` +
+      `junk×${alertWeights.weightJunk}, hardJunk>=${alertWeights.hardJunkStop})`
     );
     logger.info(`Sending alerts to ${activeUsers.length} active user(s)`);
 
-    // Sort by rankScore (emergence + adoption combined) descending
-    // Falls back to memePotential for trends scored before the new system
+    // Sort by alertScore descending (fallback chain for legacy rows)
     const alertCandidates = validTrends
       .filter(t => t._dbId)
-      .sort((a, b) => (b.rankScore || b.memePotential || 0) - (a.rankScore || a.memePotential || 0));
+      .sort((a, b) =>
+        (b.alertScore ?? b.rankScore ?? b.memePotential ?? 0) -
+        (a.alertScore ?? a.rankScore ?? a.memePotential ?? 0)
+      );
 
     for (const user of activeUsers) {
       // Skip suspended users
@@ -272,9 +317,10 @@ async function runScanCycle() {
       let userDisabledSources = [];
       try { userDisabledSources = JSON.parse(user.disabled_sources || '[]'); } catch(e) {}
 
-      // Get this user's threshold (per-user or fallback to global)
+      // Get this user's threshold (per-user or fallback to global). This now
+      // gates the unified alertScore — higher value = stricter.
       const userThreshold = normalizeThreshold(user.alert_threshold, config.alertThreshold);
-      const effectiveMemeThreshold = Math.max(userThreshold, globalMemeThreshold);
+      const effectiveAlertThreshold = Math.max(userThreshold, globalAlertThreshold);
 
       // Get max alerts per cycle from global settings
       const maxAlertsPerCycle = db.getSetting('maxAlertsPerCycle', 0);
@@ -282,46 +328,88 @@ async function runScanCycle() {
       let alertsSentThisCycle = 0;
 
       for (const trend of alertCandidates) {
-        // Check per-cycle cap
-        if (maxAlertsPerCycle > 0 && alertsSentThisCycle >= maxAlertsPerCycle) break;
+        // Common snapshot for the decisions log — every gate evaluation below
+        // decorates this before storing. `url` is what the UI renders as a
+        // clickable source link.
+        // Engagement — for Twitter clusters these are sums across the cluster.
+        // Present at top level on collector output; survive clusterer.
+        const em = trend.metrics || trend.clusterMetrics?.metrics || {};
+        const decisionBase = {
+          trendId:    trend._dbId,
+          title:      (trend.title || '').slice(0, 160),
+          source:     trend.source,
+          category:   trend.category || null,
+          alertScore: trend.alertScore ?? null,
+          threshold:  effectiveAlertThreshold,
+          breakdown:  trend.alertBreakdown || null,
+          url:        trend.url || null,
+          userChatId: String(user.telegram_chat_id || ''),
+          engagement: {
+            views:    em.views    ?? null,
+            likes:    em.likes    ?? null,
+            retweets: em.retweets ?? null,
+            replies:  em.replies  ?? null,
+            upvotes:  em.upvotes  ?? null, // reddit
+          },
+        };
 
-        // Check daily alert limit for this user's plan
-        if (!db.canUserReceiveAlert(user)) {
-          logger.debug(`User ${user.telegram_chat_id} reached daily alert limit (${user.alert_limit})`);
+        // Evaluate every gate in order and record pass/fail for ALL of them.
+        // Some gates short-circuit the loop (cap / daily limit → `break`), but
+        // we still want to know which specific gate failed, so the full list
+        // is always written to the decisions buffer.
+        const gates = [];
+        const alertScore = trend.alertScore ?? 0;
+        const junkVal    = trend.junkPenalty ?? trend.clusterMetrics?.junkPenalty ?? 0;
+        const junkReasons = trend.clusterMetrics?.junkReasons?.join(',') || '';
+        const sourceLc   = (trend.source || '').toLowerCase();
+
+        const capPass       = !(maxAlertsPerCycle > 0 && alertsSentThisCycle >= maxAlertsPerCycle);
+        const dailyPass     = db.canUserReceiveAlert(user);
+        const thresholdPass = alertScore >= effectiveAlertThreshold;
+        const hardJunkPass  = !trend._alertHardJunk;
+        const sourcePass    = !userDisabledSources.includes(sourceLc);
+        const dedupPass     = !db.wasNotificationSentToUser(trend._dbId, user.id);
+
+        gates.push({ name: 'threshold', passed: thresholdPass, detail: `${alertScore} / ${effectiveAlertThreshold}` });
+        gates.push({ name: 'hard_junk', passed: hardJunkPass,  detail: `junk=${junkVal}${junkReasons ? ' (' + junkReasons + ')' : ''} < ${alertWeights.hardJunkStop}` });
+        gates.push({ name: 'source',    passed: sourcePass,    detail: trend.source + (sourcePass ? '' : ' (muted)') });
+        gates.push({ name: 'dedup',     passed: dedupPass,     detail: dedupPass ? 'new trend' : `already sent`  });
+        gates.push({ name: 'daily',     passed: dailyPass,     detail: dailyPass ? `ok` : `limit=${user.alert_limit}` });
+        gates.push({ name: 'cap',       passed: capPass,       detail: maxAlertsPerCycle > 0 ? `${alertsSentThisCycle}/${maxAlertsPerCycle}` : '∞' });
+
+        const firstFail = gates.find(g => !g.passed);
+        const allPassed = !firstFail;
+
+        // Apply short-circuit semantics (same as before):
+        //  - cycle cap / daily limit → stop looking at more trends for this user
+        //  - anything else → skip just this trend
+        if (!capPass || !dailyPass) {
+          recordAlertDecision({ ...decisionBase, decision: 'skipped', reason: firstFail.name, gates });
           break;
         }
-
-        // Check user's meme/adoption threshold
-        if ((trend.memePotential || 0) < effectiveMemeThreshold) continue;
-
-        // Global virality gate (reduces noisy alerts even with high memePotential)
-        if ((trend.score || 0) < globalViralityThreshold) continue;
-
-        // Emergence gate removed (Variant A): adoption score is the sole alert criterion.
-        // Emergence is kept as a display/sorting metric but does not gate alerts.
-        // The user's meme threshold (effectiveMemeThreshold) already filters by AI quality.
-
-        // [JUNK_FILTER] skip viral-but-useless trends (politics, kpop, celeb noise)
-        // Remove this block to disable. Threshold 35 = one strong category hit.
-        const junkPenalty = trend.junkPenalty ?? trend.clusterMetrics?.junkPenalty ?? 0;
-        if (junkPenalty >= 35) {
-          const reasons = trend.clusterMetrics?.junkReasons?.join(',') || '';
-          logger.debug(`[JunkFilter] SKIP "${trend.title?.substring(0, 50)}" junk=${junkPenalty} (${reasons})`);
+        if (!allPassed) {
+          if (firstFail.name === 'hard_junk') {
+            logger.debug(`[HardJunk] SKIP "${trend.title?.substring(0, 50)}" junk=${junkVal} (${junkReasons})`);
+          }
+          recordAlertDecision({ ...decisionBase, decision: 'skipped', reason: firstFail.name, gates });
           continue;
         }
 
-        // Check if this trend's source is disabled by this user
-        if (userDisabledSources.includes(trend.source?.toLowerCase())) continue;
-
-        // Check if we already sent this trend to this user
-        if (db.wasNotificationSentToUser(trend._dbId, user.id)) continue;
-
-        // Send the alert
+        // All gates passed — send it.
         const sent = await telegram.sendAlertToUser(trend, user);
         if (sent) {
           db.recordNotification(trend._dbId, 'telegram', user.id);
           db.incrementAlertCount(user.id);
           alertsSentThisCycle++;
+          gates.push({ name: 'send', passed: true, detail: `msg ${sent.messageId || '—'}` });
+          recordAlertDecision({ ...decisionBase, decision: 'sent', reason: 'sent', gates });
+        } else {
+          gates.push({ name: 'send', passed: false, detail: 'telegram returned no result' });
+          recordAlertDecision({ ...decisionBase, decision: 'skipped', reason: 'send_failed', gates });
+        }
+
+        // (Close old `if (sent) {` — legacy body below runs inside that block.)
+        if (sent) {
 
           // Attach X Analysis button (only for the first user's message — use their chat as anchor)
           if (sent.messageId) {

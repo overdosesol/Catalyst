@@ -44,6 +44,126 @@ export function narrativeRankScore(e, a, feedbackBias = 0) {
 }
 
 /**
+ * Default weights for the unified alertScore. Admin can override any of these
+ * via settings keys `alertWeight<Name>`. Positive weights sum to 1.0 so the
+ * positive part stays in 0–100; junk is a pure subtraction on top.
+ */
+export const DEFAULT_ALERT_WEIGHTS = {
+  weightMemePotential:  0.35, // AI-assessed meme quality
+  weightVirality:       0.25, // AI/heuristic virality score
+  weightEmergence:      0.20, // cluster velocity + spread + ideaBoost
+  weightTwitter:        0.10, // on-platform X signal
+  weightFeedback:       0.10, // global 👍/👎 bias on this trend (50 = neutral)
+  weightJunk:           0.50, // subtracted: junk × this
+  staleDecayPerHour:    2,    // points subtracted per hour of age (after grace)
+  staleDecayGraceHours: 24,   // no stale penalty for trends younger than this
+  staleDecayCap:        30,   // max total stale penalty
+  hardJunkStop:         70,   // junkPenalty ≥ this → never alert, regardless
+};
+
+/**
+ * Pull all six alert-score knobs from the DB with fallback to defaults.
+ * Called once per cycle by index.js so the current weights are snapshotted.
+ */
+export function loadAlertWeights(db) {
+  const read = (k, d) => {
+    const v = db?.getSetting?.(k);
+    if (v === undefined || v === null || v === '') return d;
+    const n = Number(v);
+    return isNaN(n) ? d : n;
+  };
+  return {
+    weightMemePotential: read('alertWeightMemePotential', DEFAULT_ALERT_WEIGHTS.weightMemePotential),
+    weightVirality:      read('alertWeightVirality',      DEFAULT_ALERT_WEIGHTS.weightVirality),
+    weightEmergence:     read('alertWeightEmergence',     DEFAULT_ALERT_WEIGHTS.weightEmergence),
+    weightTwitter:       read('alertWeightTwitter',       DEFAULT_ALERT_WEIGHTS.weightTwitter),
+    weightFeedback:      read('alertWeightFeedback',      DEFAULT_ALERT_WEIGHTS.weightFeedback),
+    weightJunk:          read('alertWeightJunk',          DEFAULT_ALERT_WEIGHTS.weightJunk),
+    staleDecayPerHour:   read('alertStaleDecayPerHour',   DEFAULT_ALERT_WEIGHTS.staleDecayPerHour),
+    staleDecayGraceHours:read('alertStaleDecayGrace',     DEFAULT_ALERT_WEIGHTS.staleDecayGraceHours),
+    staleDecayCap:       read('alertStaleDecayCap',       DEFAULT_ALERT_WEIGHTS.staleDecayCap),
+    hardJunkStop:        read('alertHardJunkStop',        DEFAULT_ALERT_WEIGHTS.hardJunkStop),
+  };
+}
+
+/**
+ * Convert raw feedback counts (likes, dislikes) into a 0-100 boost where
+ * 50 = neutral / no signal. Small samples (< 5 total votes) pull hard toward
+ * 50 so a single vote doesn't swing the score.
+ */
+export function feedbackBoostFromStats(likes = 0, dislikes = 0) {
+  const total = (likes | 0) + (dislikes | 0);
+  if (total === 0) return 50;
+  // Confidence dampening: below 5 votes, blend toward neutral
+  const conf = Math.min(1, total / 5);
+  const ratio = (likes - dislikes) / Math.max(total, 1); // -1..+1
+  const raw  = 50 + ratio * 50;                           // 0..100
+  return Math.round(50 + (raw - 50) * conf);
+}
+
+/**
+ * Unified alert score — single 0–100 number that combines every signal we have.
+ * Replaces the old 3-gate system (memePotential AND viralityScore AND junkPenalty).
+ *
+ * Reads from trend fields already populated by the scorer/clusterer:
+ *  - memePotential  (AI, 0–100)
+ *  - score          (virality, 0–100)
+ *  - emergenceScore (cluster, 0–100)
+ *  - metrics.twitter.viralityScore (0–100, optional)
+ *  - junkPenalty OR clusterMetrics.junkPenalty (0–100)
+ *
+ * @param {Object} trend
+ * @param {Object} [w]  weights from loadAlertWeights(); defaults used if omitted
+ * @returns {{ alertScore: number, breakdown: Object, hardJunk: boolean }}
+ */
+export function computeAlertScore(trend, w = DEFAULT_ALERT_WEIGHTS) {
+  const meme      = Number(trend.memePotential) || 0;
+  const viral     = Number(trend.score) || 0;
+  const emergence = Number(trend.emergenceScore ?? trend.clusterMetrics?.emergenceScore) || 0;
+  const twitter   = Number(trend.metrics?.twitter?.viralityScore) || 0;
+  const junk      = Number(trend.junkPenalty ?? trend.clusterMetrics?.junkPenalty) || 0;
+
+  // feedbackBoost: 0-100, 50 = neutral. Caller (index.js) pre-computes it from
+  // live feedback_votes and attaches as trend._feedbackBoost. Defaults to 50
+  // for fresh trends that have never been voted on.
+  const feedback = (typeof trend._feedbackBoost === 'number')
+    ? trend._feedbackBoost : 50;
+
+  // Stale decay: linear penalty after grace period, capped. ageHours comes
+  // from (now - firstSeenAt) in index.js; 0 at scoring time.
+  const ageHours = Math.max(0, Number(trend._ageHours) || 0);
+  const staleHours = Math.max(0, ageHours - (w.staleDecayGraceHours || 0));
+  const staleDecay = Math.min(
+    w.staleDecayCap || 0,
+    staleHours * (w.staleDecayPerHour || 0)
+  );
+
+  const positive =
+      meme      * w.weightMemePotential
+    + viral     * w.weightVirality
+    + emergence * w.weightEmergence
+    + twitter   * w.weightTwitter
+    + feedback  * w.weightFeedback;
+
+  const penalty  = junk * w.weightJunk + staleDecay;
+  const raw      = positive - penalty;
+  const alertScore = Math.max(0, Math.min(100, Math.round(raw)));
+  const hardJunk = junk >= w.hardJunkStop;
+
+  return {
+    alertScore,
+    hardJunk,
+    breakdown: {
+      meme, viral, emergence, twitter, feedback, junk,
+      ageHours: Math.round(ageHours * 10) / 10,
+      staleDecay: Math.round(staleDecay),
+      positive: Math.round(positive),
+      penalty: Math.round(penalty),
+    },
+  };
+}
+
+/**
  * AI Scorer — uses xAI Responses API to analyze trend virality and meme potential.
  *
  * v3 changes:
@@ -315,6 +435,14 @@ class Scorer {
       const emergence = trend.clusterMetrics?.emergenceScore ?? 0;
       const phase     = narrativePhase(emergence, adoption);
       const rankScore = narrativeRankScore(emergence, adoption);
+      const viralityForAlert = Number(a.viralityScore) || this._heuristicScore(trend);
+      const alertProbe = computeAlertScore({
+        memePotential: adoption,
+        score: viralityForAlert,
+        emergenceScore: emergence,
+        metrics: trend.metrics,
+        junkPenalty: trend.junkPenalty ?? trend.clusterMetrics?.junkPenalty ?? 0,
+      });
 
       return {
         ...trend,
@@ -323,12 +451,14 @@ class Scorer {
         originalTitle:    originalEnTitle,
         title:            aiRuTitle || aiEnTitle,
         titleEn:          aiEnTitle,
-        score:            Number(a.viralityScore) || this._heuristicScore(trend),
+        score:            viralityForAlert,
         memePotential:    adoption,
         adoptionScore:    adoption,    // semantic alias
         emergenceScore:   emergence,   // from clusterMetrics
         narrativePhase:   phase,       // 'early'|'forming'|'strong'|'saturated'
         rankScore,                     // combined sort score
+        alertScore:       alertProbe.alertScore,
+        alertBreakdown:   alertProbe.breakdown,
         category:         a.category         || 'other',
         sentiment:        a.sentiment         || 'neutral',
         aiExplanation:    a.explanation       || '',
@@ -394,6 +524,9 @@ class Scorer {
     trend.adoptionScore  = trend.memePotential;
     trend.narrativePhase = narrativePhase(trend.emergenceScore ?? 0, trend.adoptionScore);
     trend.rankScore      = narrativeRankScore(trend.emergenceScore ?? 0, trend.adoptionScore);
+    const alertProbe2 = computeAlertScore(trend);
+    trend.alertScore     = alertProbe2.alertScore;
+    trend.alertBreakdown = alertProbe2.breakdown;
 
     // [MARKET_STAGE] optional patch — remove 1 line to disable
     if (process.env.MARKET_STAGE_DETECTION === '1') applyStage2MarketPatch(trend, result);
@@ -505,14 +638,22 @@ class Scorer {
   _applyHeuristic(trend) {
     const adoption  = this._heuristicMemePotential(trend);
     const emergence = trend.clusterMetrics?.emergenceScore ?? 0;
+    const viral     = this._heuristicScore(trend);
+    const probe = computeAlertScore({
+      memePotential: adoption, score: viral, emergenceScore: emergence,
+      metrics: trend.metrics,
+      junkPenalty: trend.junkPenalty ?? trend.clusterMetrics?.junkPenalty ?? 0,
+    });
     return {
       ...trend,
-      score:            this._heuristicScore(trend),
+      score:            viral,
       memePotential:    adoption,
       adoptionScore:    adoption,
       emergenceScore:   emergence,
       narrativePhase:   narrativePhase(emergence, adoption),
       rankScore:        narrativeRankScore(emergence, adoption),
+      alertScore:       probe.alertScore,
+      alertBreakdown:   probe.breakdown,
       marketStage:      trend.clusterMetrics?.marketStage ?? null, // [MARKET_STAGE]
       category:         'other',
       sentiment:        'neutral',
@@ -527,14 +668,22 @@ class Scorer {
     return trends.map(t => {
       const adoption  = this._heuristicMemePotential(t);
       const emergence = t.clusterMetrics?.emergenceScore ?? 0;
+      const viral     = this._heuristicScore(t);
+      const probe = computeAlertScore({
+        memePotential: adoption, score: viral, emergenceScore: emergence,
+        metrics: t.metrics,
+        junkPenalty: t.junkPenalty ?? t.clusterMetrics?.junkPenalty ?? 0,
+      });
       return {
         ...t,
-        score:            this._heuristicScore(t),
+        score:            viral,
         memePotential:    adoption,
         adoptionScore:    adoption,
         emergenceScore:   emergence,
         narrativePhase:   narrativePhase(emergence, adoption),
         rankScore:        narrativeRankScore(emergence, adoption),
+        alertScore:       probe.alertScore,
+        alertBreakdown:   probe.breakdown,
         marketStage:      t.clusterMetrics?.marketStage ?? null, // [MARKET_STAGE]
         category:         'other',
         sentiment:        'neutral',

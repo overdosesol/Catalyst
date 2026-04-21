@@ -295,8 +295,17 @@ class NarrativeClusterer {
                     && maxUpvotes >= 10_000;
 
     // [JUNK_FILTER] heuristic junk penalty — remove block + import above to disable
+    // Preset picks the active filter profile (animals/events/... have different weights).
+    // Admin-UI overrides live in the `filterProfiles` setting as a JSON blob.
     try {
-      const { junkPenalty, junkReasons } = calculateJunkPenalty(items, base);
+      const activePreset = this.db?.getSetting('activePreset', 'general') || 'general';
+      let overrides = null;
+      const rawOverrides = this.db?.getSetting('filterProfiles', null);
+      if (rawOverrides) {
+        try { overrides = JSON.parse(rawOverrides); }
+        catch (_) { /* malformed blob — ignore, fall back to defaults */ }
+      }
+      const { junkPenalty, junkReasons } = calculateJunkPenalty(items, base, activePreset, overrides);
       base.junkPenalty  = junkPenalty;
       base.junkReasons  = junkReasons;
     } catch (_) {
