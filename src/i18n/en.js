@@ -146,6 +146,30 @@ Hit "Open Menu" and tune it to your taste \u2699\u{FE0F}
   xAnalysisError: (err) => `\u{274C} X Analysis error: ${err}`,
   xAnalysisNoKeywords: 'Not enough keywords for X search',
 
+  // Inline buttons on the result card
+  xAnalysisRefreshBtn: '\u{1F504} Refresh',
+  xAnalysisSearchBtn:  '\u{1F517} Search on X',
+
+  // Cooldown toast (shown when refresh is hit within the 1h window)
+  xAnalysisCooldown: (min) => `\u{23F3} Refresh available in ${min} min`,
+
+  // Cache / freshness markers inside the result card
+  xAnalysisFromCache: (min) => `\u{1F4BE} Cached · ${min} min ago`,
+  xAnalysisFallbackNote: (actor) => `\u{26A0}\u{FE0F} Primary actor failed, fell back to ${actor}`,
+
+  // History delta line (previous virality score → current)
+  xAnalysisDelta: (prev, sign) => `\u{1F4C8} Previous: <b>${prev}/100</b> (${sign})`,
+  xAnalysisDeltaNeutral: (prev) => `\u{1F4C8} Previous: <b>${prev}/100</b> (=)`,
+
+  // Concentration (astroturf) warning
+  xAnalysisConcentration: (pct, author) =>
+    `\u{26A0}\u{FE0F} <b>@${author}</b> drives <b>${pct}%</b> of engagement (single-account signal)`,
+
+  // Grok prior-snapshot block (pulled from stored xSearchData)
+  xAnalysisGrokHeader: '\u{1F9E0} <b>Grok snapshot (at scan time):</b>',
+  xAnalysisGrokLine:   (buzz, momentum, organicity) =>
+    `buzz=${buzz} \u00B7 momentum=${momentum} \u00B7 organicity=${organicity}`,
+
   // ── Errors ─────────────────────────────────────────────────────────────
   dbUnavailable: '\u{274C} Database unavailable',
   trendNotFound: '\u{274C} Trend not found.',

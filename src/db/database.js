@@ -91,6 +91,27 @@ class TrendDatabase {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_feedback_votes_trend ON feedback_votes(trend_id)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_feedback_votes_chat  ON feedback_votes(chat_id)`);
 
+    // X Analysis history — one row per actually-executed Apify call. Cached
+    // responses are NOT recorded here. Used by the Telegram result card to
+    // render "virality delta" (previous score vs current) and for future
+    // sparkline UI. `concentration` is the top-1-author engagement share; see
+    // TwitterChecker._summarize for formula.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS x_analysis_history (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        trend_id        INTEGER NOT NULL REFERENCES trends(id),
+        at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+        tweet_count     INTEGER NOT NULL DEFAULT 0,
+        total_views     INTEGER NOT NULL DEFAULT 0,
+        total_likes     INTEGER NOT NULL DEFAULT 0,
+        total_retweets  INTEGER NOT NULL DEFAULT 0,
+        virality_score  INTEGER NOT NULL DEFAULT 0,
+        concentration   INTEGER NOT NULL DEFAULT 0,
+        actor_used      TEXT
+      )
+    `);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_xa_history_trend ON x_analysis_history(trend_id, at DESC)`);
+
     // Auth sessions (Telegram-bot-verified login for the dashboard)
     // ── Flow ───────────────────────────────────────────────────────────────────
     //   1) Browser calls /api/auth/initiate     → row with session_id only
@@ -847,6 +868,54 @@ class TrendDatabase {
 
   getTrendByTgMessageId(tgMessageId) {
     return this.db.prepare(`SELECT * FROM trends WHERE tg_message_id = ?`).get(tgMessageId);
+  }
+
+  // ── X Analysis history ─────────────────────────────────────────────────────
+
+  /**
+   * Record one freshly-executed X Analysis snapshot. Call only on actual Apify
+   * fetches — never on cache hits (we want the history to reflect real fetches
+   * only, so delta comparisons are meaningful).
+   */
+  saveXAnalysis(trendId, result) {
+    if (!trendId || !result) return;
+    try {
+      this.db.prepare(`
+        INSERT INTO x_analysis_history
+          (trend_id, tweet_count, total_views, total_likes, total_retweets,
+           virality_score, concentration, actor_used)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        trendId,
+        result.tweetCount    | 0,
+        result.totalViews    | 0,
+        result.totalLikes    | 0,
+        result.totalRetweets | 0,
+        result.viralityScore | 0,
+        result.concentration | 0,
+        result.actorUsed || null
+      );
+    } catch (e) {
+      this.logger?.warn?.(`saveXAnalysis failed for trend #${trendId}: ${e.message}`);
+    }
+  }
+
+  /** Most recent history rows (DESC by `at`). Empty array if no history. */
+  getXAnalysisHistory(trendId, limit = 5) {
+    if (!trendId) return [];
+    try {
+      return this.db.prepare(`
+        SELECT tweet_count, total_views, total_likes, total_retweets,
+               virality_score, concentration, actor_used, at
+        FROM x_analysis_history
+        WHERE trend_id = ?
+        ORDER BY at DESC
+        LIMIT ?
+      `).all(trendId, limit);
+    } catch (e) {
+      this.logger?.warn?.(`getXAnalysisHistory failed for trend #${trendId}: ${e.message}`);
+      return [];
+    }
   }
 
   /**

@@ -3031,7 +3031,11 @@ class DashboardServer {
       background: linear-gradient(135deg, var(--card2), var(--card3));
     }
 
-    /* Multi-image gallery (2+ photos) — horizontal carousel with arrows */
+    /* Multi-image gallery (2+ photos) — horizontal carousel with arrows.
+       Container has a FIXED height (not max-height) so switching between
+       portrait / landscape / short-landscape images doesn't collapse the
+       frame. The <img> inside uses object-fit: contain — letterboxing
+       appears for narrower images, but the card layout stays stable. */
     .img-carousel {
       position: relative; width: 100%;
       border-radius: 14px; overflow: hidden;
@@ -3039,17 +3043,14 @@ class DashboardServer {
       background: #0a0a12;
       border: 1px solid var(--border);
       display: flex; align-items: center; justify-content: center;
-      max-height: 380px;
+      height: 380px;
     }
     .img-carousel img {
-      display: block; width: 100%; height: auto;
-      max-height: 380px;
+      display: block; width: 100%; height: 100%;
       object-fit: contain;
     }
-    body.prefs-compact .img-carousel,
-    body.prefs-compact .img-carousel img { max-height: 280px; }
-    .img-carousel.in-modal { max-height: 440px; border-radius: 8px; }
-    .img-carousel.in-modal img { max-height: 440px; }
+    body.prefs-compact .img-carousel { height: 280px; }
+    .img-carousel.in-modal { height: 440px; border-radius: 8px; }
     .img-carousel-nav {
       position: absolute; top: 50%; transform: translateY(-50%);
       width: 38px; height: 38px; border-radius: 50%;
