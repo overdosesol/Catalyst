@@ -66,20 +66,23 @@
 - **narrativePhase**: `early`/`forming`/`strong`/`saturated`; вычисляется после AI из emergence+adoption; `saturated` = adoption>=60 && emergence<25
 - **rankScore**: `e*0.4 + a*0.6` (с опциональным feedback bias ±15%); default sort в dashboard
 - **Alert gate**: `emergence >= 20 || adoption >= 60` — иначе алерт не отправляется (снижено с 30 → 20 для ранних Reddit сигналов)
-- **JunkFilter** (изолированный optional слой): `src/analysis/junk-filter.js`; call sites помечены `[JUNK_FILTER]`
-  - `calculateJunkPenalty(items, clusterMetrics)` → `{ junkPenalty: 0–100, junkReasons: string[] }`
-  - Penalties: politics +40, kpop/fandom +30, celeb-noise +20, no-meme-shape +15
-  - Safe-signal override: animal/absurd/meme/heartwarming → делим raw на 3 (или 4 при ≥2 сигналах)
-  - Alert gate: `junkPenalty >= 35` → skip (в `index.js`)
-  - Сохраняется в `raw_metrics` + `_formatTrend` → dashboard API
-  - Отключить: удалить import + `base.junkPenalty` блок в `clusterer.js` + gate в `index.js`
+- **JunkFilter** (изолированный слой + positive-signal boost): `src/analysis/junk-filter.js`; call sites помечены `[JUNK_FILTER]`
+  - `calculateJunkPenalty(items, clusterMetrics, activePreset, overrides)` → `{ junkPenalty, junkReasons, memeShapeBoost, memeShapeSignals }`
+  - Penalties конфигурятся через **`src/analysis/filter-profiles.js`** (per-preset), редактируются в админке; defaults: politics +40, kpop/fandom +30, celeb-noise +20, no-meme-shape +15
+  - Safe-signal override: animal/absurd/meme/heartwarming → делим raw на 3 (или 4 при ≥2 сигналах). Срабатывает только если `raw > 0`
+  - **Meme-shape boost** (2026-04-22): дополнительный additive bonus к `emergenceScore` при наличии meme-shape сигналов. Per-preset `memeShapeBoost` (general 10, animals 14, culture 12, celebrities 6, events 4), формула `perSignalBoost * (signalCount >= 2 ? 1.5 : 1)`; применяется в clusterer до routing
+  - Alert gate (hard stop): `junkPenalty >= alertHardJunkStop` (default 70) → skip; мягкий штраф через `alertScore` weights
+  - Сохраняется в `raw_metrics` + `_formatTrend` → dashboard API; `memeShapeSignals[]` — для наблюдения
+  - Observability: `JunkStatsSection` в админке + `GET /api/junk-stats?hours=…`
+  - Отключить: удалить import + `base.junkPenalty`/`memeShapeBoost` блок в `clusterer.js` + hardJunk gate в `index.js`
 - **MarketStage** (изолированный optional слой): feature flag `MARKET_STAGE_DETECTION=1`; 4 состояния: `none/tokenizing/live/overheated`; вся логика в `src/analysis/market-stage.js`; call sites помечены `[MARKET_STAGE]` (~10 строк в 6 файлах); по умолчанию ВЫКЛЮЧЕНО
 - **Dashboard**: `TrendCard` — два бара (🌊 Emergence, 💊 Adoption) + phase accent border + `PhaseBadge`; sort: rank(default)/meme/emergence/time/virality; filter by phase: early/forming/strong/saturated
 - **Inference cost optimizations (v3.1)**:
   - Feedback context строится один раз на цикл в `_buildFeedbackContext()`, не на каждый batch
   - `_callResponsesAPI` возвращает `{ text, inputTokens, outputTokens }` (реальные токены из `data.usage`)
   - Stage 1 batch size: 5 → 8
-  - Stage 2 gate: threshold 70 → 78, cap 3 вызова на цикл, skip google_trends, novelty gate (`clusterMetrics.isNovel !== false`)
+  - Stage 2 gate: threshold 78 → **60** (2026-04-22, больше пропускаем в deep-dive после narrative pivot), cap **6** на цикл (было 3), skip google_trends, novelty gate (`clusterMetrics.isNovel !== false`)
+  - Stage 2 output: `narrativeMomentum` + `organicity` (заменили `existingCoins` — coin-search логика убрана целиком)
   - Prompt: description truncated 250 → 100; поля `titleRu` и `isGenuinelyInteresting` удалены из output spec
   - Логируется `total_in`/`total_out` (реальные токены) после каждого цикла
 
@@ -222,3 +225,70 @@
 - `APIFY_API_KAITO` — dedicated token for kaitoeasyapi Twitter actor
 - `APIFY_API_XQUIK` — dedicated token for xquik Twitter actor
 - `APIFY_API2` — **удалён** (был legacy-фоллбэк на второй аккаунт)
+
+## Manual narrative submit + send-alert with comment (2026-04-24)
+
+- **Новая админская вкладка `🧪 Ручной анализ`** (`src/admin/server.js` → `SubmitPage`)
+  - Оператор кидает URL (Twitter/X, Reddit, TikTok, или любой сайт с og:image), проект сам резолвит → синтетический trend → прогоняет полный scorer (Stage 1 batch + Stage 2 Grok x_search) → сохраняет в БД с флагом `raw_metrics.manualSubmitted = true` (+ `manualSubmittedAt`). **Обходит** коллекторы/aggregator/clusterer — кормим scorer напрямую
+  - Опциональная галочка «отправить в Telegram всем активным подписчикам» — рассылка сразу после анализа
+  - Rate limit'а нет (single-user tool)
+- **Endpoint `POST /api/submit-narrative`** `{ url, sendToTelegram, comment }`:
+  - Коммент (optional) — до 500 символов, если есть — префиксится жирной строкой `💬 <b>{comment}</b>\n\n` перед основным форматтером
+  - Возвращает `{ ok, elapsedMs, trend: {...}, alerts: [{userId, ok, reason?}, ...] }`
+- **Endpoint `POST /api/send-alert`** `{ trendId, comment }`:
+  - Отправляет алерт для **уже сохранённого** trend'а (любого, не только manual). Кнопка «📨 Отправить алерт» в шапке SubmitPage — после анализа можно посмотреть метрики и досылать руками
+  - Грузит строку через `getTrendById` → `_hydrateTrendFromDb(row)` (восстанавливает scorer-образный объект из плоской DB-строки) → `_broadcastTrendAlert(trend, dbId, { comment })`
+- **Resolvers** (free APIs only):
+  - `_resolveTwitterUrl`: `api.fxtwitter.com/i/status/{id}` — text, author, engagement, `createdAt`, velocity, media из main + `quote.media.all` + `replying_to.media.all`, video pick
+  - `_resolveRedditUrl`: `reddit.com/...json?raw_json=1` — title, upvotes, comments, gallery media
+  - `_resolveTiktokUrl`: oEmbed API (title + thumbnail)
+  - `_resolveGenericUrl`: og:image / og:title scraping
+- **Refactor**: `_broadcastTrendAlert(trend, dbId, opts = {})` — единая точка рассылки по `getActiveUsers()` с `sendAlertToUser` + `attachXButton` + `updateTgUrl`. Переиспользуется из начального submit и из «Отправить алерт»
+- **`sendAlertToUser(trend, user, opts = {})`** в `src/notifications/telegram.js`:
+  - Новый третий параметр. Если `opts.comment` непустой — HTML-escape (`&/</>`) и префикс `💬 <b>{comment}</b>\n\n` + formatter message
+  - Cap комментария 500 символов (чтобы caption после concat ещё влезал в TG 1024-лимит)
+- **Dashboard integration**:
+  - `_formatTrend` отдаёт `manualSubmitted: metrics.manualSubmitted === true`
+  - Badge **🧪 MANUAL** в FeedCard (feed-badges row, первая позиция) и в TrendModal head; CSS `.badge-manual` (фиолетовый `#b48cff`); i18n `feed.manual_tip`
+  - Sidebar toggle **«Только ручные»** — `manualOnly` state (localStorage `ts_manual_only`), фильтрация в `visibleTrends`; i18n `sidebar.manual_only`, `tooltip.manual_on/off`, `toast.manual_only_on/off`
+- **AdminServer wiring**: конструктор принимает `extras = {}` 7-м аргументом, сохраняет `this.scorer` и `this.telegram`. `src/index.js` передаёт `{ scorer, telegram }` при инстансе
+
+## Dashboard polish + TG media fixes (2026-04-24)
+
+- **Ask Grok button** в TrendModal — зеркалит TG alert button, строит Grok URL инлайном через IIFE, CSS `.trend-link-grok` (#b48cff); i18n `modal.ask_grok`
+- **Modal reorder**: ссылки/actions ушли выше (после AI explanation), Stats grid в самый низ
+- **`pluralSeen(n)`** helper для счётчика «ВИДЕЛИ: N раз(а)» — исправлена русская плюрализация (1 раз / 2 раза / 5 раз через `mod10`/`mod100`); для EN просто `N + 'x'`
+- **ImageGrid → ImageCarousel** — горизонтальный слайдер со стрелочками, счётчик `i/N`, точки-пагинация; `stopPropagation` на контролах. CSS `.img-carousel`
+- **Multi-image в дашборде**: `/api/preview` twitter-ветка теперь собирает media из **main + quote + reply-parent** (`tweet.media.all`, `tweet.quote.media.all`, `tweet.replying_to.media.all`), отдаёт `{ imageUrl, imageUrls }`. TrendModal имеет `extraUrls` state и **лениво подфетчивает** preview при открытии даже если `trend.imageUrls.length < 2` — для старых DB-строк где quote media не сохранилось при scrape'е
+- **Media group + inline buttons fix** (`src/notifications/telegram.js`):
+  - Telegram API не даёт крепить `inline_keyboard` к элементам альбома — кнопки терялись на multi-image алертах
+  - Фикс: `sendMediaGroup(chatId, media, { disable_notification: true })` → `sendMessage(..., { reply_to_message_id: group[0].message_id })` → якорим `attachXButton`/feedback buttons к текстовому сообщению. Альбом без caption, текст триггерит единственный ping
+- **Silent photo notifications**: `disable_notification: true` на альбомах — юзеров больше не будит пачкой превьюшек
+- **Twitter velocity fix** (`src/collectors/twitter.js`):
+  - Был bug: `velocity: cluster._count` — всегда «1/hr» в дашборде (Reddit показывал нормально потому что там другой путь)
+  - Фикс: per-tweet accumulation — `engagement = likes + retweets*2`, `age = max(ageHours, 0.25)`, `tweetVelocity = engagement / age`, аккумулируем в `cluster._velocitySum`; финально `Math.round(cluster._velocitySum || 0)`
+- **Quote/reply-parent media extraction** в twitter collector: helpers `pushImagesFrom` и `pickVideoFrom` проверяют `tweet.quote || tweet.quoted_tweet || tweet.quotedStatus || tweet.quoted_status || tweet.retweeted_tweet` и `tweet.in_reply_to_tweet || tweet.in_reply_to_status || tweet.replying_to` (разные поля у Apify actors). **Правило владельца**: даже если в main твите есть картинка — добавляем quote images вторыми (2-я картинка в карусели)
+
+## Stage 2 subject-name bonus (2026-04-24)
+
+- **Задача владельца**: начислять баллы, если в посте есть конкретное имя/название (персонаж, питомец, тикер-кандидат — Peanut, Moo Deng, Hawk Tuah, $BONK)
+- **Решение**: расширили JSON-схему Stage 2 двумя полями `subjectName` + `nameStrength`, Grok переиспользует те же x_search результаты — никаких дополнительных поисков, прирост стоимости <0.2%
+- **`src/analysis/prompts.js`**: в `STAGE2_SYSTEM_PROMPT` добавлен блок «SUBJECT NAME / TICKER CANDIDATE» с рубрикой `nameStrength` 0-100, примерами «что считать именем» / «что не считать», явной пометкой **booster-only, NEVER penalizes**. В `buildStage2Prompt` добавлены два поля в JSON response
+- **`src/analysis/scorer.js`** в `_stage2DeepDive`:
+  - Парсинг: `subjectName` trim + cap 64 chars, `nameStrength` обнуляется если имя пустое
+  - Сохраняется в `trend.xSearchData.{subjectName, nameStrength}`
+  - Бонус (зеркалит `stage2StoryBonus`): threshold `nameStrength >= 60`, max **+10**, формула `Math.min(10, Math.round((nameStrength - 60) * 0.25))`
+  - Metadata в `trend.stage2NameBonus = { subjectName, nameStrength, bonus, memeBefore, memeAfter }`, отдельная строка лога
+  - Применяется после `stage2Penalty` + `stage2StoryBonus`, до recalculate adoption/phase/alert
+- **Штрафов нет**: если `subjectName === ""` или `nameStrength < 60` — бонус просто не начисляется. Аналогично `stage2StoryBonus`
+- **Итоговый cap бустеров Stage 2**: +15 (story) + +10 (name) = **+25** к memePotential максимум; штрафы идут отдельной веткой (multiplicative penaltyMult по buzz/momentum/organicity)
+
+## Narrative pivot (2026-04-22)
+
+- **DEGEN-PARSER persona**: `src/analysis/prompts.js` переписан с поиска монет на поиск **нарративов**. Убрана hard-rule 5 (age penalty 6h). Stage 2 теперь верифицирует narrative momentum / organicity (organic / astroturf / mixed), а не «есть ли монета на рынке»
+- **Multi-source bonus удалён** (aggregator + scorer + prompts): в практике награждал news/politics (hit везде) и топил single-platform мемы. Dedup по сорсам остался как cleanup
+- **Clusterer `MIN_WORDS`**: 3 → 1. Jaccard 0.40 защищает от ложных мерджей, а короткие мем-заголовки больше не теряются
+- **Reddit preset alignment**: `PRESET_SUBREDDITS` keys теперь точно матчат filter-profiles (`general`/`animals`/`culture`/`celebrities`/`events`). Старые сироты (`ai`/`elon`/`sports`) удалены. Наборы curated под meme-shape (aww, dankmemes, capybara, popculturechat, etc.) вместо крипто-heavy defaults
+- **Source-aware engagement labels** (`src/notifications/formatter.js`): раньше Twitter показывал «Upvotes: 101.7K», хотя в `metrics.upvotes` для Twitter лежит `likes+retweets*2`. Теперь: Twitter → ❤️ Likes, TikTok → ▶️ Plays, остальное → 📈 Upvotes. Новые i18n ключи `alertLikes`, `alertPlays`, `alertGoogleHits` (EN + RU)
+- **JunkStats observation panel** (admin): `_getJunkStats(hours)` + `GET /api/junk-stats?hours=6|24|72|168` + `JunkStatsSection` React — top junk reasons, source mix, meme-shape hit rate, avg/max penalty; auto-refresh 30s; цель наблюдения: meme-shape signals ≥ 25%, no-meme-shape ≤ 50%, politics ≤ 15%
+- **Blacklist слов**: отложено (легко забанить нужные теги, владелец просил подумать)
