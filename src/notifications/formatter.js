@@ -90,24 +90,76 @@ export function formatTelegramAlert(trend, lang = 'en') {
 }
 
 /**
- * Format the on-demand X/Twitter analysis result
+ * Format the on-demand X/Twitter analysis result.
+ *
+ * @param {Object} result   — summarized output from TwitterChecker.searchNarrative
+ * @param {string} query    — the query string passed to Apify
+ * @param {string} lang     — 'en' | 'ru'
+ * @param {Object} [extras] — optional enrichment
+ * @param {number}  [extras.prevViralityScore] previous virality score for delta
+ * @param {Object}  [extras.grokPrev] xSearchData snapshot from scorer Stage 2
  */
-export function formatTwitterResult(result, query, lang = 'en') {
+export function formatTwitterResult(result, query, lang = 'en', extras = {}) {
   const t = getTranslations(lang);
-  const { tweetCount, totalViews, totalLikes, totalRetweets, totalReplies, viralityScore, accounts } = result;
+  const {
+    tweetCount, totalViews, totalLikes, totalRetweets, totalReplies,
+    viralityScore, concentration, topAuthor, fromCache, cachedAt, fellBack, actorUsed,
+  } = result;
 
-  const viralEmoji = viralityScore >= 75 ? '\u{1F525}\u{1F525}\u{1F525}' : viralityScore >= 50 ? '\u{1F525}\u{1F525}' : viralityScore >= 25 ? '\u{1F525}' : '\u{1F4CA}';
+  const viralEmoji = viralityScore >= 75 ? '\u{1F525}\u{1F525}\u{1F525}'
+                  : viralityScore >= 50 ? '\u{1F525}\u{1F525}'
+                  : viralityScore >= 25 ? '\u{1F525}'
+                  : '\u{1F4CA}';
 
   let msg = t.xAnalysisTitle + '\n';
-  msg += `\u{1F50D} ${t.xAnalysisQuery}: <code>${escHtml(query)}</code>\n\n`;
-  msg += `\u{1F4CA} <b>${t.xAnalysisVirality}: ${viralityScore}/100</b> ${viralEmoji}\n\n`;
+  msg += `\u{1F50D} ${t.xAnalysisQuery}: <code>${escHtml(query)}</code>\n`;
+
+  // Cache / fallback markers — show before main numbers so user knows freshness
+  if (fromCache && cachedAt) {
+    const ageMin = Math.max(1, Math.round((Date.now() - cachedAt) / 60000));
+    msg += `${t.xAnalysisFromCache(ageMin)}\n`;
+  }
+  if (fellBack && actorUsed) {
+    msg += `${t.xAnalysisFallbackNote(actorUsed)}\n`;
+  }
+
+  msg += `\n\u{1F4CA} <b>${t.xAnalysisVirality}: ${viralityScore}/100</b> ${viralEmoji}\n`;
+
+  // Virality delta vs previous recorded snapshot
+  if (typeof extras.prevViralityScore === 'number' && extras.prevViralityScore >= 0) {
+    const prev = extras.prevViralityScore;
+    const diff = viralityScore - prev;
+    if (diff === 0) {
+      msg += t.xAnalysisDeltaNeutral(prev) + '\n';
+    } else {
+      const sign = diff > 0 ? `\u{1F4C8} +${diff}` : `\u{1F4C9} ${diff}`;
+      msg += t.xAnalysisDelta(prev, sign) + '\n';
+    }
+  }
+
+  msg += '\n';
   msg += `\u{1F426} ${t.xAnalysisTweets}: <b>${tweetCount}</b>\n`;
-  if (totalViews   > 0) msg += `\u{1F441} ${t.xAnalysisViews}: <b>${formatNumber(totalViews)}</b>\n`;
-  if (totalLikes   > 0) msg += `\u{2764}\u{FE0F} ${t.xAnalysisLikes}: <b>${formatNumber(totalLikes)}</b>\n`;
+  if (totalViews    > 0) msg += `\u{1F441} ${t.xAnalysisViews}: <b>${formatNumber(totalViews)}</b>\n`;
+  if (totalLikes    > 0) msg += `\u{2764}\u{FE0F} ${t.xAnalysisLikes}: <b>${formatNumber(totalLikes)}</b>\n`;
   if (totalRetweets > 0) msg += `\u{1F501} ${t.xAnalysisRetweets}: <b>${formatNumber(totalRetweets)}</b>\n`;
-  if (totalReplies > 0) msg += `\u{1F4AC} ${t.xAnalysisReplies}: <b>${formatNumber(totalReplies)}</b>\n`;
-  if (accounts && accounts.length > 0) {
-    msg += `\n\u{1F464} ${t.xAnalysisAuthors}: ${accounts.map(a => escHtml(a)).join(', ')}\n`;
+  if (totalReplies  > 0) msg += `\u{1F4AC} ${t.xAnalysisReplies}: <b>${formatNumber(totalReplies)}</b>\n`;
+
+  // Concentration (astroturf) warning — only render when meaningful.
+  // Threshold 70% matches the "single-account signal" rubric from Stage 2.
+  if (concentration >= 70 && topAuthor) {
+    msg += '\n' + t.xAnalysisConcentration(concentration, escHtml(topAuthor)) + '\n';
+  }
+
+  // Grok snapshot from the scorer's Stage 2 run (if present in the trend row).
+  // Gives a before/after feel: "Grok saw X at scan time, now live data says Y".
+  const gp = extras.grokPrev;
+  if (gp && (gp.xBuzz || gp.narrativeMomentum || gp.organicity)) {
+    msg += '\n' + t.xAnalysisGrokHeader + '\n';
+    msg += t.xAnalysisGrokLine(
+      gp.xBuzz             || 'unknown',
+      gp.narrativeMomentum || 'unknown',
+      gp.organicity        || 'unknown'
+    ) + '\n';
   }
 
   return msg;

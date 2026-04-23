@@ -146,6 +146,36 @@ export default {
   xAnalysisError: (err) => `\u{274C} \u{041E}\u{0448}\u{0438}\u{0431}\u{043A}\u{0430} X \u{0410}\u{043D}\u{0430}\u{043B}\u{0438}\u{0437}\u{0430}: ${err}`,
   xAnalysisNoKeywords: '\u{041D}\u{0435}\u{0434}\u{043E}\u{0441}\u{0442}\u{0430}\u{0442}\u{043E}\u{0447}\u{043D}\u{043E} \u{043A}\u{043B}\u{044E}\u{0447}\u{0435}\u{0432}\u{044B}\u{0445} \u{0441}\u{043B}\u{043E}\u{0432} \u{0434}\u{043B}\u{044F} \u{043F}\u{043E}\u{0438}\u{0441}\u{043A}\u{0430} \u{0432} X',
 
+  // Inline-кнопки на карточке результата
+  xAnalysisRefreshBtn: '\u{1F504} \u{041E}\u{0431}\u{043D}\u{043E}\u{0432}\u{0438}\u{0442}\u{044C}',
+  xAnalysisSearchBtn:  '\u{1F517} \u{041F}\u{043E}\u{0438}\u{0441}\u{043A} \u{0432} X',
+
+  // Cooldown (cooldown refresh'а 1ч)
+  xAnalysisCooldown: (min) =>
+    `\u{23F3} \u{041E}\u{0431}\u{043D}\u{043E}\u{0432}\u{0438}\u{0442}\u{044C} \u{043C}\u{043E}\u{0436}\u{043D}\u{043E} \u{0447}\u{0435}\u{0440}\u{0435}\u{0437} ${min} \u{043C}\u{0438}\u{043D}`,
+
+  // Cache / актёр-фолбэк пометки
+  xAnalysisFromCache: (min) =>
+    `\u{1F4BE} \u{0418}\u{0437} \u{043A}\u{044D}\u{0448}\u{0430} \u{00B7} ${min} \u{043C}\u{0438}\u{043D} \u{043D}\u{0430}\u{0437}\u{0430}\u{0434}`,
+  xAnalysisFallbackNote: (actor) =>
+    `\u{26A0}\u{FE0F} \u{041E}\u{0441}\u{043D}\u{043E}\u{0432}\u{043D}\u{043E}\u{0439} \u{0430}\u{043A}\u{0442}\u{043E}\u{0440} \u{0443}\u{043F}\u{0430}\u{043B}, \u{0438}\u{0441}\u{043F}\u{043E}\u{043B}\u{044C}\u{0437}\u{0443}\u{0435}\u{0442}\u{0441}\u{044F} ${actor}`,
+
+  // Delta (предыдущий балл виральности)
+  xAnalysisDelta: (prev, sign) =>
+    `\u{1F4C8} \u{0411}\u{044B}\u{043B}\u{043E}: <b>${prev}/100</b> (${sign})`,
+  xAnalysisDeltaNeutral: (prev) =>
+    `\u{1F4C8} \u{0411}\u{044B}\u{043B}\u{043E}: <b>${prev}/100</b> (=)`,
+
+  // Concentration-предупреждение
+  xAnalysisConcentration: (pct, author) =>
+    `\u{26A0}\u{FE0F} <b>@${author}</b> \u{0434}\u{0430}\u{0451}\u{0442} <b>${pct}%</b> \u{0432}\u{0441}\u{0435}\u{0433}\u{043E} \u{043E}\u{0445}\u{0432}\u{0430}\u{0442}\u{0430} (\u{043E}\u{0434}\u{0438}\u{043D} \u{0430}\u{043A}\u{043A}\u{0430}\u{0443}\u{043D}\u{0442})`,
+
+  // Grok snapshot из сохранённого xSearchData
+  xAnalysisGrokHeader:
+    '\u{1F9E0} <b>Grok \u{0441}\u{043D}\u{044F}\u{043B} \u{043F}\u{0440}\u{0438} \u{0441}\u{043A}\u{0430}\u{043D}\u{0435}:</b>',
+  xAnalysisGrokLine: (buzz, momentum, organicity) =>
+    `buzz=${buzz} \u00B7 momentum=${momentum} \u00B7 organicity=${organicity}`,
+
   // ── Errors ─────────────────────────────────────────────────────────────
   dbUnavailable: '\u{274C} \u{0411}\u{0430}\u{0437}\u{0430} \u{0434}\u{0430}\u{043D}\u{043D}\u{044B}\u{0445} \u{043D}\u{0435}\u{0434}\u{043E}\u{0441}\u{0442}\u{0443}\u{043F}\u{043D}\u{0430}',
   trendNotFound: '\u{274C} \u{041D}\u{0430}\u{0440}\u{0440}\u{0430}\u{0442}\u{0438}\u{0432} \u{043D}\u{0435} \u{043D}\u{0430}\u{0439}\u{0434}\u{0435}\u{043D}.',

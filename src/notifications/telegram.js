@@ -376,6 +376,19 @@ class TelegramNotifier {
           });
         }
 
+        // ── X Analysis refresh (1h cooldown) ──────────────────────────────
+        else if (data.startsWith('x_refresh:')) {
+          if (user.plan_name === 'test') {
+            await this.bot.answerCallbackQuery(query.id, {
+              text: t.xAnalysisLocked || 'X Analysis is locked for Test plan',
+              show_alert: true,
+            });
+            return;
+          }
+          const trendId = parseInt(data.split(':')[1], 10);
+          await this._handleXRefresh(chatId, trendId, query, user);
+        }
+
         // ── Feedback buttons (👍 / 👎 on alert cards) ────────────────────
         else if (data.startsWith('feedback:')) {
           const parts = data.split(':');
@@ -1004,6 +1017,60 @@ class TelegramNotifier {
 
   // ── X Analysis ────────────────────────────────────────────────────────────
 
+  /**
+   * Pull the Stage 2 `subjectName` off a trend row. Used to prime
+   * `TwitterChecker.buildQuery` with a named entity (Peanut, Moo Deng, …)
+   * before it falls back to heuristic title parsing. Returns null if the
+   * column is missing, unparseable, or the field was never populated.
+   */
+  _getSubjectName(trend) {
+    try {
+      if (trend?.raw_metrics) {
+        const metrics = JSON.parse(trend.raw_metrics);
+        const name = metrics?.xSearchData?.subjectName;
+        if (name && typeof name === 'string' && name.trim().length >= 2) {
+          return name.trim();
+        }
+      }
+    } catch {
+      // ignore parse errors — buildQuery just falls back to title heuristics
+    }
+    return null;
+  }
+
+  /**
+   * Build extras dict for formatTwitterResult — previous virality + Grok snapshot.
+   * Called once per X Analysis render (both initial and refresh paths).
+   */
+  _xAnalysisExtras(trendId) {
+    const extras = {};
+    try {
+      const trendRow = this.db?.getTrendById?.(trendId);
+      if (trendRow?.raw_metrics) {
+        const metrics = JSON.parse(trendRow.raw_metrics);
+        if (metrics?.xSearchData) extras.grokPrev = metrics.xSearchData;
+      }
+      const hist = this.db?.getXAnalysisHistory?.(trendId, 1) || [];
+      if (hist.length > 0) extras.prevViralityScore = hist[0].virality_score;
+    } catch (e) {
+      this.logger?.warn?.(`_xAnalysisExtras failed: ${e.message}`);
+    }
+    return extras;
+  }
+
+  /** Inline keyboard attached to every X Analysis result message. */
+  _xAnalysisResultKeyboard(trendId, query, lang) {
+    const t = getTranslations(lang);
+    return {
+      inline_keyboard: [
+        [
+          { text: t.xAnalysisRefreshBtn, callback_data: `x_refresh:${trendId}` },
+          { text: t.xAnalysisSearchBtn,  url: TwitterChecker.searchUrl(query) },
+        ],
+      ],
+    };
+  }
+
   async _handleXAnalysis(chatId, trendId, originalMsgId, user) {
     const t = getTranslations(user.language);
     if (user.plan_name === 'test') {
@@ -1017,8 +1084,9 @@ class TelegramNotifier {
       return this.bot.sendMessage(chatId, t.trendNotFound, { parse_mode: 'HTML' });
     }
 
-    const query = TwitterChecker.buildQuery(trend.original_title || trend.title);
-    this.logger.info(`X Analysis for "${trend.title}" -> Query: "${query}"`);
+    const subjectName = this._getSubjectName(trend);
+    const query = TwitterChecker.buildQuery(trend.original_title || trend.title, { subjectName });
+    this.logger.info(`X Analysis for "${trend.title}" -> Query: ${query} (subject=${subjectName || 'none'})`);
 
     try {
       await this.bot.editMessageReplyMarkup(
@@ -1030,19 +1098,32 @@ class TelegramNotifier {
         throw new Error(t.xAnalysisNoKeywords);
       }
 
-      const result = await this.twitterChecker.searchNarrative(query);
+      // Extras (prev virality + Grok snapshot) captured BEFORE saving the fresh
+      // run — so `prevViralityScore` reflects the previous fetch, not the one
+      // we're about to record.
+      const extras = this._xAnalysisExtras(trendId);
+
+      const result = await this.twitterChecker.searchNarrative(query, { trendId });
 
       let reply;
+      let keyboard = null;
       if (!result || result.tweetCount === 0) {
         reply = t.xAnalysisNone(this._escHtml(query));
       } else {
-        reply = formatTwitterResult(result, query, user.language);
+        reply = formatTwitterResult(result, query, user.language, extras);
+        keyboard = this._xAnalysisResultKeyboard(trendId, query, user.language);
+
+        // Record only genuine Apify fetches (cache hits don't contribute to history)
+        if (!result.fromCache) {
+          this.db?.saveXAnalysis?.(trendId, result);
+        }
       }
 
       await this.bot.sendMessage(chatId, reply, {
         parse_mode: 'HTML',
         reply_to_message_id: originalMsgId,
         disable_web_page_preview: true,
+        ...(keyboard ? { reply_markup: keyboard } : {}),
       });
 
       await this.bot.editMessageReplyMarkup(
@@ -1057,6 +1138,90 @@ class TelegramNotifier {
         { inline_keyboard: [[{ text: t.xAnalysisBtn, callback_data: `x_analysis:${trendId}` }]] },
         { chat_id: chatId, message_id: originalMsgId }
       ).catch(() => {});
+    }
+  }
+
+  /**
+   * Refresh button handler. Enforces a 1-hour cooldown — if the last live fetch
+   * for this trend happened <60 min ago, we show a toast and bail. Otherwise
+   * we force a fresh Apify run, edit the existing result message in place, and
+   * record the new snapshot to history.
+   */
+  async _handleXRefresh(chatId, trendId, query, user) {
+    const t = getTranslations(user.language);
+    const cbId = query.id;
+    const messageId = query.message?.message_id;
+
+    // Cooldown check — uses in-memory cache age as the "last fresh fetch" marker.
+    // cache entry is written only on actual Apify calls, so its age == last-run age.
+    const ageMs = this.twitterChecker.cacheAgeMs(trendId);
+    const COOLDOWN_MS = 60 * 60 * 1000;
+    if (ageMs != null && ageMs < COOLDOWN_MS) {
+      const minLeft = Math.max(1, Math.ceil((COOLDOWN_MS - ageMs) / 60000));
+      await this.bot.answerCallbackQuery(cbId, {
+        text: t.xAnalysisCooldown(minLeft),
+        show_alert: false,
+      }).catch(() => {});
+      return;
+    }
+
+    await this.bot.answerCallbackQuery(cbId, {
+      text: user.language === 'ru' ? '\u{1F504} \u{041E}\u{0431}\u{043D}\u{043E}\u{0432}\u{043B}\u{044F}\u{044E}...' : '\u{1F504} Refreshing...',
+    }).catch(() => {});
+
+    const trend = this.db?.getTrendById ? this.db.getTrendById(trendId) : null;
+    if (!trend) {
+      return this.bot.sendMessage(chatId, t.trendNotFound, { parse_mode: 'HTML' });
+    }
+
+    const subjectName = this._getSubjectName(trend);
+    const searchQ = TwitterChecker.buildQuery(trend.original_title || trend.title, { subjectName });
+    if (!searchQ || searchQ.trim().length < 2) return;
+
+    try {
+      // Capture extras BEFORE saving the new fetch
+      const extras = this._xAnalysisExtras(trendId);
+
+      const result = await this.twitterChecker.searchNarrative(searchQ, {
+        trendId,
+        forceFresh: true,
+      });
+
+      if (!result || result.tweetCount === 0) {
+        // Edit with "no tweets" message, drop buttons
+        await this.bot.editMessageText(
+          t.xAnalysisNone(this._escHtml(searchQ)),
+          {
+            chat_id: chatId,
+            message_id: messageId,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true,
+          }
+        ).catch(() => {});
+        return;
+      }
+
+      // Record the fresh snapshot
+      this.db?.saveXAnalysis?.(trendId, result);
+
+      const body = formatTwitterResult(result, searchQ, user.language, extras);
+      const keyboard = this._xAnalysisResultKeyboard(trendId, searchQ, user.language);
+
+      await this.bot.editMessageText(body, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: keyboard,
+      }).catch((e) => {
+        // Common: "message is not modified" — ignore, means same numbers
+        if (!/not modified/i.test(e?.message || '')) {
+          this.logger?.warn?.(`X refresh editMessageText failed: ${e.message}`);
+        }
+      });
+    } catch (err) {
+      this.logger.error(`X Analysis refresh failed: ${err.message}`);
+      await this.bot.sendMessage(chatId, t.xAnalysisError(this._escHtml(err.message)), { parse_mode: 'HTML' });
     }
   }
 

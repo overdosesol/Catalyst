@@ -54,14 +54,22 @@ const DEFAULT_ACTOR = 'kaitoeasyapi';
 // No lang filter — we want global trends from all languages.
 
 const PRESET_QUERIES = {
-  // Universal — catches any viral content worldwide via common words from multiple languages
+  // Universal — catches any viral content worldwide via common words from multiple languages.
+  //
+  // Language coverage (one slot each unless noted):
+  //   • EN          — 4 slots (articles/prepositions, wh-words, pronouns, demonstratives)
+  //   • Romance+RU  — 1 slot  (ES/PT/FR particles + RU particles merged; RU trades
+  //                            dedicated coverage for an extra EN slot)
+  //   • CJK         — 1 slot  (JP + KR + ZH particles in a single OR clause).
+  //                            JP is weighted slightly heavier (6 particles vs 3+3)
+  //                            because JP Twitter is the most active non-EN market.
   general: [
     '(a OR the OR is OR to OR in) min_faves:10000 -is:retweet',
-    '(de OR la OR el OR que OR en) min_faves:10000 -is:retweet',
-    '(и OR я OR на OR не OR что) min_faves:10000 -is:retweet',
+    '(de OR la OR el OR que OR en OR и OR я OR на OR не OR что) min_faves:10000 -is:retweet',
+    '(when OR where OR why OR how OR who) min_faves:10000 -is:retweet',
     '(you OR me OR my OR we OR our) min_faves:10000 -is:retweet',
     '(this OR that OR it OR was OR has) min_faves:10000 -is:retweet',
-    '(just OR so OR but OR now OR all) min_faves:10000 -is:retweet',
+    '(の OR は OR を OR が OR に OR で OR 이 OR 가 OR 는 OR 的 OR 是 OR 了) min_faves:10000 -is:retweet',
   ],
 
   // 🐾 Animals — viral pets, funny animals, cute creatures
