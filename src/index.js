@@ -55,7 +55,8 @@ const scorer = new Scorer(config, logger, db, preStage);
 const triggerFinder = new TriggerFinder(config, logger);
 
 // ── Initialize Telegram Bot ─────────────────────────────────────────────────
-const telegram = new TelegramNotifier(config, logger, db, null, triggerFinder); // solanaMonitor injected below
+// scorer is passed for the pro/admin /analyze + bare-URL manual-analysis flow.
+const telegram = new TelegramNotifier(config, logger, db, null, triggerFinder, scorer); // solanaMonitor injected below
 // Prune muxed video cache on startup (files older than 7 days)
 try { telegram.cleanupVideoCache(5); } catch {}
 
@@ -213,7 +214,7 @@ try {
 }
 
 // ── Initialize dashboard ────────────────────────────────────────────────────
-const dashboard = new DashboardServer(config, logger, db, appState, () => runScanCycle(), telegram, triggerFinder);
+const dashboard = new DashboardServer(config, logger, db, appState, () => runScanCycle(), telegram, triggerFinder, { scorer });
 dashboard.start();
 
 // ── Initialize admin panel ──────────────────────────────────────────────────
@@ -466,6 +467,12 @@ async function runScanCycle() {
       let userDisabledSources = [];
       try { userDisabledSources = JSON.parse(user.disabled_sources || '[]'); } catch(e) {}
 
+      // Per-user alert-type subscription. CSV in users.alert_types_filter,
+      // helper normalises empty/legacy/garbage to "all 3 types". Wildcard
+      // semantics: an empty resulting array is treated as "no filter" by the
+      // gate below (matches db helper contract).
+      const userAlertTypes = db.getUserAlertTypes(user.telegram_chat_id);
+
       // Get this user's threshold (per-user or fallback to global). This now
       // gates the unified alertScore — higher value = stricter.
       const userThreshold = normalizeThreshold(user.alert_threshold, config.alertThreshold);
@@ -488,6 +495,7 @@ async function runScanCycle() {
           title:      (trend.title || '').slice(0, 160),
           source:     trend.source,
           category:   trend.category || null,
+          alertType:  trend.alertType || null,
           alertScore: trend.alertScore ?? null,
           threshold:  effectiveAlertThreshold,
           breakdown:  trend.alertBreakdown || null,
@@ -519,9 +527,17 @@ async function runScanCycle() {
         const sourcePass    = !userDisabledSources.includes(sourceLc);
         const dedupPass     = !db.wasNotificationSentToUser(trend._dbId, user.id);
 
+        // alert_type filter: NULL alertType (legacy / pre-rollout trends)
+        // counts as wildcard so we don't silently mute back-catalog. Same
+        // wildcard logic when the user array is empty (handled by db helper:
+        // it can't return empty without us special-casing here).
+        const trendAlertType = trend.alertType || null;
+        const alertTypePass = !trendAlertType || userAlertTypes.includes(trendAlertType);
+
         gates.push({ name: 'threshold', passed: thresholdPass, detail: `${alertScore} / ${effectiveAlertThreshold}` });
         gates.push({ name: 'hard_junk', passed: hardJunkPass,  detail: `junk=${junkVal}${junkReasons ? ' (' + junkReasons + ')' : ''} < ${alertWeights.hardJunkStop}` });
         gates.push({ name: 'source',    passed: sourcePass,    detail: trend.source + (sourcePass ? '' : ' (muted)') });
+        gates.push({ name: 'alert_type', passed: alertTypePass, detail: trendAlertType ? `${trendAlertType} ∈ [${userAlertTypes.join(',')}]` : 'no type (wildcard)' });
         gates.push({ name: 'dedup',     passed: dedupPass,     detail: dedupPass ? 'new trend' : `already sent`  });
         gates.push({ name: 'daily',     passed: dailyPass,     detail: dailyPass ? `ok` : `limit=${user.alert_limit}` });
         gates.push({ name: 'cap',       passed: capPass,       detail: maxAlertsPerCycle > 0 ? `${alertsSentThisCycle}/${maxAlertsPerCycle}` : '∞' });

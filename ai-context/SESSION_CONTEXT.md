@@ -397,6 +397,66 @@ Per-user category boost для дашборд-ранжирования был в
   - Sidebar toggle **«Только ручные»** — `manualOnly` state (localStorage `ts_manual_only`), фильтрация в `visibleTrends`; i18n `sidebar.manual_only`, `tooltip.manual_on/off`, `toast.manual_only_on/off`
 - **AdminServer wiring**: конструктор принимает `extras = {}` 7-м аргументом, сохраняет `this.scorer` и `this.telegram`. `src/index.js` передаёт `{ scorer, telegram }` при инстансе
 
+### Alert types — event/trend/post (2026-05-01)
+
+Алерты теперь классифицируются по **форме сигнала** (ортогонально `category`). Юзер может подписаться на нужные через TG `/menu` или дашборд Settings.
+
+- **3 типа** (enum в `src/analysis/prompts.js → ALERT_TYPE_VALUES`):
+  - `event` 📰 — конкретный триггер (whyNow обычно непустой)
+  - `trend` 📈 — нарратив на нескольких платформах / в нескольких постах
+  - `post` 🚀 — один вирусный пост, не движение
+- **AI-driven** через Stage 1 schema (`alertType` в `STAGE1_RESPONSE_SCHEMA`). Strict json_schema у OpenAI гарантирует enum; xAI/Grok нормализуется через `normalizeAlertType()`. Promptовая rubric и rules-of-thumb в SYSTEM_PROMPT блок «ALERT TYPE»
+- **Deterministic fallback** `deriveAlertType(trend)` (`src/analysis/scorer.js`): `whyNow → event`, `platforms ≥ 2 OR clusterSize ≥ 3 → trend`, иначе `post`. Применяется и в `_applyHeuristic` и в `_fallback` чтобы новые трейнды НИКОГДА не имели NULL
+- **Стоимость**: +~5 токенов output × 30 трейндов × 96 циклов/день ≈ <$0.01/мес
+- **Persistence**: `trends.alert_type TEXT` (column) + `raw_metrics.alertType` зеркало. Legacy-строки = NULL → wildcard в gate (никогда не муем back-catalog)
+- **Per-user subscription**: `users.alert_types_filter TEXT` CSV default `'event,trend,post'`. Helpers `db.getUserAlertTypes(chatId)` / `setUserAlertTypes(chatId, types[])`. Empty CSV → reader returns ['event','trend','post'] (silent-allow). Все 3 выключены → так же silent-allow (никогда не мутим)
+- **Gate** в `src/index.js` рядом с threshold/source/dedup: `alertTypePass = !trendAlertType || userAlertTypes.includes(trendAlertType)`. `recordAlertDecision({alertType, ...})` пишется для DecisionsPage observability
+- **Telegram alert** (`formatter.js`): emoji-чип ПЕРЕД header'ом — `📰 СОБЫТИЕ` / `📈 ТРЕНД` / `🚀 ПОСТ`. Helper `formatAlertTypeChip()`. NULL → строка опускается
+- **Telegram /menu**: новая кнопка `🔔 Типы алертов` (вторая строка). Submenu — три ✅/❌-toggle'а. Callback `toggle_alert_type:event|trend|post`
+- **Dashboard**:
+  - Sidebar: новый chip-filter `Тип / Type` (event/trend/post + All) — pure client-side, persist в `localStorage.ts_alert_type_filter`
+  - FeedCard + TrendModal: первый бейдж — `.badge-atype-{type}` с цветной заливкой (event red-orange, trend green, post blue)
+  - AccountPanel: компонент `AlertTypesRow` — 3 toggle-чекбокса, optimistic save + rollback при ошибке. POST `/api/user/alert-types` `{types:[...]}`
+  - `_publicUser` отдаёт `alertTypes: string[]`; `_formatTrend` отдаёт `alertType`
+- **Admin**:
+  - SubmitPage hero meta-chips: первый chip `📰 СОБЫТИЕ` / `📈 ТРЕНД` / `🚀 ПОСТ` цветной (`.sp-chip-atype-{type}`)
+  - DecisionsPage: новая reason-метка `alert_type` (chip `🔔 Тип не подписан`) + цветной alert-type chip в meta-row карточек решений; `GATE_LABELS.alert_type='тип'`
+  - `_hydrateTrendFromDb` + `_shapeManualTrend` отдают `alertType`
+- **Файлы (изменены)**: `prompts.js`, `scorer.js`, `database.js`, `index.js`, `formatter.js`, `i18n/{en,ru}.js`, `notifications/telegram.js`, `dashboard/server.js`, `admin/server.js`. Validators `check-admin-spa.cjs` + `check-dashboard-spa.cjs` — оба green
+
+### Manual analysis exposed to dashboard + Telegram (2026-05-01)
+- **Pro/Admin only** на dashboard и в TG (free/test видят/получают «Pro feature» сообщение или silent ignore)
+- **Архитектура**: extracted из admin/server.js в `src/analysis/`:
+  - `url-resolver.js` — `resolveUrlToTrend(url)` (Twitter/Reddit/TikTok/og:image generic)
+  - `manual-analysis.js` — `runManualAnalysis({ scorer, db, url, save, logger, actorId })` единый оркестратор для всех трёх surface'ов (admin / dashboard / TG)
+- **Dashboard**: `POST /api/manual-analysis { url }` → 403 `reason: 'plan'|'cooldown'|'daily'`. Rate limit: 30s между, 20/24h, admin bypass. `save: false` — приватно, не пишет в `trends`. Response — `_formatTrend`-shaped с synthetic ID `manual-<ts>`. UI: bottom-nav «🧪 Анализ» только для pro/admin → Sheet с AnalyzePanel (form + result preview + «Открыть карточку» переключает на TrendModal). CSS `.analyze-*` ~110 строк
+- **Telegram**: `/analyze <url>` команда + bare-URL auto-detection в `bot.on('message')` (только pro/admin, остальные silent ignore). Helper `_runManualAnalysisForUser(msg, user, url)` — same rate limit, ack message «⚙️ Анализирую...» удаляется при готовности результата → `sendAlertToUser(trend, user)` стандартный рендеринг алерта. НЕ записывает в `notifications`, НЕ инкрементит `alert_count` (приватно)
+- **Конструкторы**: `DashboardServer(... , extras={scorer})` 8-й arg, `TelegramNotifier(... , scorer)` 6-й. Без скорера surfaces возвращают 503 / "not configured"
+- **Validator**: `scripts/check-dashboard-spa.cjs` — sister к `check-admin-spa.cjs`, такая же защита от backslash-eat / backticks-in-comment траппов в inline-SPA. **Запускать после ЛЮБОГО изменения dashboard/server.js**
+- **Cross-user cache (2026-05-01 update)**: `runManualAnalysis` хранит результаты в module-level Map с TTL 1h. Если pro-юзер A проанализировал URL, pro-юзер B по тому же URL получает кэш мгновенно бесплатно. Cache key — lowercase URL без trailing-slash (query сохранён). Wiped on restart. Lazy save — если save:true коллер приходит после save:false, выполняется только DB-запись без re-run scorer. `peekManualAnalysisCache(url)` non-mutating helper — dashboard и TG handler'ы peek перед rate-limit, на cache hit пропускают rate-limit (свободные запросы не должны жечь дневной cap). UI в admin SubmitPage / dashboard AnalyzePanel показывает «из кэша · X мин назад» вместо elapsed. TG bot пропускает «⚙️ Анализирую...» ack на cache hit. `clearManualAnalysisCache(url?)` export для тестов / будущего force-rerun
+
+### SubmitPage history persistence + card redesign (2026-04-30)
+- **Persistence**: каждый submit уже UPSERT'ил в `trends` с флагом `raw_metrics.manualSubmitted=true`. Добавили reverse-path:
+  - `db.getManualTrends(limit)` (`SELECT * WHERE raw_metrics LIKE '%"manualSubmitted":true%' ORDER BY first_seen_at DESC LIMIT ?`, cap 200)
+  - `db.unsetManualSubmitted(trendId)` (снимает флаг — тренд остаётся, выпадает из истории SubmitPage)
+  - `GET /api/manual-trends?limit=N` — список + re-derived `pipeline` trace
+  - `DELETE /api/manual-trends/:id` — кнопка 🗑 в history-strip
+- **`_shapeManualTrend(trend, dbId)`** — извлечён из `_submitNarrative`. Один источник истины для shape: live submit и history endpoint возвращают идентичный payload. `_derivePipelineTrace(trend)` re-derive's pipeline gates из сохранённых полей (memePotential vs текущий `stage2Threshold`, source, `clusterMetrics.isNovel`)
+- **`_hydrateTrendFromDb` расширен**: добавлены `description` (колонка), `clusterMetrics`, `stage2Penalty/StoryBonus/NameBonus`, `viralityScore`, `manualSubmitted/manualSubmittedAt`, `firstSeenAt` — без этого history-карточки рендерились бы с пустыми «Описание / Stage 2 / Cluster signals» секциями
+- **SubmitPage UX**:
+  - На mount → fetch list → горизонтальная strip из mini-карточек (image thumb + title 2-line clamp + `💎 score` chip + relTime + 🗑). Самая свежая active по умолчанию
+  - Клик переключает active детальную панель (`ManualResultCard`)
+  - Submit prepend'ит результат в strip
+  - 🗑 — confirm + DELETE
+- **Карточка результата** (`ManualResultCard`):
+  - Hero: 84×84 thumb (image из `metrics.imageUrls[0]` или source-icon) + bold title + meta-line (`#id · src · elapsed · relTime`) + 🧪 MANUAL chip + actions (🔗 Источник + 📨 Отправить алерт)
+  - Pipeline trace + score grid (5-7 cells) + Score bars
+  - **Always visible**: Trigger / AI explanation / Описание (primary value)
+  - **Collapsible advanced sections**: 🎨 Stage 0 PreStage (closed), 🔍 Stage 2 deep-dive (open by default), 📊 Сырые метрики (closed), 🌐 Сигналы кластера (closed), 🖼 Картинки если ≥2 (closed). Общий компонент `Collapsible` (header click toggle, content unmount при close)
+  - Comment textarea внутри карточки — оператор корректирует комментарий перед `Отправить алерт` по конкретному тренду из истории
+- **Helpers added** (выше SubmitPage в SPA): `Collapsible`, `relTimeRu`, `srcIcon`, `ManualHistoryItem`, `ManualResultCard`
+- **Validation tooling**: `scripts/check-admin-spa.cjs` экстрактит `<script>...</script>` из template literal и прогоняет через `vm.Script`. Ловит **оба** класса трапов этого файла (backticks-in-comments + `\n` в строках). `.cjs` потому что проект `"type": "module"`. **Запускать перед каждым деплоем который трогает `admin/server.js` или `dashboard/server.js`**
+
 ## Dashboard polish + TG media fixes (2026-04-24)
 
 - **Ask Grok button** в TrendModal — зеркалит TG alert button, строит Grok URL инлайном через IIFE, CSS `.trend-link-grok` (#b48cff); i18n `modal.ask_grok`

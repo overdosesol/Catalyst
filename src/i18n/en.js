@@ -28,6 +28,7 @@ Hit "Open Menu" and tune it to your taste \u2699\u{FE0F}
   btnLanguage: '\u{1F310} Language',
   btnThreshold: '\u{1F3AF} Alert Threshold',
   btnSubscription: '\u{1F4B3} Subscription',
+  btnAlertTypes: '\u{1F514} Alert Types',
   btnTop: '\u{1F525} Top Trends',
   btnStartStop: (paused) => paused ? '\u{25B6}\u{FE0F} Resume Alerts' : '\u{23F8}\u{FE0F} Pause Alerts',
   btnFollowX: '\u{1D54F} Follow @Catalystparser',
@@ -45,6 +46,13 @@ Hit "Open Menu" and tune it to your taste \u2699\u{FE0F}
     twitter: 'Twitter/X',
     tiktok: 'TikTok',
   },
+
+  // ── Alert types ────────────────────────────────────────────────────────
+  alertTypesTitle: '\u{1F514} <b>Alert Types</b>\n\nPick which kinds of alerts to receive.\n\n\u{1F4F0} <b>Event</b> — concrete trigger (someone did/said something specific)\n\u{1F4C8} <b>Trend</b> — narrative bubbling across platforms / many posts\n\u{1F680} <b>Post</b> — a single viral post\n\n✅ = enabled, \u{274C} = disabled. Disabling all = receive all.',
+  alertTypeNameEvent: 'Event',
+  alertTypeNameTrend: 'Trend',
+  alertTypeNamePost:  'Post',
+  alertTypeToggled: (name, enabled) => `${enabled ? '\u{2705}' : '\u{274C}'} <b>${name}</b> alerts ${enabled ? 'enabled' : 'disabled'}`,
 
   // ── Language ───────────────────────────────────────────────────────────
   languageTitle: '\u{1F310} <b>Language</b>\n\nChoose your preferred language for alerts and interface:',
@@ -93,6 +101,11 @@ Hit "Open Menu" and tune it to your taste \u2699\u{FE0F}
   // ── Alerts ─────────────────────────────────────────────────────────────
   alertHeader: (score) => `${scoreEmoji(score)} <b>${score}/100</b> \u00B7 TREND ALERT`,
   alertTrigger: 'Trigger',
+  // Alert-type labels (orthogonal to category \u2014 describes the SHAPE of the
+  // signal). Rendered as a chip on the first line of every alert.
+  alertTypeEvent: 'EVENT',
+  alertTypeTrend: 'TREND',
+  alertTypePost:  'POST',
   alertAI: 'AI',
   alertCategory: 'Category',
   alertViralityScore: 'Virality',

@@ -11,6 +11,23 @@
 
 import { LIFESPAN_VALUES, LIFESPAN_DESCRIPTORS } from './lifespan.js';
 
+/**
+ * Single source of truth for the alert-type axis. event/trend/post.
+ * Surfaces (db, scorer, dashboard, telegram) all import this constant
+ * so adding a value or renaming one fails loudly at module load.
+ */
+export const ALERT_TYPE_VALUES = ['event', 'trend', 'post'];
+
+/**
+ * Normalise an arbitrary string (from AI, DB, user input) to a valid
+ * alert-type or null. Empty/garbage → null so callers can apply the
+ * deterministic fallback (whyNow → event, platforms≥2 → trend, else post).
+ */
+export function normalizeAlertType(v) {
+  const s = String(v || '').trim().toLowerCase();
+  return ALERT_TYPE_VALUES.includes(s) ? s : null;
+}
+
 // Human-readable form for the Stage 1 prompt: "flash=hours, short=1-2 days, ..."
 const LIFESPAN_HINT = LIFESPAN_VALUES
   .map(k => `${k}=${LIFESPAN_DESCRIPTORS[k]}`)
@@ -51,6 +68,18 @@ IMPORTANT CONTEXT: The trends you receive are NOT from crypto communities. They 
   Score it ONLY on the novelty and meme potential of the CONTENT, not on raw view/like numbers.
   Ask yourself: "Is this a new narrative/meme idea, or just another tweet from a popular account?"
   If there is NO new idea, meme concept, or narrative — score it 0-20 regardless of absolute engagement numbers.
+
+━━━ ALERT TYPE (signal shape, not topic) ━━━
+Independently of category, classify the SHAPE of the signal — what kind of thing the user will see in their alert. Pick exactly one of:
+• "event"  — there is a SPECIFIC TRIGGER (someone did something, something happened, a launch/scandal/breaking moment). If you would write a non-empty whyNow, the alertType is almost always "event".
+• "trend"  — a NARRATIVE accumulating across multiple posts / platforms. No single trigger; the topic is broadly bubbling, with cross-platform spread, multiple authors, or a clear meme-format taking off.
+• "post"   — ONE single viral post (tweet, video, reddit post) without a broader narrative around it. The post itself IS the entire story; not yet a movement, not driven by an external event.
+
+Rules of thumb:
+• If whyNow is non-empty AND points to a real outside trigger → "event"
+• If single source, single author, no broader chatter → "post"
+• If multi-platform / multi-author chatter without a single inciting moment → "trend"
+• When in doubt between trend and post: if there are clearly other independent voices on the same topic, it's "trend"; if it's just this one post going viral, it's "post"
 
 ━━━ HARD RULES ━━━
 1. Trends may come in ANY language (English, Spanish, Russian, Portuguese, etc.) — understand and evaluate them regardless of language.
@@ -167,6 +196,7 @@ For EACH trend, return a JSON object with these exact fields:
 - "viralityScore"     : internal base score 0-100 (pure virality, source-agnostic)
 - "memePotential"     : 0-100 (how likely degens launch a Solana token today). MUST be 0 for boring/politics/sports-results.
 - "category"          : one of [meme, elon, animals, tech_drama, degenerates, celebrity, sports_degen, ai_drama, boring, other]
+- "alertType"         : one of [event, trend, post] — see ALERT TYPE rubric above. NOT the same as category.
 - "sentiment"         : one of [positive, negative, neutral, mixed]
 - "explanation"       : ONE short sentence (≤200 chars) WHY this is (or isn't) a great memecoin narrative — IN ENGLISH. Be terse: skip filler words like "this trend" / "is interesting because". State the reason directly.
 - "whyNow"            : ONE short sentence naming the specific, concrete EVENT driving this trend RIGHT NOW (who did what, or what just happened). Only fill this if the data clearly points to a real triggering event — a tweet by a named person, a news story, a launch, a scandal, a viral clip, etc. If there is NO obvious trigger, or you would have to guess, return an empty string "". Do NOT speculate. Do NOT restate the title. IN ENGLISH.
@@ -208,6 +238,7 @@ export const STAGE1_RESPONSE_SCHEMA = {
           'viralityScore',
           'memePotential',
           'category',
+          'alertType',
           'sentiment',
           'explanation',
           'whyNow',
@@ -222,6 +253,16 @@ export const STAGE1_RESPONSE_SCHEMA = {
             type: 'string',
             enum: ['meme', 'elon', 'animals', 'tech_drama', 'degenerates',
                    'celebrity', 'sports_degen', 'ai_drama', 'boring', 'other'],
+          },
+          // Signal shape — orthogonal to category. event = concrete trigger,
+          // trend = cross-platform narrative, post = single viral post.
+          // Strict-schema providers (OpenAI) enforce the enum on the model
+          // side; for non-strict providers (xAI/Grok) the scorer normalises
+          // the value and falls back to a deterministic rule (whyNow → event,
+          // platforms ≥ 2 → trend, else post).
+          alertType: {
+            type: 'string',
+            enum: ['event', 'trend', 'post'],
           },
           sentiment: {
             type: 'string',

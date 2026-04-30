@@ -4,6 +4,52 @@ Append-only журнал значимых изменений. Мелкий debug
 
 ---
 
+## 2026-05-01 (alert types: event/trend/post + per-user subscription)
+
+**Цель**: разделить алерты по форме сигнала (а не по теме) — Событие / Тренд / Пост, чтобы юзер мог подписаться только на нужный тип.
+
+**Архитектура** (выбран Path B — AI-driven через Stage 1, см. обсуждение):
+- Поле `alertType ∈ {event, trend, post}` ортогонально `category`. Заполняется Stage 1 AI; heuristic/fallback пути деривируют детерминистично (`whyNow → event`, `platforms ≥ 2 OR clusterSize ≥ 3 → trend`, иначе `post`)
+- Per-user CSV подписка `users.alert_types_filter` default `'event,trend,post'` (всё включено), пустой = "все" (никогда не мутим юзера молча)
+- Legacy-тренды (`alert_type IS NULL`) — wildcard, проходят любой filter (back-catalog не страдает)
+
+**Файлы**:
+- `src/analysis/prompts.js` — экспорт `ALERT_TYPE_VALUES` + `normalizeAlertType()`. В `STAGE1_RESPONSE_SCHEMA` добавлено поле `alertType` enum, в `SYSTEM_PROMPT` — блок «ALERT TYPE» с rubric и rules of thumb. Поле прописано в `buildAnalysisPrompt` JSON spec
+- `src/analysis/scorer.js` — экспорт `deriveAlertType(trend)` (детерминистический fallback). В AI-result mapping: `normalizeAlertType(a.alertType) || deriveAlertType({...})`. `_applyHeuristic` + `_fallback` тоже заполняют `alertType` через derive
+- `src/db/database.js` — `addIfMissing('trends','alert_type','TEXT')`, `addIfMissing('users','alert_types_filter',"...DEFAULT 'event,trend,post'")`, helpers `getUserAlertTypes(chatId)` / `setUserAlertTypes(chatId, types[])` (валидируют enum, dedup, lowercase). `saveTrend` пишет колонку + зеркало в `raw_metrics.alertType`. `updateUser` allowed-list расширен
+- `src/index.js` — новый gate `alert_type` в alert-loop рядом с threshold/source/dedup. `decisionBase.alertType` пишется в `recordAlertDecision` для DecisionsPage
+- `src/notifications/formatter.js` — emoji-чип первой строкой алерта: `📰 СОБЫТИЕ` / `📈 ТРЕНД` / `🚀 ПОСТ`. Helper `formatAlertTypeChip(alertType, t)`. Legacy-row → пустая строка, чип не рисуется
+- `src/i18n/{en,ru}.js` — ключи `alertTypeEvent/Trend/Post`, `btnAlertTypes`, `alertTypesTitle`, `alertTypeNameEvent/Trend/Post`, `alertTypeToggled(name, enabled)`. На дашборде — `sidebar.alert_type`, `feed.atype.*`, `badge.alert_type.*`, `account.alert_types*`
+- `src/notifications/telegram.js` — в `/menu` keyboard вторая строка теперь содержит `🔔 Типы алертов` + `🌐 Язык`. Новый `_alertTypesKeyboard(user)` рендерит ✅/❌ для трёх типов. Callback'и `alert_types` (open) и `toggle_alert_type:event|trend|post` (toggle, optimistic)
+- `src/dashboard/server.js`:
+  - `_publicUser` отдаёт `alertTypes: string[]`
+  - `_formatTrend` отдаёт `alertType` (колонка → fallback на raw_metrics)
+  - Новый endpoint `POST /api/user/alert-types` `{ types: [...] }` → `{ ok, alertTypes: saved }`
+  - SPA: chip-filter в сайдбаре (между phase и filters), бейдж в `FeedCard` и `TrendModal`, новый компонент `AlertTypesRow` в AccountPanel (3 чекбокса, optimistic update + rollback при ошибке). CSS `.badge-atype-*`, `.atype-toggle*`
+- `src/admin/server.js`:
+  - `_hydrateTrendFromDb` + `_shapeManualTrend` отдают `alertType`
+  - SubmitPage hero meta-chips: первый chip — `sp-chip-atype-event/trend/post` с цветной заливкой
+  - DecisionsPage: новый chip `🔔 Тип не подписан` в `DECISION_LABELS`, лейбл `тип` в `GATE_LABELS`, цветной alertType-чип в meta-row карточки решения
+- `scripts/check-admin-spa.cjs` + `check-dashboard-spa.cjs` — оба зелёные (admin 168060 chars, dashboard 161042 chars)
+
+**Стоимость AI**: +~5 токенов output на тренд × 30 трейндов × 96 циклов/день × ~$0.075/M (cached) ≈ <$0.01/мес. Strict json_schema (OpenAI) гарантирует enum на стороне модели.
+
+**Edge-cases**:
+- Юзер выключил все 3 типа → `getUserAlertTypes` возвращает дефолт 3 — silent allow всех (никогда не мутим молча; UI явно говорит про это)
+- AI вернул мусор / xAI без strict schema → `normalizeAlertType` → `null` → derive по правилу
+- Manual analysis (admin/dashboard/TG) — alertType заполняется как обычно через scorer; filter не применяется для прямого `_runManualAnalysisForUser` (оператор сам попросил)
+- Heuristic + fallback paths добавили `alertType: deriveAlertType(t)` чтобы NEVER NULL для новых трейндов
+
+**Проверка**:
+- `node --check` всех затронутых файлов — green
+- `node scripts/check-admin-spa.cjs` + `check-dashboard-spa.cjs` — green
+- Sanity-тесты `deriveAlertType` (whyNow → event, platforms→trend, single→post, whyNow priority): все ok
+- `formatTelegramAlert` для event/post + legacy (alertType=null): чип-строка корректно появляется/опускается
+
+**Деплой**: `.\deploy.ps1`. После первого цикла проверить логи — должны видеть валидные `alertType` в trends. Через час глянуть DecisionsPage → распределение типов.
+
+---
+
 ## 2026-04-15 (bootstrap + планы + AI switch) — архивно
 
 - Создана `ai-context/` структура (`AGENT_RULES`, `SESSION_CONTEXT`, `WORKLOG`). `NEXT_STEPS.md` позже удалён
@@ -890,6 +936,7 @@ Append-only журнал значимых изменений. Мелкий debug
 - **CSS specificity: body-class всегда выигрывает у одиночного class**: `body.prefs-compact .img-carousel { height: 280px }` (0,0,2,1) перебивает `.img-carousel.in-modal { height: 440px }` (0,0,2,0). Если делаешь modal-only override — добавляй явный `body.prefs-compact .img-carousel.in-modal { ... }` рядом, иначе compact-юзеры получают сломанную модалку молча. Применимо ко ВСЕМ парам base-rule + density/theme override
 - **`<video>` без metadata = 300×150 default**: `width:100%; height:auto` на `<video>` пока metadata не загружен использует дефолтную 2:1 пропорцию → `object-fit: contain` для poster ужимает в плоский letterbox. Фикс — `aspect-ratio: 16/9` (браузер заместит на natural ratio когда подгрузит)
 - **Backticks в комментариях `server.js`**: `src/dashboard/server.js` и `src/admin/server.js` — огромные inline React SPA внутри template literal. **Любой `` `token` `` в `//` комментарии ломает outer literal** с `SyntaxError: Unexpected identifier '<token>'`. Ловили ≥5 раз. Правило: в этих файлах **никогда** не писать backtick в комментариях. Всегда `node -c <file>` перед деплоем
+- **Backslash-перед-неэкранируемым символом в SPA-регулярках**: внутри outer template literal `\/` → `/` (parser ест backslash; `/` не нуждается в экранировании). Регулярка `/^https?:\/\//i.test(x)` в исходнике становится `/^https?:///i.test(x)` в браузере → unterminated regex → `Uncaught SyntaxError` → чёрный экран. Поймал 2026-04-30 при редизайне SubmitPage. **Правило**: regex с `/` в SPA-блоке **обязан** использовать `\\/\\/` в источнике. То же касается `\$`, `\``, `\b` и любых не-метасимвольных пар. Validator `scripts/check-admin-spa.cjs` теперь поймает это (вызывает `_spa()` и парсит то что реально увидит браузер) — раньше ручное unwinding в валидаторе пропускало этот класс
 - **Edit old trends without re-scoring**: `save_only` записи НЕ блокируются `isTrendSeen` — каждый скан клустерер пересмотрит их со свежими метриками; UPSERT по `external_id`/`url` не дублирует
 - **`<video>` не шлёт auth headers** → `/api/video/reddit/*` обязан быть public (до auth middleware); regex-валидация `src` защищает от SSRF
 - **Apify acc**: `General resource access` должен быть `Restricted`, не `Anonymous` — иначе runId даёт доступ без токена
@@ -904,3 +951,109 @@ Append-only журнал значимых изменений. Мелкий debug
 - **Google `inlineData` с любой mimeType + не-image байт = 400 INVALID_ARGUMENT**: сообщение `"Unable to process input image. Please retry or report in https://developers.generativeai.google/guide/troubleshooting"`. Воспроизведено curl'ом 2026-04-29 на четырёх сценариях: HTML (404 page), empty buffer (CDN 0-byte response), redirect-HTML (curl без `-L`), 404 от `pbs.twimg.com/media/SOME_OLD_ID.jpg` — все идентично 400. Правило: ПЕРЕД отправкой в Google всегда проверять `_sniffImageMime/_sniffVideoMime(buffer)` — если null, refuse to ship. **Не доверять** `Content-Type` из download response (Twitter CDN врёт чаще чем говорит правду — 200 OK + `content-type: image/jpeg` + body=HTML). Один источник истины — magic bytes в первых 12 байтах буфера
 - **Docker stdout log умирает с контейнером**: `docker logs catalyst-app` показывает только jsonl-файл текущего инстанса. После `docker compose up -d --build` ВСЕ логи прошлого контейнера теряются (новый container ID = новый log file). Persistent file-log в named volume `catalyst_logs` (`/logs/{YYYY-MM-DD}.log`) пишется параллельно через наш `Logger` и переживает ребилды — единственный путь дебажить пост-фактум. Команды: `docker exec catalyst-app cat /logs/2026-04-29.log` или `docker cp catalyst-app:/logs/2026-04-29.log .`. Полезные шаблоны: `grep -oE 'Google (image|video) HTTP [0-9]+' /logs/<date>.log | sort | uniq -c | sort -rn` для сводки по кодам ответа; `grep -B1 -A2 'HTTP 4' /logs/<date>.log` для тел 4xx
 - **Google AI билит input tokens даже при failed generation**: 503 UNAVAILABLE возвращает `candidates: [{ content: {} }]` (output tokens=0), но `usageMetadata.promptTokenCount` уже захардкожен (text+image tokens). При длительных Google инцидентах это копейки в час, но если 503 затягивается на сутки — стоит увеличить `STAGE0_GOOGLE_COOLDOWN_MS` (default 5 мин) хоть до часа, чтобы реже стучаться и не платить за пустые ответы. Также: 503 ≠ rate limit. Tier 1 RPM=1000, мы гоняем 34 max — лимит не выбран, проблема исключительно в shared model capacity
+
+---
+
+## 2026-04-30 (SubmitPage history persistence + card redesign)
+
+- **Цель**: ручной анализ в админке тёрся при reload/уход с раздела (state хранился только в `useState`). Юзер: «хочу чтобы мои ручные поиски остались + переделать карточку поста на более красивую и удобную»
+- **Persistence**: каждый submit уже UPSERT'ил в `trends` с `raw_metrics.manualSubmitted=true` — ничего нового сохранять не нужно. Добавили путь чтения:
+  - `db.getManualTrends(limit)` — `SELECT * WHERE raw_metrics LIKE '%"manualSubmitted":true%' ORDER BY first_seen_at DESC LIMIT ?`. JSON-text LIKE-фильтр без расходов на парсинг каждой строки server-side; маркер уникален в схеме (никаких других полей с `manualSubmitted` нет)
+  - `db.unsetManualSubmitted(trendId)` — снимает флаг (тренд остаётся в БД, выпадает из истории SubmitPage)
+  - `GET /api/manual-trends?limit=N` (cap 200) — список hydrated rows + re-derived `pipeline` trace (memePotential vs текущий threshold, source, isNovel — те же чек-условия что в `_submitNarrative`)
+  - `DELETE /api/manual-trends/:id` — кнопка 🗑 в history-strip
+- **Shape helper**: `_shapeManualTrend(trend, dbId)` извлёчён из `_submitNarrative`. Один источник истины для shape — live submit и history endpoint возвращают идентичный payload, фронт рендерит одинаково
+- **Hydrator расширен**: `_hydrateTrendFromDb` теперь восстанавливает `description` (колонка `trends.description`), `clusterMetrics`, `stage2Penalty/StoryBonus/NameBonus`, `viralityScore`, `manualSubmitted/manualSubmittedAt`, `firstSeenAt` — раньше эти поля читались только в live-flow и в DB-hydrate path возвращали undefined → история показывала бы пустые секции
+- **SubmitPage UX**:
+  - На mount → `GET /api/manual-trends?limit=80` → горизонтальная strip из mini-карточек (image thumb + title 2-line clamp + 💎 score chip + relTimeRu age + 🗑 трэш). Самая свежая активна по умолчанию
+  - Клик по mini-карточке переключает active детальное окно
+  - Submit prepend'ит результат в строп, делает active
+  - 🗑 — confirm + DELETE → из стопа исчезает (тренд в БД остаётся целым)
+- **Карточка результата редизайн** (`ManualResultCard`):
+  - HERO-блок: 84×84 image thumb (или source-icon placeholder) слева + title 16px bold + meta (`#id · src · elapsed · relTime`) + buttons + 🧪 MANUAL chip
+  - Pipeline trace (без изменений) → score grid (5-7 cells, repeat auto-fit 120px) → Score bars
+  - **Trigger / AI explanation / Описание** — всегда раскрыты (это primary value)
+  - **Collapsible advanced sections**: Stage 0 PreStage (closed), Stage 2 deep-dive (open by default — это самая ценная инфа когда есть), Сырые метрики (closed), Сигналы кластера (closed), 🖼 Картинки если ≥2 (closed). Реализован общий `Collapsible` компонент (header click toggle, content unmount при close)
+  - Meta chips compact в одной строке между AI и collapsible-блоками
+  - Comment textarea внутри карточки (была раньше только в submit-форме) — оператор может скорректировать комментарий перед «Отправить алерт» по конкретному тренду
+- **Helpers added** (выше SubmitPage в SPA): `Collapsible`, `relTimeRu`, `srcIcon`, `ManualHistoryItem`, `ManualResultCard`
+- **Validation tooling**: добавлен `scripts/check-admin-spa.cjs` — экстрактит `<script>...</script>` из template literal, undo'ит `\\\\` `\\\`` `\\$` escaping, прогоняет через `vm.Script`. Ловит **оба** класса ошибок этого файла (backticks-in-comments + escape-in-strings). `.cjs` потому что проект `"type": "module"`. Запускать перед каждым деплоем который трогает `admin/server.js` или `dashboard/server.js`
+- **Файлы**: `src/db/database.js` (+~40 строк: `getManualTrends`, `unsetManualSubmitted`), `src/admin/server.js` (~+450 строк: эндпоинты, `_shapeManualTrend`, `_derivePipelineTrace`, расширение `_hydrateTrendFromDb`, новый `Collapsible`/`ManualHistoryItem`/`ManualResultCard`/`SubmitPage`; ~−270 строк старого SubmitPage), `scripts/check-admin-spa.cjs` (новый, ~30 строк)
+- **Деплой**: `.\deploy.ps1` (изменения только в admin SPA + DB методы — не нужны env правки, не нужны рестарты сервиса до выкатки)
+- **Hotfix (тот же день)**: первая версия выкатилась с чёрным экраном. Причина: в новом `submit()` я написал `if (!/^https?:\/\//i.test(clean))` — outer template literal сожрал backslash перед `/`, в браузер прилетело `/^https?://i.test(...)` → unterminated regex → `Uncaught SyntaxError`. Старый код имел `\\/\\/` именно для этой защиты. Возвращён `\\/\\/`. Также **переписан `scripts/check-admin-spa.cjs`** — раньше делал ручное unwinding (`\\` → `\`, `\`` → `` ` ``, `\$` → `$`), пропускал `\n`/`\t`/`\u`/`\x`/`\/`. Теперь импортит модуль, дёргает `AdminServer.prototype._spa.call({})` (метод не использует `this.*`), извлекает `<script>` ИМЕННО ИЗ ТОГО HTML что увидит браузер, прогоняет через `vm.Script`. Backslash-eat ловится мгновенно, поэтому такая ошибка больше не выкатится в прод. **Запускать после ЛЮБОГО изменения inline-SPA в admin/server.js или dashboard/server.js**: `node scripts/check-admin-spa.cjs`
+- **Visual rewrite (тот же день)**: владелец попросил привести SubmitPage к единому виду с остальной админкой. Найдены проблемы первой версии: использовал `var(--text3)` (не определён, только `--text` и `--text2`), `var(--dim)` (не определён), хардкодил пурпурный `#b48cff` и голубой `#5bc0eb` вместо `var(--accent)` (`#14b8a6` teal — основной токен админки), inline-styled чипы вместо CSS-классов, hero без gradient + без shadow в духе `.scanner-status-bar`. Решение: добавлен блок `.sp-*` CSS-классов в `<style>` (~110 строк, рядом с `.exp-*` и `.scfg-*` блоками), все компоненты SubmitPage рефакторнуты:
+  - `Collapsible` → `.sp-collapsible` + `accent="prestage"|"stage2"` для тонировки (вместо inline rgba)
+  - `ManualHistoryItem` → `.sp-hist-card.active` + `.sp-hist-pill.high/mid/low/cold` (color-mix как в `DecisionsPage`)
+  - `ManualResultCard` hero → `.sp-hero` с тем же `linear-gradient(135deg,rgba(20,184,166,.07),rgba(56,189,248,.04))` градиентом что у `.scanner-status-bar`
+  - `.sp-pill.manual/.ok/.warn/.bad/.skipped` для pipeline trace и MANUAL chip — единый ритм 999px-радиуса
+  - `.sp-score-tile.hot/.warm/.bad` для score grid (auto-tone по value 70/40, override на bad)
+  - `.sp-bar-*` для AdminScoreBar — цвета через `var(--green)`/`var(--yellow)`/etc.
+  - `.sp-block` + `.sp-block.accent-trigger/.accent-stage2/.accent-prestage/.accent-tg` — единый паттерн для AI-объяснения / описания / Stage 2 / TG-broadcast статуса
+  - `.sp-narrative` — left-border accent для текстовых блоков (бывший `narrativeBox` хелпер удалён, его поведение зашито в `.sp-narrative` CSS)
+  - `.sp-chip` для meta-чипов (категория / sentiment / lifespan / phase) — pill-style консистент с DecisionsPage
+  - Helper `scoreBox(label, value, cls)` переименован в `spTile()`, все цвета теперь через CSS `.sp-score-tile.hot/.warm/.bad`
+- **Файлы доп**: `src/admin/server.js` (~+110 CSS lines, ~−290 inline-style lines в SubmitPage components)
+
+---
+
+## 2026-05-01 (Manual analysis — dashboard + Telegram, pro/admin gated)
+
+- **Цель**: ручной анализ был доступен только из админки. Владелец попросил вынести в дашборд и TG-бот, доступ — только Pro и Admin планы
+- **Архитектурный рефакторинг**: URL resolvers и оркестратор анализа вынесены из `admin/server.js` в `src/analysis/`
+  - `src/analysis/url-resolver.js` (новый) — pure functions: `resolveUrlToTrend(url)`, `resolveTwitterUrl/RedditUrl/TiktokUrl/GenericUrl`. Бывшие `_resolveTwitterUrl`/`_resolveRedditUrl`/etc. в админке (273 строки) удалены — все три вызова (admin SubmitPage / dashboard endpoint / TG bot) теперь импортят из одного источника. Один баг в fxtwitter media parsing — фикс в одном месте
+  - `src/analysis/manual-analysis.js` (новый) — `runManualAnalysis({ scorer, db, url, save, logger, actorId })` оркестратор. Resolve → `scorer.scoreTrends([synthetic])` → optional save с manualSubmitted flag → re-derived pipeline trace. Возвращает `{ ok, elapsedMs, trend, dbId, pipeline }`
+- **Admin рефактор**: `_submitNarrative` сжат с ~58 строк до ~25 (тонкий wrapper над `runManualAnalysis` с broadcast после). Поведение идентичное — single source of truth. SubmitPage UX/визуал не тронуты
+- **Dashboard endpoint** `POST /api/manual-analysis`:
+  - Auth required (existing X-Auth bearer middleware)
+  - Plan gate: `req.user.plan_name ∈ ['pro', 'admin']` → иначе 403 `reason: 'plan'`
+  - Rate limit (admin bypass): 30s между вызовами + 20/24h. In-memory ring `Map<userId, ts[]>` в DashboardServer instance — сбрасывается при рестарте, что ОК для soft cap
+  - **save: false** — приватный анализ не попадает в глобальную ленту (в отличие от админки где save: true)
+  - Response shape — adapted к `_formatTrend` shape с synthetic ID `manual-<ts>`, чтобы UI рендерил через ту же `TrendModal` что и обычные feed-cards
+- **Dashboard UI**:
+  - Bottom-nav третья кнопка «🧪 Анализ» — рендерится только если `me.plan ∈ {pro, admin}`. Free/test юзеры её не видят
+  - `view === 'analyze'` → открывает `Sheet` с `AnalyzePanel`: header (back + title) → описание → form (URL input + кнопка) → empty state ИЛИ результат
+  - Результат: hero strip (84px thumb + title + meta + 🔗source + 👁 «Открыть карточку»), pipeline trace pills (Stage 1 ✓ / Stage 2 ✓⏭), score grid (4 tiles: 💎 Meme / 🌊 Emergence / 🔥 Adoption / 📖 Story если есть), AI explanation strip
+  - «Открыть карточку» переключает на `view: 'trends'` + `setModalTrend(tr)` → результат открывается в стандартной TrendModal со всем рендерингом (карусель, видео, score bars, Ask Grok, source link)
+  - CSS `.analyze-*` (~110 строк) в стиле остальных panels: `linear-gradient`, `var(--accent-rgb)` для accents, `.analyze-pill.ok/.warn` через color-mix, `.analyze-score.high/.mid/.low` для color toнировки
+- **Telegram bot**:
+  - Команда `/analyze <url>` — если URL не передан или не парсится, показывает usage. Регистрируется в `setMyCommands` (видна в TG-меню)
+  - Bare-URL handler — `bot.on('message')` второй регистрируется (после команд). Если текст содержит `https?://` И юзер pro/admin — автоматически запускает анализ. Free/test игнорятся молча (никаких "you need pro" уведомлений на каждую ссылку чтобы не флудить)
+  - Helper `_runManualAnalysisForUser(msg, user, url)`:
+    - Defence-in-depth plan check (на случай если bare-URL handler пропустил)
+    - Same rate limit как dashboard (30s + 20/24h, admin bypass)
+    - Acknowledge "⚙️ Анализирую... (10-30 сек)" → анализ → удалить ack → `sendAlertToUser(trend, user)` тот же rendering что и обычные алерты (видео + media group + caption logic + кнопки feedback/Ask Grok)
+    - НЕ записывает в `notifications`, НЕ инкрементит `alert_count` — приватный анализ, не broadcast
+    - Двуязычные сообщения (RU/EN) inline через `user.language` switch
+- **Конструкторы расширены**:
+  - `DashboardServer(..., extras = {})` — 8-й arg как у admin. `extras.scorer` сохраняется в `this.scorer`. Без скорера `/api/manual-analysis` возвращает 503 `reason: 'disabled'`
+  - `TelegramNotifier(config, logger, db, solanaMonitor, triggerFinder, scorer)` — 6-й positional. Без скорера `/analyze` отвечает "not configured"
+- **`scripts/check-dashboard-spa.cjs`** (новый, ~50 строк) — sister script для admin's check. Импортит модуль, дёргает `DashboardServer.prototype._buildSPA.call({})`, прогоняет через `vm.Script`. Та же защита от backslash-eat / backtick-in-comment траппов. Запускать после ЛЮБОГО изменения inline-SPA в dashboard/server.js. **Поймал тот же баг что и в админке вчера** — `if (!/^https?:\/\//i.test(clean))` без двойного экранирования
+- **Стоимость**: каждый pro/admin manual analysis тратит Stage 2 ~5¢ (если memePotential ≥ 60). Daily cap 20 → max ~$1/день/юзер. Suchabuse-resistant соображение — Stage 2 — самая дорогая операция в системе
+- **Файлы**: `src/analysis/url-resolver.js` (новый, ~270 строк), `src/analysis/manual-analysis.js` (новый, ~95 строк), `src/admin/server.js` (~−270 строк resolvers, +1 import, _submitNarrative сжат), `src/dashboard/server.js` (+~150 строк JS — endpoint, AnalyzePanel, BottomNav, Sheet wiring; +~110 строк CSS; ~+30 строк i18n RU/EN), `src/notifications/telegram.js` (+~110 строк JS — `/analyze` handler, bare-URL handler, `_runManualAnalysisForUser`), `src/index.js` (+2 wiring args), `scripts/check-dashboard-spa.cjs` (новый, ~50 строк)
+- **Деплой**: `.\deploy.ps1` — без env-правок. Проверь после: TG `/analyze https://...` от admin → должен вернуть алерт-карточку через 10-30s. Dashboard → /menu → 🧪 Анализ tab → форма работает.
+
+---
+
+## 2026-05-01 (Manual analysis — cross-user URL cache, 1h TTL)
+
+- **Цель**: владелец заметил что если pro-юзер A проанализировал URL X, pro-юзер B по тому же URL запускает повторный полный pipeline (~5¢ Stage 2). Нужно кэшировать на час
+- **Реализация**: module-level `RESULT_CACHE` Map в `src/analysis/manual-analysis.js`:
+  - Key: lowercase URL без trailing-slash. Query string сохраняется (некоторые URL без него теряют идентификатор; tracking-параметры вроде `utm_*` заплатят за дубль анализ — это <5¢, не стоит нормализатора)
+  - Value: `{ trend, pipeline, ts, savedDbId|null }`. Хранит full scorer output (а не shaped) — каждый surface (admin/dashboard/TG) shape'ит самостоятельно
+  - TTL: 1 час. Sweep expired при росте >200 entries (lazy)
+  - Wiped on restart — для 1h cache это OK, не нужна персистентность
+- **Cross-save semantics**: cache переживает разные `save:` режимы:
+  - save:false caller A → кэш сохраняется без `savedDbId`
+  - save:true caller B (admin) hits cache → выполняем lazy save, обновляем `savedDbId` → следующие save:false коллеры тоже видят dbId (ссылки на trend в дашборде/TG будут работать)
+  - save:true caller A → кэш сохраняется с `savedDbId`. save:false caller B reuses
+- **Rate-limit interaction**: добавлен `peekManualAnalysisCache(url)` non-mutating helper. Dashboard и TG handler'ы peek'ают перед rate-limit — на cache hit ИКОНОМИМ rate-limit (свободные мгновенные запросы не должны жечь дневной лимит юзера). На cache miss — обычный 30s+20/24h
+- **UX surfacing**:
+  - `runManualAnalysis` возвращает `fromCache: boolean`, `cacheAgeMs: number`
+  - Dashboard endpoint пробрасывает в response. AnalyzePanel в hero-meta показывает «`из кэша · 12 мин назад`» вместо «`fresh · 8.3s`»
+  - Admin SubmitPage hero-meta тоже: «`💾 из кэша · 12 мин назад`»
+  - TG `_runManualAnalysisForUser`: на cache hit пропускает «⚙️ Анализирую...» ack-сообщение (instant result не нужен пре-индикатор)
+- **`useCache: false`** опция — для будущего admin "Force re-run" button (не выкатывали — cache TTL 1h достаточно гибкий)
+- **`clearManualAnalysisCache(url?)`** export — для тестов / future invalidate-on-edit. Сейчас не используется
+- **Стоимость**: ожидаемая экономия — pro-юзеры обычно паpаллельно интересуются одними и теми же viral нарративами. Cache hit rate в первый час после первого анализа ~3-5x. При daily cap 20/юзер и 50 pro-юзеров → пиковая нагрузка может упасть с $50/день до $15-20/день
+- **Файлы**: `src/analysis/manual-analysis.js` (~+90 строк cache logic), `src/dashboard/server.js` (peek + UI меta), `src/notifications/telegram.js` (peek + skip ack on hit), `src/admin/server.js` (passthrough fromCache в response + UI meta)
+- **Деплой**: `.\deploy.ps1`. Проверка: дважды проанализировать один и тот же URL за 1 час → второй раз должен показать «из кэша · X мин назад» в hero-карточки и не сжечь rate-limit hit

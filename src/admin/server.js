@@ -12,6 +12,7 @@ import {
   getEffectiveProfiles,
   validateProfileOverrides,
 } from '../analysis/filter-profiles.js';
+import { runManualAnalysis } from '../analysis/manual-analysis.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1154,6 +1155,49 @@ class AdminServer {
         }
       }
 
+      // ── Manual-submit history: list of trends flagged manualSubmitted ─────
+      // Backs the SubmitPage history list. Returns the same shape as
+      // _submitNarrative.trend (built via _shapeManualTrend) plus a
+      // re-derived pipeline trace so the UI renders identically whether
+      // the row was just analysed or loaded from history.
+      if (path === '/api/manual-trends' && method === 'GET') {
+        const limitParam = parseInt(url.searchParams.get('limit') || '50', 10);
+        const limit = Number.isFinite(limitParam) ? limitParam : 50;
+        try {
+          const rows = this.db.getManualTrends?.(limit) || [];
+          const items = rows.map(row => {
+            const hydrated = this._hydrateTrendFromDb(row);
+            return {
+              trend: this._shapeManualTrend(hydrated, row.id),
+              pipeline: this._derivePipelineTrace(hydrated),
+              submittedAt: hydrated.manualSubmittedAt || row.first_seen_at || null,
+            };
+          });
+          return json(res, 200, { ok: true, total: items.length, items });
+        } catch (e) {
+          this.logger.error(`[ManualTrends] list failed: ${e.message}`);
+          return json(res, 500, { error: e.message });
+        }
+      }
+
+      // DELETE /api/manual-trends/:id — strip manualSubmitted marker so the
+      // row drops out of the SubmitPage history. The trend itself stays
+      // (it's a valid alert target / has feedback / etc).
+      const manualDelMatch = path.match(/^\/api\/manual-trends\/(\d+)$/);
+      if (manualDelMatch && method === 'DELETE') {
+        const trendId = parseInt(manualDelMatch[1], 10);
+        if (!Number.isFinite(trendId) || trendId <= 0) {
+          return json(res, 400, { error: 'invalid trend id' });
+        }
+        try {
+          const ok = this.db.unsetManualSubmitted?.(trendId) === true;
+          return json(res, 200, { ok, trendId });
+        } catch (e) {
+          this.logger.error(`[ManualTrends] delete failed: ${e.message}`);
+          return json(res, 500, { error: e.message });
+        }
+      }
+
       // ── On-demand Grok trigger search for SubmitPage ──────────────────
       // POST /api/trends/:id/trigger
       // Mirrors dashboard's endpoint but stripped of plan/cooldown checks
@@ -1545,6 +1589,125 @@ input:checked+.toggle-slider:before{transform:translateX(20px);background:#fff}
 .scfg-slider{width:100%;-webkit-appearance:none;appearance:none;height:6px;border-radius:3px;background:var(--bg3);outline:none;cursor:pointer}
 .scfg-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid #fff;box-shadow:0 2px 6px rgba(20,184,166,.4)}
 .scfg-slider::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid #fff;box-shadow:0 2px 6px rgba(20,184,166,.4)}
+/* Submit page (Ручной анализ) — matches the .card / .scanner-status-bar / .exp-card vocabulary used elsewhere */
+.sp-form{display:flex;flex-direction:column;gap:12px}
+.sp-form-label{font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px}
+.sp-input{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:13px;outline:none;font-family:inherit}
+.sp-input:focus{border-color:var(--accent)}
+.sp-textarea{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:13px;outline:none;resize:vertical;min-height:60px;font-family:inherit;line-height:1.5}
+.sp-textarea:focus{border-color:var(--accent)}
+.sp-counter{font-size:11px;color:var(--text2);font-variant-numeric:tabular-nums}
+.sp-counter.over{color:var(--red)}
+.sp-loading{text-align:center;padding:26px 20px;color:var(--text2);background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.005));border:1px solid var(--border);border-radius:16px;box-shadow:0 12px 32px rgba(0,0,0,.12);margin-bottom:18px}
+.sp-loading-icon{font-size:28px;margin-bottom:8px;opacity:.85}
+.sp-history-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px}
+.sp-history-title{font-size:11px;font-weight:700;color:var(--text2);letter-spacing:.7px;text-transform:uppercase}
+.sp-history-hint{font-size:11px;color:var(--text2)}
+.sp-history-strip{display:flex;gap:10px;overflow-x:auto;padding:4px 2px 12px;scroll-snap-type:x proximity}
+.sp-history-strip::-webkit-scrollbar{height:6px}
+.sp-history-strip::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:3px}
+.sp-hist-card{flex:0 0 230px;cursor:pointer;background:linear-gradient(180deg,rgba(255,255,255,.025),rgba(255,255,255,.005));border:1px solid var(--border);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;transition:all .18s;scroll-snap-align:start;position:relative}
+.sp-hist-card:hover{transform:translateY(-2px);border-color:rgba(20,184,166,.35);box-shadow:0 8px 18px rgba(0,0,0,.18)}
+.sp-hist-card.active{border-color:var(--accent);background:linear-gradient(180deg,rgba(20,184,166,.12),rgba(20,184,166,.03));box-shadow:0 0 0 1px rgba(20,184,166,.25),0 8px 22px rgba(20,184,166,.16)}
+.sp-hist-row{display:flex;align-items:center;gap:8px}
+.sp-hist-thumb{width:44px;height:44px;border-radius:8px;border:1px solid var(--border);object-fit:cover;flex-shrink:0;background:var(--bg3)}
+.sp-hist-thumb-fallback{width:44px;height:44px;border-radius:8px;border:1px solid var(--border);background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
+.sp-hist-text{flex:1;min-width:0}
+.sp-hist-title{font-size:12px;font-weight:600;color:var(--text);line-height:1.35;max-height:2.7em;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+.sp-hist-meta{font-size:10px;color:var(--text2);margin-top:3px}
+.sp-hist-foot{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.sp-hist-pill{display:inline-flex;align-items:center;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;font-family:'JetBrains Mono',Consolas,monospace}
+.sp-hist-pill.high{color:var(--green);background:color-mix(in srgb,var(--green) 14%,transparent)}
+.sp-hist-pill.mid{color:var(--yellow);background:color-mix(in srgb,var(--yellow) 14%,transparent)}
+.sp-hist-pill.low{color:#ff7849;background:rgba(255,120,73,.14)}
+.sp-hist-pill.cold{color:var(--text2);background:rgba(255,255,255,.05)}
+.sp-hist-time{font-size:10px;color:var(--text2)}
+.sp-hist-trash{background:transparent;border:none;color:var(--text2);cursor:pointer;font-size:13px;padding:2px 4px;line-height:1;border-radius:4px;opacity:.55;transition:opacity .15s,color .15s,background .15s}
+.sp-hist-trash:hover{opacity:1;color:var(--red);background:rgba(239,68,68,.1)}
+.sp-empty{text-align:center;padding:40px 24px;color:var(--text2);border:2px dashed var(--border);border-radius:14px;background:rgba(255,255,255,.01)}
+.sp-empty-icon{font-size:38px;opacity:.4;margin-bottom:10px;display:block}
+.sp-detail{background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.01));border:1px solid var(--border);border-radius:16px;overflow:hidden;box-shadow:0 12px 32px rgba(0,0,0,.12)}
+.sp-hero{display:flex;align-items:flex-start;gap:14px;padding:18px 20px;background:linear-gradient(135deg,rgba(20,184,166,.07),rgba(56,189,248,.04));border-bottom:1px solid var(--border)}
+.sp-hero-thumb{width:84px;height:84px;border-radius:12px;object-fit:cover;border:1px solid var(--border);flex-shrink:0;background:var(--bg3)}
+.sp-hero-thumb-fallback{width:84px;height:84px;border-radius:12px;background:var(--bg3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:36px;flex-shrink:0}
+.sp-hero-body{flex:1;min-width:0}
+.sp-hero-row{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:4px}
+.sp-hero-title{font-size:16px;font-weight:800;color:var(--text);line-height:1.3;letter-spacing:-.2px;word-break:break-word}
+.sp-hero-meta{font-size:11px;color:var(--text2);margin-bottom:10px;letter-spacing:.2px}
+.sp-hero-actions{display:flex;flex-wrap:wrap;gap:8px}
+.sp-detail-body{padding:18px 20px;display:flex;flex-direction:column;gap:14px}
+.sp-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.2px;border:1px solid var(--border);background:rgba(255,255,255,.03);color:var(--text2);font-family:inherit}
+.sp-pill.manual{color:var(--accent);border-color:rgba(20,184,166,.45);background:rgba(20,184,166,.10)}
+.sp-pill.ok{color:var(--green);border-color:color-mix(in srgb,var(--green) 38%,transparent);background:color-mix(in srgb,var(--green) 12%,transparent)}
+.sp-pill.warn{color:var(--yellow);border-color:color-mix(in srgb,var(--yellow) 38%,transparent);background:color-mix(in srgb,var(--yellow) 10%,transparent)}
+.sp-pill.bad{color:var(--red);border-color:color-mix(in srgb,var(--red) 38%,transparent);background:color-mix(in srgb,var(--red) 10%,transparent)}
+.sp-pill.skipped{color:var(--text2);border-color:var(--border);background:rgba(255,255,255,.03)}
+.sp-trace{display:flex;flex-wrap:wrap;gap:8px}
+.sp-score-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.sp-score-tile{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+.sp-score-tile-label{font-size:10px;color:var(--text2);font-weight:700;letter-spacing:.4px;text-transform:uppercase;margin-bottom:4px}
+.sp-score-tile-value{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;font-family:'JetBrains Mono',Consolas,monospace;color:var(--blue)}
+.sp-score-tile.hot .sp-score-tile-value{color:#ff7849}
+.sp-score-tile.warm .sp-score-tile-value{color:var(--yellow)}
+.sp-score-tile.bad .sp-score-tile-value{color:var(--red)}
+.sp-bars{padding:14px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:10px}
+.sp-bar{margin-bottom:10px}
+.sp-bar:last-child{margin-bottom:0}
+.sp-bar-head{display:flex;justify-content:space-between;font-size:11px;color:var(--text2);margin-bottom:4px}
+.sp-bar-label{font-weight:600}
+.sp-bar-val{font-family:'JetBrains Mono',Consolas,monospace;font-weight:700}
+.sp-bar-track{height:6px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;overflow:hidden}
+.sp-bar-fill{height:100%;border-radius:2px;transition:width .35s ease}
+.sp-bar-sub{margin-top:5px;font-size:11px;color:var(--text2)}
+.sp-block{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.sp-block-label{font-size:10px;color:var(--text2);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.sp-block.accent-trigger{background:rgba(248,113,113,.04);border-color:rgba(248,113,113,.18)}
+.sp-block.accent-trigger .sp-block-label{color:var(--red)}
+.sp-block.accent-stage2{background:rgba(56,189,248,.05);border-color:rgba(56,189,248,.18)}
+.sp-block.accent-stage2 .sp-block-label{color:var(--blue)}
+.sp-block.accent-prestage{background:rgba(124,58,237,.05);border-color:rgba(124,58,237,.18)}
+.sp-block.accent-prestage .sp-block-label{color:#a78bfa}
+.sp-block.accent-tg{background:rgba(34,197,94,.05);border-color:rgba(34,197,94,.20)}
+.sp-block.accent-tg .sp-block-label{color:var(--green)}
+.sp-narrative{padding:10px 14px;background:rgba(255,255,255,.025);border-left:3px solid var(--accent);border-radius:0 8px 8px 0;font-size:13px;line-height:1.55;color:var(--text);white-space:pre-wrap;word-break:break-word}
+.sp-narrative.warm{border-left-color:#ff7849;background:rgba(255,120,73,.05)}
+.sp-collapsible{border:1px solid var(--border);border-radius:10px;background:var(--bg2);overflow:hidden}
+.sp-collapsible-head{width:100%;text-align:left;padding:11px 16px;background:transparent;border:none;color:var(--text2);cursor:pointer;display:flex;align-items:center;justify-content:space-between;font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;font-family:inherit;transition:background .15s,color .15s}
+.sp-collapsible-head:hover{background:rgba(255,255,255,.02);color:var(--text)}
+.sp-collapsible-head.open{color:var(--text)}
+.sp-collapsible-arrow{font-size:10px;opacity:.65}
+.sp-collapsible-body{padding:6px 16px 14px;border-top:1px solid var(--border)}
+.sp-collapsible.accent-prestage{background:rgba(124,58,237,.04);border-color:rgba(124,58,237,.18)}
+.sp-collapsible.accent-prestage .sp-collapsible-head{color:#a78bfa}
+.sp-collapsible.accent-stage2{background:rgba(56,189,248,.04);border-color:rgba(56,189,248,.18)}
+.sp-collapsible.accent-stage2 .sp-collapsible-head{color:var(--blue)}
+.sp-meta-chips{display:flex;flex-wrap:wrap;gap:6px}
+.sp-chip{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.03);color:var(--text2);font-size:11px;font-weight:600;font-family:inherit}
+.sp-chip-atype-event{background:color-mix(in srgb,var(--red,#ff6b6b) 12%,transparent);border-color:color-mix(in srgb,var(--red,#ff6b6b) 35%,transparent);color:#ff8a65}
+.sp-chip-atype-trend{background:color-mix(in srgb,var(--green,#2ed573) 12%,transparent);border-color:color-mix(in srgb,var(--green,#2ed573) 35%,transparent);color:#2ed573}
+.sp-chip-atype-post {background:color-mix(in srgb,var(--blue,#74b9ff) 12%,transparent);border-color:color-mix(in srgb,var(--blue,#74b9ff) 35%,transparent);color:#74b9ff}
+.sp-chip b{color:var(--text);font-weight:700;margin-left:4px}
+.sp-metric-row{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--text2);font-family:'JetBrains Mono',Consolas,monospace}
+.sp-metric-row b{color:var(--text);font-weight:700}
+.sp-metric-row .accent{color:var(--blue)}
+.sp-metric-row .danger{color:var(--red)}
+.sp-metric-row .ok{color:var(--green)}
+.sp-thumbs{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
+.sp-thumbs img{height:110px;border-radius:6px;border:1px solid var(--border)}
+.sp-toast{padding:10px 12px;border-radius:8px;font-size:12px;line-height:1.5}
+.sp-toast.err{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.25);color:var(--red)}
+.sp-toast.ok{background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.25);color:var(--green)}
+.sp-error-inline{color:var(--red);font-size:12px}
+.sp-trigger-sources{margin-top:8px;font-size:11px;color:var(--text2)}
+.sp-trigger-sources a{color:var(--blue);margin-right:8px;text-decoration:none}
+.sp-trigger-sources a:hover{text-decoration:underline}
+.sp-trigger-conf{margin-top:4px;font-size:11px;color:var(--text2);font-style:italic}
+@media (max-width:780px){
+  .sp-hero{flex-direction:column;align-items:flex-start;gap:12px}
+  .sp-hero-thumb,.sp-hero-thumb-fallback{width:64px;height:64px;font-size:28px}
+  .sp-detail-body{padding:14px}
+  .sp-hist-card{flex:0 0 200px}
+}
 @media (max-width: 980px){
   .layout{flex-direction:column}
   .sidebar{width:100%;border-right:none;border-bottom:1px solid var(--border)}
@@ -2934,6 +3097,7 @@ const DECISION_LABELS = {
   threshold:   { color: 'var(--red)',   text: '↓ Ниже порога' },
   hard_junk:   { color: 'var(--red)',   text: '🗑️ Hard-junk' },
   source:      { color: 'var(--muted)', text: '🔕 Источник отключён' },
+  alert_type:  { color: 'var(--muted)', text: '🔔 Тип не подписан' },
   dedup:       { color: 'var(--muted)', text: '✓✓ Уже отправлено' },
   daily:       { color: 'var(--muted)', text: '📵 Лимит юзера' },
   cap:         { color: 'var(--muted)', text: '⏱ Cap на цикл' },
@@ -2942,13 +3106,14 @@ const DECISION_LABELS = {
 
 // Short human labels for each gate chip
 const GATE_LABELS = {
-  threshold: 'порог',
-  hard_junk: 'junk',
-  source:    'источник',
-  dedup:     'dedup',
-  daily:     'лимит',
-  cap:       'cap',
-  send:      'отправка',
+  threshold:  'порог',
+  hard_junk:  'junk',
+  source:     'источник',
+  alert_type: 'тип',
+  dedup:      'dedup',
+  daily:      'лимит',
+  cap:        'cap',
+  send:       'отправка',
 };
 
 function DecisionsPage() {
@@ -3083,6 +3248,16 @@ function DecisionsPage() {
                 style: { display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 11, color: 'var(--muted)', marginBottom: 8 }
               },
                 d.source    && h('span', null, '📡 ', h('b', { style: { color: 'var(--text2)', fontWeight: 500 } }, d.source)),
+                // Alert-type chip — coloured ring per type so the distribution
+                // is visible at a glance when scanning the decisions list.
+                d.alertType && h('span', {
+                  style: {
+                    fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 999,
+                    color: d.alertType === 'event' ? '#ff8a65' : d.alertType === 'trend' ? '#2ed573' : '#74b9ff',
+                    background: 'color-mix(in srgb, ' + (d.alertType === 'event' ? '#ff6b6b' : d.alertType === 'trend' ? '#2ed573' : '#74b9ff') + ' 12%, transparent)',
+                    border: '1px solid color-mix(in srgb, ' + (d.alertType === 'event' ? '#ff6b6b' : d.alertType === 'trend' ? '#2ed573' : '#74b9ff') + ' 35%, transparent)',
+                  }
+                }, (d.alertType === 'event' ? '📰 EVENT' : d.alertType === 'trend' ? '📈 TREND' : '🚀 POST')),
                 d.category  && h('span', null, '📂 ', d.category),
                 d.alertScore != null && h('span', null,
                   'score: ',
@@ -3724,21 +3899,28 @@ function BotPage() {
 }
 
 // ── ScoreBar (visual progress bar 0-100) — used in SubmitPage ───────────────
-// Mirrors dashboard's ScoreBar without depending on dashboard CSS. Color
-// scales with value so high scores pop visually. The "sub" prop accepts
-// any React node and is rendered under the bar (used for storyHook quotes).
+// Renders via .sp-bar-* CSS classes so it matches the rest of the admin
+// design system (no ad-hoc inline colors, picks tones from CSS vars). The
+// "sub" prop accepts any React node and is rendered under the bar (used
+// for storyHook quotes).
 function AdminScoreBar({ label, value, sub, color }) {
   const v = Math.max(0, Math.min(100, Math.round(value || 0)));
-  const c = color || (v >= 80 ? '#22c55e' : v >= 60 ? '#84cc16' : v >= 40 ? '#eab308' : v >= 20 ? '#f97316' : '#6b7280');
-  return React.createElement('div', { style: { marginBottom: 8 } },
-    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text2)', marginBottom: 4 } },
-      React.createElement('span', { style: { fontWeight: 600 } }, label),
-      React.createElement('span', { style: { fontFamily: 'JetBrains Mono, monospace', fontWeight: 700, color: c } }, v + '/100')
+  // Pick the bar fill color from design tokens. Override allowed via prop.
+  const c = color
+    || (v >= 80 ? 'var(--green)'
+      : v >= 60 ? '#84cc16'
+      : v >= 40 ? 'var(--yellow)'
+      : v >= 20 ? '#ff7849'
+      : 'var(--text2)');
+  return React.createElement('div', { className: 'sp-bar' },
+    React.createElement('div', { className: 'sp-bar-head' },
+      React.createElement('span', { className: 'sp-bar-label' }, label),
+      React.createElement('span', { className: 'sp-bar-val', style: { color: c } }, v + '/100')
     ),
-    React.createElement('div', { style: { height: 6, background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 3, overflow: 'hidden' } },
-      React.createElement('div', { style: { width: v + '%', height: '100%', background: c, transition: 'width .35s ease' } })
+    React.createElement('div', { className: 'sp-bar-track' },
+      React.createElement('div', { className: 'sp-bar-fill', style: { width: v + '%', background: c } })
     ),
-    sub ? React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: 'var(--text3)' } }, sub) : null
+    sub ? React.createElement('div', { className: 'sp-bar-sub' }, sub) : null
   );
 }
 
@@ -3773,11 +3955,11 @@ function AdminTriggerSection({ trend, onUpdate }) {
 
   // State 1: have a trigger payload — render text + sources + confidence
   if (data && data.text) {
-    return React.createElement('div', { style: { padding: '12px 14px', background: 'rgba(255,107,107,.06)', border: '1px solid rgba(255,107,107,.18)', borderRadius: 8, marginBottom: 12 } },
-      React.createElement('div', { style: { fontSize: 10, fontWeight: 700, color: '#ff6b6b', marginBottom: 6, letterSpacing: '.5px', textTransform: 'uppercase' } }, '💡 Триггер (Grok deep)'),
+    return React.createElement('div', { className: 'sp-block accent-trigger' },
+      React.createElement('div', { className: 'sp-block-label' }, '💡 Триггер (Grok deep)'),
       React.createElement('div', { style: { fontSize: 13, lineHeight: 1.5, color: 'var(--text)' } }, data.text),
       Array.isArray(data.sources) && data.sources.length > 0
-        ? React.createElement('div', { style: { marginTop: 8, fontSize: 11, color: 'var(--text3)' } },
+        ? React.createElement('div', { className: 'sp-trigger-sources' },
             'Источники: ',
             data.sources.map((s, i) => {
               const handle = s.startsWith('@') ? s.slice(1) : s;
@@ -3785,93 +3967,143 @@ function AdminTriggerSection({ trend, onUpdate }) {
                 key: 'src' + i,
                 href: 'https://x.com/' + encodeURIComponent(handle),
                 target: '_blank', rel: 'noopener',
-                style: { marginRight: 8, color: '#5bc0eb' },
               }, '@' + handle);
             })
           )
         : null,
       typeof data.confidence === 'number' && data.confidence > 0
-        ? React.createElement('div', { style: { marginTop: 4, fontSize: 11, color: 'var(--text3)', fontStyle: 'italic' } },
-            'Уверенность: ' + data.confidence + '%')
+        ? React.createElement('div', { className: 'sp-trigger-conf' }, 'Уверенность: ' + data.confidence + '%')
         : null
     );
   }
 
   // State 2/3: no trigger yet — show whyNow as fallback + search button
-  return React.createElement('div', { style: { padding: '12px 14px', background: 'rgba(255,107,107,.04)', border: '1px solid rgba(255,107,107,.12)', borderRadius: 8, marginBottom: 12 } },
-    React.createElement('div', { style: { fontSize: 10, fontWeight: 700, color: '#ff6b6b', marginBottom: 6, letterSpacing: '.5px', textTransform: 'uppercase' } }, '💡 Триггер'),
+  return React.createElement('div', { className: 'sp-block accent-trigger' },
+    React.createElement('div', { className: 'sp-block-label' }, '💡 Триггер'),
     trend.whyNow
       ? React.createElement('div', { style: { fontSize: 13, lineHeight: 1.5, color: 'var(--text)' } }, trend.whyNow)
-      : React.createElement('div', { style: { fontSize: 12, color: 'var(--text3)', fontStyle: 'italic' } }, 'Stage 1 не нашёл явного триггера'),
-    React.createElement('div', { style: { marginTop: 10, display: 'flex', alignItems: 'center', gap: 10 } },
+      : React.createElement('div', { style: { fontSize: 12, color: 'var(--text2)', fontStyle: 'italic' } }, 'Stage 1 не нашёл явного триггера'),
+    React.createElement('div', { style: { marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
       React.createElement('button', {
         className: 'btn btn-primary btn-sm',
         disabled: loading || !trend.id,
         onClick: onSearch,
         title: 'Запустить Grok x_search для поиска конкретного триггера',
-        style: { padding: '6px 12px', fontSize: 12 },
       }, loading ? '⏳ Поиск...' : '🔍 Найти триггер (Grok)'),
-      error ? React.createElement('span', { style: { fontSize: 11, color: '#ff6b6b' } }, '⚠ ' + error) : null
+      error ? React.createElement('span', { className: 'sp-error-inline' }, '⚠ ' + error) : null
     )
   );
 }
 
-// ── SubmitPage — manual URL / narrative analysis ─────────────────────────────
-function SubmitPage() {
-  const [url, setUrl] = useState('');
-  const [sendTg, setSendTg] = useState(false);
-  // Optional admin comment — prepended to the TG alert body (bold, on its own
-  // line). Shared between the initial submit (when "send to TG" is ticked)
-  // and the standalone "📨 Отправить алерт" button after analysis.
-  const [comment, setComment] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState('');
-  // Separate state for the standalone "send alert" button on an already-
-  // analysed trend (so the main submit button's loading state isn't confused
-  // with the follow-up broadcast).
+// ── Collapsible — accordion section used inside ManualResultCard ────────────
+// Content stays in DOM only when open (cheap unmount keeps virtual DOM small
+// for cards with 5+ sections). Header click toggles. Default state is
+// supplied by the caller — primary sections open, advanced sections closed.
+// The accent prop is one of "prestage" | "stage2" | undefined — it adds the
+// matching .sp-collapsible.accent-* class which tints the bg/border
+// consistently with .sp-block tones used elsewhere in the page.
+function Collapsible({ title, defaultOpen, children, accent }) {
+  const [open, setOpen] = useState(!!defaultOpen);
+  const cls = 'sp-collapsible' + (accent ? ' accent-' + accent : '');
+  return React.createElement('div', { className: cls },
+    React.createElement('button', {
+      type: 'button',
+      onClick: () => setOpen(!open),
+      className: 'sp-collapsible-head' + (open ? ' open' : ''),
+    },
+      React.createElement('span', { style: { display: 'flex', alignItems: 'center', gap: 8 } }, title),
+      React.createElement('span', { className: 'sp-collapsible-arrow' }, open ? '▲' : '▼')
+    ),
+    open && React.createElement('div', { className: 'sp-collapsible-body' }, children)
+  );
+}
+
+// Pretty relative time ("2 мин назад" / "1 ч назад" / "вчера" / dd.mm).
+// Used by the history strip to label submission age. Inputs are ISO strings
+// (manualSubmittedAt or first_seen_at fallback). Returns "—" on unparseable.
+function relTimeRu(iso) {
+  if (!iso) return '—';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const sec = Math.round(ms / 1000);
+  if (sec < 45) return 'только что';
+  const min = Math.round(sec / 60);
+  if (min < 45) return min + ' мин назад';
+  const hr = Math.round(min / 60);
+  if (hr < 24) return hr + ' ч назад';
+  const day = Math.round(hr / 24);
+  if (day === 1) return 'вчера';
+  if (day < 7) return day + ' дн назад';
+  const d = new Date(iso);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  return dd + '.' + mm;
+}
+
+function srcIcon(src) {
+  return src === 'twitter' ? '🐦' : src === 'reddit' ? '🟠' : src === 'tiktok' ? '🎵' : '🌐';
+}
+
+// ── ManualHistoryItem — one card in the horizontal history strip ────────────
+// Compact: thumbnail + title (2 lines clamp) + score chip + age. Click body
+// to select; trash button removes from history (the row itself stays in DB —
+// only the manualSubmitted flag is cleared via DELETE /api/manual-trends/:id).
+function ManualHistoryItem({ item, active, onSelect, onDelete }) {
+  const t = item.trend || {};
+  const meme = t.memePotential || 0;
+  const pillTone = meme >= 70 ? 'high' : meme >= 40 ? 'mid' : meme >= 20 ? 'low' : 'cold';
+  const thumb = (t.imageUrls && t.imageUrls[0]) || null;
+  return React.createElement('div', {
+    className: 'sp-hist-card' + (active ? ' active' : ''),
+    onClick: () => onSelect(t.id),
+  },
+    React.createElement('div', { className: 'sp-hist-row' },
+      thumb
+        ? React.createElement('img', { src: thumb, alt: '', loading: 'lazy', className: 'sp-hist-thumb' })
+        : React.createElement('div', { className: 'sp-hist-thumb-fallback' }, srcIcon(t.source)),
+      React.createElement('div', { className: 'sp-hist-text' },
+        React.createElement('div', { className: 'sp-hist-title' }, t.title || '(без заголовка)'),
+        React.createElement('div', { className: 'sp-hist-meta' }, '#' + t.id + ' · ' + (t.source || '—'))
+      )
+    ),
+    React.createElement('div', { className: 'sp-hist-foot' },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+        React.createElement('span', { className: 'sp-hist-pill ' + pillTone }, '💎 ' + meme),
+        React.createElement('span', { className: 'sp-hist-time' }, relTimeRu(item.submittedAt))
+      ),
+      React.createElement('button', {
+        type: 'button',
+        className: 'sp-hist-trash',
+        onClick: (e) => { e.stopPropagation(); onDelete(t.id); },
+        title: 'Удалить из истории (тренд останется в БД)',
+      }, '🗑')
+    )
+  );
+}
+
+// ── ManualResultCard — the big detail card (hero + scores + sections) ───────
+// Receives a single history entry { trend, pipeline, alerts? } plus a
+// callback so the "Отправить алерт" button can update local alerts state
+// after a broadcast finishes.
+function ManualResultCard({ result, comment, setComment, onAlertSent }) {
   const [alertLoading, setAlertLoading] = useState(false);
-  const [alertError, setAlertError] = useState('');
+  const [alertError, setAlertError]   = useState('');
 
   const COMMENT_MAX = 500;
+  const t = result?.trend;
+  if (!t) return null;
 
-  const submit = async () => {
-    const clean = url.trim();
-    if (!clean) { setError('Вставь URL'); return; }
-    if (!/^https?:\\/\\//i.test(clean)) { setError('URL должен начинаться с http(s)://'); return; }
-    setError(''); setAlertError(''); setLoading(true); setResult(null);
-    try {
-      const res = await api('/api/submit-narrative', 'POST', {
-        url: clean,
-        sendToTelegram: sendTg,
-        comment: sendTg ? comment.trim() : '',
-      });
-      setResult(res);
-    } catch (e) {
-      setError(e.message || 'Ошибка анализа');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Broadcast a TG alert for a trend that was already analysed (result.trend.id).
-  // Confirms first — blasting a message to every active subscriber is loud.
   const sendAlertNow = async () => {
-    if (!result?.trend?.id) return;
-    const trimmed = comment.trim();
+    if (!t.id) return;
+    const trimmed = (comment || '').trim();
     const confirmMsg = trimmed
-      ? ('Отправить нарратив в Telegram с комментарием:\\n\\n«' + trimmed + '»\\n\\nВсем активным подписчикам?')
+      ? ('Отправить нарратив в Telegram с комментарием:' + String.fromCharCode(10) + String.fromCharCode(10) + '«' + trimmed + '»' + String.fromCharCode(10) + String.fromCharCode(10) + 'Всем активным подписчикам?')
       : 'Отправить этот нарратив в Telegram всем активным подписчикам?';
     if (!window.confirm(confirmMsg)) return;
     setAlertError(''); setAlertLoading(true);
     try {
-      const res = await api('/api/send-alert', 'POST', {
-        trendId: result.trend.id,
-        comment: trimmed,
-      });
-      // Merge/replace alerts array on the existing result so the UI updates
-      // inline (status panel re-renders with delivery stats).
-      setResult(prev => prev ? ({ ...prev, alerts: res.alerts || [] }) : prev);
+      const res = await api('/api/send-alert', 'POST', { trendId: t.id, comment: trimmed });
+      if (typeof onAlertSent === 'function') onAlertSent(res.alerts || []);
     } catch (e) {
       setAlertError(e.message || 'Не удалось отправить алерт');
     } finally {
@@ -3879,128 +4111,86 @@ function SubmitPage() {
     }
   };
 
-  const t = result?.trend;
-  const srcIco = t && (t.source === 'twitter' ? '🐦' : t.source === 'reddit' ? '🟠' : t.source === 'tiktok' ? '🎵' : '🌐');
-  const memeCls = t && (t.memePotential >= 80 ? 'score-hot' : t.memePotential >= 60 ? 'score-warm' : 'score-cold');
+  const memeCls = t.memePotential >= 80 ? 'hot' : t.memePotential >= 60 ? 'warm' : '';
+  const heroThumb = (t.imageUrls && t.imageUrls[0]) || null;
+  const commentLen = (comment || '').length;
 
-  return React.createElement('div',{className:'page'},
-    React.createElement('div',{className:'page-head'},
-      React.createElement('h2',null,'🧪 Ручной анализ нарратива'),
-      React.createElement('p',{style:{color:'var(--text2)',fontSize:13,marginTop:6}},
-        'Закинь URL поста (Twitter / Reddit / TikTok / любой сайт с og:image) — прогоним через полный пайплайн анализа (Stage 1 + Stage 2 Grok), сохраним в БД и опционально отправим в Telegram всем активным подписчикам.'
-      )
-    ),
-
-    React.createElement('div',{className:'card',style:{padding:20,marginBottom:20}},
-      React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:12}},
-        React.createElement('div',null,
-          React.createElement('label',{style:{fontSize:12,fontWeight:600,color:'var(--text2)',display:'block',marginBottom:6}},'URL поста'),
-          React.createElement('input',{
-            type:'url',
-            value:url,
-            onChange:e=>setUrl(e.target.value),
-            onKeyDown:e=>{ if(e.key==='Enter' && !loading) submit(); },
-            placeholder:'https://twitter.com/user/status/12345  или  https://reddit.com/r/xyz/comments/...',
-            disabled:loading,
-            style:{width:'100%',padding:'10px 12px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:8,color:'var(--text)',fontSize:13,fontFamily:'inherit'}
-          })
+  return React.createElement('div', { className: 'sp-detail' },
+    // ── HERO BLOCK ───────────────────────────────────────────────────────
+    React.createElement('div', { className: 'sp-hero' },
+      heroThumb
+        ? React.createElement('img', { src: heroThumb, alt: '', loading: 'lazy', className: 'sp-hero-thumb' })
+        : React.createElement('div', { className: 'sp-hero-thumb-fallback' }, srcIcon(t.source)),
+      React.createElement('div', { className: 'sp-hero-body' },
+        React.createElement('div', { className: 'sp-hero-row' },
+          React.createElement('div', { className: 'sp-hero-title' }, t.title),
+          React.createElement('span', { className: 'sp-pill manual' }, '🧪 MANUAL')
         ),
-        React.createElement('label',{style:{display:'flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:13}},
-          React.createElement('input',{type:'checkbox',checked:sendTg,onChange:e=>setSendTg(e.target.checked),disabled:loading}),
-          React.createElement('span',null,'📨 Отправить в Telegram всем активным подписчикам после анализа')
+        React.createElement('div', { className: 'sp-hero-meta' },
+          '#' + t.id + ' · ' + srcIcon(t.source) + ' ' + t.source +
+          // Cache hit → "из кэша · X мин назад" (free, instant). Otherwise
+          // show real elapsed seconds. Mutually exclusive — one of the two.
+          (result.fromCache
+            ? ' · 💾 из кэша · ' + Math.max(1, Math.round((result.cacheAgeMs || 0) / 60000)) + ' мин назад'
+            : (result.elapsedMs ? ' · ' + (result.elapsedMs / 1000).toFixed(1) + 's' : '')) +
+          (result.submittedAt ? ' · ' + relTimeRu(result.submittedAt) : '')
         ),
-        // Optional comment — applies both to the initial send (if the checkbox
-        // above is ticked) and to the standalone "📨 Отправить алерт" button
-        // after analysis.
-        React.createElement('div',null,
-          React.createElement('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}},
-            React.createElement('label',{style:{fontSize:12,fontWeight:600,color:'var(--text2)'}},'💬 Комментарий к алерту (необязательно)'),
-            React.createElement('span',{style:{fontSize:11,color:comment.length>COMMENT_MAX?'#f87171':'var(--text3)'}}, comment.length + '/' + COMMENT_MAX)
-          ),
-          React.createElement('textarea',{
-            value:comment,
-            onChange:e=>setComment(e.target.value.slice(0, COMMENT_MAX + 50)),
-            placeholder:'Например: смотрите реплаи под этим постом — там эпичный слив / мета новой мемной волны',
-            disabled:loading,
-            rows:2,
-            style:{width:'100%',padding:'10px 12px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:8,color:'var(--text)',fontSize:13,fontFamily:'inherit',resize:'vertical',minHeight:60}
-          }),
-          React.createElement('div',{style:{fontSize:11,color:'var(--text3)',marginTop:4}},
-            'Комментарий прикрепится жирной строкой в начале алерта. Пусто — алерт уйдёт без него.'
-          )
-        ),
-        React.createElement('div',{style:{display:'flex',gap:10,alignItems:'center'}},
-          React.createElement('button',{className:'btn btn-primary',onClick:submit,disabled:loading||!url.trim()},
-            loading ? '⏳ Анализ идёт...' : '🚀 Проанализировать'
-          ),
-          error && React.createElement('span',{style:{color:'#ff6b6b',fontSize:12}},'⚠ ' + error)
+        React.createElement('div', { className: 'sp-hero-actions' },
+          t.url && React.createElement('a', { href: t.url, target: '_blank', className: 'btn btn-ghost btn-sm' }, '🔗 Источник'),
+          React.createElement('button', {
+            className: 'btn btn-primary btn-sm',
+            onClick: sendAlertNow,
+            disabled: alertLoading,
+            title: 'Разослать этот нарратив в Telegram всем активным подписчикам',
+          }, alertLoading ? '⏳ Отправка...' : '📨 Отправить алерт')
         )
       )
     ),
 
-    loading && React.createElement('div',{className:'card',style:{padding:28,textAlign:'center',color:'var(--text2)'}},
-      React.createElement('div',{style:{fontSize:24,marginBottom:8}},'⚙️'),
-      React.createElement('div',{style:{fontSize:13}},'Тянем метаданные → Stage 1 (батч-скоринг) → Stage 2 (Grok x_search deep-dive)...'),
-      React.createElement('div',{style:{fontSize:11,marginTop:6,color:'var(--text3)'}},'Обычно 10-30 секунд')
-    ),
+    React.createElement('div', { className: 'sp-detail-body' },
+      alertError && React.createElement('div', { className: 'sp-toast err' }, '⚠ ' + alertError),
 
-    result && React.createElement('div',{className:'card',style:{padding:20}},
-      // Header bar
-      React.createElement('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,paddingBottom:14,borderBottom:'1px solid var(--border)'}},
-        React.createElement('div',{style:{display:'flex',alignItems:'center',gap:10}},
-          React.createElement('span',{style:{fontSize:24}},srcIco),
-          React.createElement('div',null,
-            React.createElement('div',{style:{fontSize:15,fontWeight:700}},t.title),
-            React.createElement('div',{style:{fontSize:11,color:'var(--text3)'}}, '#' + t.id + '  ·  ' + t.source + '  ·  ' + (result.elapsedMs/1000).toFixed(1) + 's')
-          )
+      // Per-card comment editor for the "Отправить алерт" button.
+      React.createElement('div', null,
+        React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 } },
+          React.createElement('label', { className: 'sp-form-label', style: { marginBottom: 0 } }, '💬 Комментарий к алерту (необязательно)'),
+          React.createElement('span', { className: 'sp-counter' + (commentLen > COMMENT_MAX ? ' over' : '') }, commentLen + '/' + COMMENT_MAX)
         ),
-        React.createElement('div',{style:{display:'flex',gap:6,alignItems:'center'}},
-          t.url && React.createElement('a',{href:t.url,target:'_blank',className:'btn btn-ghost btn-sm'},'🔗 Источник'),
-          React.createElement('button',{
-            className:'btn btn-primary btn-sm',
-            onClick:sendAlertNow,
-            disabled:alertLoading,
-            title:'Разослать этот нарратив в Telegram всем активным подписчикам',
-            style:{background:'#5bc0eb',borderColor:'#5bc0eb',color:'#041018',fontWeight:700}
-          }, alertLoading ? '⏳ Отправка...' : '📨 Отправить алерт'),
-          React.createElement('span',{className:'chip chip-manual',style:{background:'rgba(180,140,255,.15)',color:'#b48cff',border:'1px solid rgba(180,140,255,.35)',padding:'3px 10px',borderRadius:12,fontSize:11,fontWeight:700}},'🧪 MANUAL')
-        )
+        React.createElement('textarea', {
+          className: 'sp-textarea',
+          value: comment || '',
+          onChange: e => setComment(e.target.value.slice(0, COMMENT_MAX + 50)),
+          placeholder: 'Префикс жирной строкой в начале алерта',
+          rows: 2,
+        })
       ),
-      alertError && React.createElement('div',{style:{marginBottom:12,padding:10,background:'rgba(248,113,113,.08)',border:'1px solid rgba(248,113,113,.25)',borderRadius:8,fontSize:12,color:'#f87171'}},'⚠ ' + alertError),
 
-      // ── Pipeline trace (NEW 2026-04-28) ───────────────────────────────────
-      // Tells the operator which stages ran and why a stage was skipped.
-      // Crucial when memePotential is low and Stage 2 silently doesn't fire.
-      result.pipeline && React.createElement('div',{style:{display:'flex',gap:10,marginBottom:14,flexWrap:'wrap'}},
-        React.createElement('span',{className:'chip',style:{background:result.pipeline.stage1Ran?'rgba(34,197,94,.12)':'rgba(120,120,120,.12)',color:result.pipeline.stage1Ran?'#4ade80':'var(--text3)',border:'1px solid '+(result.pipeline.stage1Ran?'rgba(34,197,94,.3)':'var(--border)')}},
-          (result.pipeline.stage1Ran?'✓':'✗')+' Stage 1'
+      // ── PIPELINE TRACE ─────────────────────────────────────────────────
+      result.pipeline && React.createElement('div', { className: 'sp-trace' },
+        React.createElement('span', { className: 'sp-pill ' + (result.pipeline.stage1Ran ? 'ok' : 'skipped') },
+          (result.pipeline.stage1Ran ? '✓' : '✗') + ' Stage 1'
         ),
-        React.createElement('span',{
-          className:'chip',
+        React.createElement('span', {
+          className: 'sp-pill ' + (result.pipeline.stage2Ran ? 'ok' : 'warn'),
           title: result.pipeline.stage2SkipReason || 'Stage 2 ran',
-          style:{background:result.pipeline.stage2Ran?'rgba(34,197,94,.12)':'rgba(234,179,8,.10)',color:result.pipeline.stage2Ran?'#4ade80':'#eab308',border:'1px solid '+(result.pipeline.stage2Ran?'rgba(34,197,94,.3)':'rgba(234,179,8,.25)')}},
-          (result.pipeline.stage2Ran?'✓':'⏭')+' Stage 2'+(result.pipeline.stage2SkipReason?' — '+result.pipeline.stage2SkipReason:'')
-        )
+        }, (result.pipeline.stage2Ran ? '✓' : '⏭') + ' Stage 2' + (result.pipeline.stage2SkipReason ? ' — ' + result.pipeline.stage2SkipReason : ''))
       ),
 
-      // ── Score grid: всегда показываем все доступные метрики ──────────────
-      React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}},
-        scoreBox('💎 Meme',     t.memePotential   || 0, memeCls),
-        scoreBox('📈 Score',    t.score           || 0),
-        scoreBox('🚀 Alert',    t.alertScore      || 0),
-        scoreBox('✨ Emergence',t.emergenceScore  || 0),
-        scoreBox('🔥 Adoption', t.adoptionScore   || 0),
-        t.viralityScore !== null && t.viralityScore !== undefined && scoreBox('⚡ Virality (S1)', t.viralityScore),
-        (t.storyScore || 0) > 0 && scoreBox('📖 Story',  t.storyScore),
-        t.junkPenalty > 0       && scoreBox('🗑 Junk',   t.junkPenalty, 'score-bad'),
-        // Stage 2 nameStrength — показываем только если бонус-блок отработал
-        t.stage2NameBonus  && scoreBox('🏷 Name str.', t.stage2NameBonus.nameStrength || 0)
+      // ── SCORE GRID (compact tiles) ────────────────────────────────────
+      React.createElement('div', { className: 'sp-score-grid' },
+        spTile('💎 Meme',      t.memePotential   || 0, memeCls),
+        spTile('📈 Score',     t.score           || 0),
+        spTile('🚀 Alert',     t.alertScore      || 0),
+        spTile('✨ Emergence', t.emergenceScore  || 0),
+        spTile('🔥 Adoption',  t.adoptionScore   || 0),
+        t.viralityScore != null && spTile('⚡ Virality', t.viralityScore),
+        (t.storyScore || 0) > 0 && spTile('📖 Story', t.storyScore),
+        (t.junkPenalty || 0) > 0 && spTile('🗑 Junk',  t.junkPenalty, 'bad'),
+        t.stage2NameBonus && spTile('🏷 Name str.', t.stage2NameBonus.nameStrength || 0)
       ),
 
-      // ── Visual score bars (NEW 2026-04-28) — mirror dashboard's modal ────
-      // Emergence + Adoption always render. Story only appears when Stage 2
-      // computed a story score > 0; the hook is shown directly under the bar.
-      React.createElement('div',{style:{padding:'12px 14px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:8,marginBottom:12}},
+      // ── SCORE BARS ─────────────────────────────────────────────────────
+      React.createElement('div', { className: 'sp-bars' },
         React.createElement(AdminScoreBar, { label: '🌊 Emergence', value: t.emergenceScore || 0 }),
         React.createElement(AdminScoreBar, { label: '🔥 Adoption',  value: t.adoptionScore  || t.memePotential || 0 }),
         (t.storyScore || 0) > 0 && React.createElement(AdminScoreBar, {
@@ -4008,182 +4198,380 @@ function SubmitPage() {
           value: t.storyScore,
           sub: t.storyHook
             ? React.createElement('span', null,
-                React.createElement('span', { style: { color: 'var(--dim)', marginRight: 6 } }, 'Hook:'),
+                React.createElement('span', { style: { color: 'var(--text2)', marginRight: 6 } }, 'Hook:'),
                 React.createElement('span', { style: { color: 'var(--text)', fontStyle: 'italic' } }, '“' + t.storyHook + '”')
               )
             : null
         })
       ),
 
-      // ── Trigger section: Grok deep-search button + result render ─────────
-      // Replaces the static t.triggerText narrativeBox rendering —
-      // operator can now actually FIRE a trigger search from this page,
-      // with optimistic local update of the result.
-      React.createElement(AdminTriggerSection, {
-        trend: t,
-        // Bubble up to the parent so the section persists across re-renders
-        // (e.g. when sendAlertNow triggers a state update).
-        onUpdate: (next) => setResult(prev => prev ? ({ ...prev, trend: { ...prev.trend, triggerText: next.text, triggerSources: next.sources, triggerConfidence: next.confidence } }) : prev),
-      }),
+      // ── TRIGGER (always visible) ───────────────────────────────────────
+      React.createElement(AdminTriggerSection, { trend: t }),
 
-      t.aiExplanation && narrativeBox('🤖 AI объяснение', t.aiExplanation),
+      // ── AI EXPLANATION (always visible) ───────────────────────────────
+      t.aiExplanation && React.createElement('div', { className: 'sp-block' },
+        React.createElement('div', { className: 'sp-block-label' }, '🤖 AI объяснение'),
+        React.createElement('div', { className: 'sp-narrative' }, t.aiExplanation)
+      ),
 
-      // ── Source content (description from collector) ────────────────────────
-      t.description && t.description.trim() && narrativeBox('📝 Описание поста', t.description.length > 600 ? t.description.slice(0, 600) + '…' : t.description),
+      // ── DESCRIPTION (always visible — capped to 600 chars) ────────────
+      t.description && t.description.trim() &&
+        React.createElement('div', { className: 'sp-block' },
+          React.createElement('div', { className: 'sp-block-label' }, '📝 Описание поста'),
+          React.createElement('div', { className: 'sp-narrative' },
+            t.description.length > 600 ? t.description.slice(0, 600) + '…' : t.description
+          )
+        ),
 
-      // ── Stage 0 PreStage enrichment (nano text + gemini vision) ───────────
-      // Shows what the preprocessors fed into Stage 1. Useful for debugging
-      // why a trend got a particular score — if visual/text context was wrong.
+      // ── META CHIPS (compact, above the advanced sections) ─────────────
+      React.createElement('div', { className: 'sp-meta-chips' },
+        // Alert-type chip — first slot. Class variants paint per-type colour.
+        t.alertType && React.createElement('span', {
+          className: 'sp-chip sp-chip-atype sp-chip-atype-' + t.alertType
+        }, (t.alertType === 'event' ? '📰 СОБЫТИЕ'
+          : t.alertType === 'trend' ? '📈 ТРЕНД'
+          : '🚀 ПОСТ')),
+        t.category && React.createElement('span', { className: 'sp-chip' }, '📁 ' + t.category),
+        t.sentiment && React.createElement('span', { className: 'sp-chip' }, '💭 ' + t.sentiment),
+        t.predictedLifespan && React.createElement('span', { className: 'sp-chip' }, '⏱ ' + t.predictedLifespan),
+        t.narrativePhase && React.createElement('span', { className: 'sp-chip' }, '🌀 ' + t.narrativePhase),
+        t.marketStage && t.marketStage !== 'none' && React.createElement('span', { className: 'sp-chip' }, '📊 ' + t.marketStage)
+      ),
+
+      // ── COLLAPSIBLE: PreStage (Stage 0 nano + gemini) ─────────────────
       t.preStage && (t.preStage.nano || t.preStage.gemini) &&
-        React.createElement('div',{style:{padding:'12px 14px',background:'rgba(180,140,255,.06)',border:'1px solid rgba(180,140,255,.18)',borderRadius:8,marginTop:10,marginBottom:10}},
-          React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#b48cff',marginBottom:8,letterSpacing:'.5px',textTransform:'uppercase'}},'🎨 Stage 0 PreStage (контекст для скорера)'),
-          // Nano: text enrichment
-          t.preStage.nano && React.createElement('div',{style:{marginBottom:t.preStage.gemini?10:0,paddingBottom:t.preStage.gemini?10:0,borderBottom:t.preStage.gemini?'1px solid rgba(180,140,255,.12)':'none'}},
-            React.createElement('div',{style:{fontSize:10,fontWeight:600,color:'var(--text3)',marginBottom:4,letterSpacing:'.3px'}},'📝 Nano (gpt-5.4-nano)'),
-            t.preStage.nano.topicSummary && React.createElement('div',{style:{fontSize:13,color:'var(--text)',marginBottom:4}},
-              React.createElement('span',{style:{color:'var(--text3)'}}, 'Тема: '),
+        React.createElement(Collapsible, { title: '🎨 Stage 0 PreStage (контекст для скорера)', accent: 'prestage', defaultOpen: false },
+          // Nano sub-block
+          t.preStage.nano && React.createElement('div', {
+            style: t.preStage.gemini
+              ? { marginBottom: 10, paddingBottom: 10, borderBottom: '1px solid rgba(124,58,237,.18)' }
+              : null
+          },
+            React.createElement('div', { style: { fontSize: 10, fontWeight: 700, color: 'var(--text2)', marginBottom: 4, letterSpacing: '.3px' } }, '📝 Nano (gpt-5.4-nano)'),
+            t.preStage.nano.topicSummary && React.createElement('div', { style: { fontSize: 13, color: 'var(--text)', marginBottom: 4 } },
+              React.createElement('span', { style: { color: 'var(--text2)' } }, 'Тема: '),
               t.preStage.nano.topicSummary
             ),
             Array.isArray(t.preStage.nano.entityCanonical) && t.preStage.nano.entityCanonical.length > 0 &&
-              React.createElement('div',{style:{fontSize:12,color:'var(--text2)',marginBottom:4}},
-                React.createElement('span',{style:{color:'var(--text3)'}}, 'Сущности: '),
+              React.createElement('div', { style: { fontSize: 12, color: 'var(--text)', marginBottom: 4 } },
+                React.createElement('span', { style: { color: 'var(--text2)' } }, 'Сущности: '),
                 t.preStage.nano.entityCanonical.join(', ')
               ),
             t.preStage.nano.slangDecoded && t.preStage.nano.slangDecoded.trim() &&
-              React.createElement('div',{style:{fontSize:12,color:'var(--text2)',marginBottom:4,fontStyle:'italic'}},
-                React.createElement('span',{style:{color:'var(--text3)',fontStyle:'normal'}}, 'Slang: '),
+              React.createElement('div', { style: { fontSize: 12, color: 'var(--text)', marginBottom: 4, fontStyle: 'italic' } },
+                React.createElement('span', { style: { color: 'var(--text2)', fontStyle: 'normal' } }, 'Slang: '),
                 t.preStage.nano.slangDecoded
               ),
             t.preStage.nano.language && t.preStage.nano.language !== 'en' &&
-              React.createElement('span',{style:{fontSize:11,color:'var(--text3)'}}, 'lang=' + t.preStage.nano.language)
+              React.createElement('span', { style: { fontSize: 11, color: 'var(--text2)' } }, 'lang=' + t.preStage.nano.language)
           ),
-          // Gemini: visual enrichment
-          t.preStage.gemini && React.createElement('div',null,
-            React.createElement('div',{style:{fontSize:10,fontWeight:600,color:'var(--text3)',marginBottom:4,letterSpacing:'.3px'}},
+          // Gemini sub-block
+          t.preStage.gemini && React.createElement('div', null,
+            React.createElement('div', { style: { fontSize: 10, fontWeight: 700, color: 'var(--text2)', marginBottom: 4, letterSpacing: '.3px' } },
               '🎬 Gemini (' + (t.preStage.gemini.mediaType || 'visual') + ')' +
               (t.preStage.gemini.videoTruncated
                 ? (t.preStage.gemini.truncationReason === 'duration_exceeded'
                     ? ' · видео > ' + (t.preStage.gemini.videoMaxSec || 30) + 's, использован poster'
                     : t.preStage.gemini.truncationReason === 'native_unavailable'
                       ? ' · нативное видео недоступно, использован poster'
-                      // Back-compat for cached entries written before truncationReason existed
                       : ' · использован poster')
                 : '') +
               (t.preStage.gemini.videoDurationSec ? ' · ' + t.preStage.gemini.videoDurationSec.toFixed(1) + 's' : '')
             ),
-            t.preStage.gemini.visualCaption && React.createElement('div',{style:{fontSize:13,color:'var(--text)',marginBottom:4}},
-              React.createElement('span',{style:{color:'var(--text3)'}}, 'Визуал: '),
+            t.preStage.gemini.visualCaption && React.createElement('div', { style: { fontSize: 13, color: 'var(--text)', marginBottom: 4 } },
+              React.createElement('span', { style: { color: 'var(--text2)' } }, 'Визуал: '),
               t.preStage.gemini.visualCaption
             ),
             t.preStage.gemini.videoSummary && t.preStage.gemini.videoSummary.trim() &&
-              React.createElement('div',{style:{fontSize:12,color:'var(--text2)',marginBottom:4}},
-                React.createElement('span',{style:{color:'var(--text3)'}}, 'Видео: '),
+              React.createElement('div', { style: { fontSize: 12, color: 'var(--text)', marginBottom: 4 } },
+                React.createElement('span', { style: { color: 'var(--text2)' } }, 'Видео: '),
                 t.preStage.gemini.videoSummary
               ),
             t.preStage.gemini.visibleText && t.preStage.gemini.visibleText.trim() &&
-              React.createElement('div',{style:{fontSize:12,color:'var(--text2)',marginBottom:4}},
-                React.createElement('span',{style:{color:'var(--text3)'}}, 'Текст в кадре: '),
-                React.createElement('span',{style:{fontStyle:'italic'}}, '"' + t.preStage.gemini.visibleText + '"')
+              React.createElement('div', { style: { fontSize: 12, color: 'var(--text)', marginBottom: 4 } },
+                React.createElement('span', { style: { color: 'var(--text2)' } }, 'Текст в кадре: '),
+                React.createElement('span', { style: { fontStyle: 'italic' } }, '"' + t.preStage.gemini.visibleText + '"')
               ),
-            t.preStage.gemini.mood && React.createElement('span',{style:{fontSize:11,color:'var(--text3)'}}, 'mood: ' + t.preStage.gemini.mood)
+            t.preStage.gemini.mood && React.createElement('span', { style: { fontSize: 11, color: 'var(--text2)' } }, 'mood: ' + t.preStage.gemini.mood)
           )
         ),
 
-      // ── Raw engagement metrics ─────────────────────────────────────────────
-      // Different sources give different fields — render whatever exists.
+      // ── COLLAPSIBLE: Stage 2 deep-dive (only when scorer ran x_search) ─
+      t.xSearchData && (t.xSearchData.xBuzz || t.xSearchData.narrativeMomentum || t.xSearchData.organicity || t.xSearchData.subjectName) &&
+        React.createElement(Collapsible, { title: '🔍 Stage 2 (Grok deep-dive)', accent: 'stage2', defaultOpen: true },
+          React.createElement('div', { className: 'sp-metric-row', style: { marginBottom: 8, fontFamily: 'inherit' } },
+            React.createElement('span', null, 'X Buzz: ', React.createElement('b', null, t.xSearchData.xBuzz || 'unknown')),
+            React.createElement('span', null, 'Импульс: ', React.createElement('b', null, t.xSearchData.narrativeMomentum || 'unknown')),
+            React.createElement('span', null, 'Органичность: ', React.createElement('b', null, t.xSearchData.organicity || 'unknown'))
+          ),
+          t.xSearchData.subjectName && React.createElement('div', { style: { fontSize: 12, color: 'var(--text2)' } },
+            '🏷 Subject: ', React.createElement('b', { style: { color: 'var(--text)' } }, '"' + t.xSearchData.subjectName + '"'),
+            ' · strength ', React.createElement('b', { style: { color: 'var(--text)' } }, t.xSearchData.nameStrength)
+          ),
+          (t.stage2Penalty || t.stage2StoryBonus || t.stage2NameBonus) && React.createElement('div', { style: { fontSize: 11, color: 'var(--text2)', marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(56,189,248,.18)' } },
+            t.stage2Penalty && t.stage2Penalty.mult < 1 && React.createElement('div', null, '⛔ Penalty ×' + t.stage2Penalty.mult.toFixed(2) + (t.stage2Penalty.reasons?.length ? ' (' + t.stage2Penalty.reasons.join(', ') + ')' : '')),
+            t.stage2StoryBonus && t.stage2StoryBonus.bonus > 0 && React.createElement('div', null, '📖 Story bonus +' + t.stage2StoryBonus.bonus + ' (story score ' + t.stage2StoryBonus.storyScore + ')'),
+            t.stage2NameBonus  && t.stage2NameBonus.bonus  > 0 && React.createElement('div', null, '🏷 Name bonus +'  + t.stage2NameBonus.bonus  + ' (strength '   + t.stage2NameBonus.nameStrength + ')')
+          )
+        ),
+
+      // ── COLLAPSIBLE: Raw engagement metrics ────────────────────────────
       (t.metrics && (t.metrics.views || t.metrics.likes || t.metrics.upvotes || t.metrics.plays || t.metrics.twitter)) &&
-        React.createElement('div',{style:{padding:'12px 14px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:8,marginTop:10}},
-          React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:8,letterSpacing:'.5px',textTransform:'uppercase'}},'📊 Сырые метрики'),
-          React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:14,fontSize:12,fontFamily:'JetBrains Mono, monospace',color:'var(--text2)'}},
-            t.metrics.views      ? React.createElement('span',null,'👁 '+t.metrics.views.toLocaleString())   : null,
-            t.metrics.upvotes    ? React.createElement('span',null,'⬆ '+t.metrics.upvotes.toLocaleString())  : null,
-            t.metrics.likes      ? React.createElement('span',null,'❤️ '+t.metrics.likes.toLocaleString())   : null,
-            t.metrics.comments   ? React.createElement('span',null,'💬 '+t.metrics.comments.toLocaleString()): null,
-            t.metrics.shares     ? React.createElement('span',null,'🔁 '+t.metrics.shares.toLocaleString())  : null,
-            t.metrics.plays      ? React.createElement('span',null,'▶ '+t.metrics.plays.toLocaleString())    : null,
-            t.metrics.twitter && t.metrics.twitter.totalRetweets ? React.createElement('span',null,'🔁 '+t.metrics.twitter.totalRetweets.toLocaleString()) : null,
-            t.metrics.twitter && t.metrics.twitter.totalLikes    ? React.createElement('span',null,'❤️ '+t.metrics.twitter.totalLikes.toLocaleString())   : null,
-            t.metrics.velocity   ? React.createElement('span',{style:{color:'#5bc0eb'}},'⚡ '+t.metrics.velocity.toFixed(1)+'/h ↑') : null,
-            t.metrics.ageHours !== undefined ? React.createElement('span',null,'⏳ '+t.metrics.ageHours+'h') : null,
-            t.metrics.subreddit  ? React.createElement('span',null,'r/'+t.metrics.subreddit) : null
+        React.createElement(Collapsible, { title: '📊 Сырые метрики', defaultOpen: false },
+          React.createElement('div', { className: 'sp-metric-row' },
+            t.metrics.views      ? React.createElement('span', null, '👁 ' + t.metrics.views.toLocaleString())   : null,
+            t.metrics.upvotes    ? React.createElement('span', null, '⬆ '  + t.metrics.upvotes.toLocaleString()) : null,
+            t.metrics.likes      ? React.createElement('span', null, '❤️ ' + t.metrics.likes.toLocaleString())   : null,
+            t.metrics.comments   ? React.createElement('span', null, '💬 ' + t.metrics.comments.toLocaleString()): null,
+            t.metrics.shares     ? React.createElement('span', null, '🔁 ' + t.metrics.shares.toLocaleString())  : null,
+            t.metrics.plays      ? React.createElement('span', null, '▶ '  + t.metrics.plays.toLocaleString())   : null,
+            t.metrics.twitter && t.metrics.twitter.totalRetweets ? React.createElement('span', null, '🔁 ' + t.metrics.twitter.totalRetweets.toLocaleString()) : null,
+            t.metrics.twitter && t.metrics.twitter.totalLikes    ? React.createElement('span', null, '❤️ ' + t.metrics.twitter.totalLikes.toLocaleString())   : null,
+            t.metrics.velocity   ? React.createElement('span', { className: 'accent' }, '⚡ ' + t.metrics.velocity.toFixed(1) + '/h ↑') : null,
+            t.metrics.ageHours !== undefined ? React.createElement('span', null, '⏳ ' + t.metrics.ageHours + 'h') : null,
+            t.metrics.subreddit  ? React.createElement('span', null, 'r/' + t.metrics.subreddit) : null
           )
         ),
 
-      // ── Cluster signals (routing decision inputs) ─────────────────────────
-      t.clusterMetrics && React.createElement('div',{style:{padding:'12px 14px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:8,marginTop:10}},
-        React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:8,letterSpacing:'.5px',textTransform:'uppercase'}},'🌐 Сигналы кластера'),
-        React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:12,fontSize:12,color:'var(--text2)'}},
-          (t.metrics?.uniquePlatforms || 1) >= 2
-            ? React.createElement('span',{style:{color:'#22c55e'}},'🌐 '+t.metrics.uniquePlatforms+' платформ')
-            : React.createElement('span',null,'🌐 1 платформа'),
-          t.clusterMetrics.isNovel === false
-            ? React.createElement('span',{style:{color:'#eab308'}},'🔁 Дубль кластера')
-            : React.createElement('span',{style:{color:'#22c55e'}},'🆕 Новый'),
-          (t.clusterMetrics.batchSize > 1) && React.createElement('span',null,'📦 batch:'+t.clusterMetrics.batchSize),
-          (t.clusterMetrics.dbRecentCount > 0) && React.createElement('span',null,'🗄 db:'+t.clusterMetrics.dbRecentCount),
-          (t.clusterMetrics.junkPenalty > 0) && React.createElement('span',{style:{color:'#ef4444'}},'🗑 junk:'+t.clusterMetrics.junkPenalty),
-          t.junkReasons && t.junkReasons.length > 0 && React.createElement('span',{style:{color:'#ef4444'}}, '⚠ '+t.junkReasons.join(', ')),
-          t.memeShapeSignals && t.memeShapeSignals.length > 0 && React.createElement('span',{style:{color:'#22c55e'}}, '✨ '+t.memeShapeSignals.join(', '))
-        )
-      ),
-
-      // ── Stage 2 deep-dive details ─────────────────────────────────────────
-      t.xSearchData && React.createElement('div',{style:{padding:'12px 14px',background:'rgba(91,192,235,.06)',border:'1px solid rgba(91,192,235,.18)',borderRadius:8,marginTop:10}},
-        React.createElement('div',{style:{fontSize:10,fontWeight:700,color:'#5bc0eb',marginBottom:8,letterSpacing:'.5px',textTransform:'uppercase'}},'🔍 Stage 2 (Grok deep-dive)'),
-        React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:14,fontSize:12,color:'var(--text2)',marginBottom:8}},
-          React.createElement('span',null,'X Buzz: ',React.createElement('b',{style:{color:'var(--text)'}},t.xSearchData.xBuzz || 'unknown')),
-          React.createElement('span',null,'Импульс: ',React.createElement('b',{style:{color:'var(--text)'}},t.xSearchData.narrativeMomentum || 'unknown')),
-          React.createElement('span',null,'Органичность: ',React.createElement('b',{style:{color:'var(--text)'}},t.xSearchData.organicity || 'unknown'))
+      // ── COLLAPSIBLE: Cluster signals ───────────────────────────────────
+      t.clusterMetrics &&
+        React.createElement(Collapsible, { title: '🌐 Сигналы кластера', defaultOpen: false },
+          React.createElement('div', { className: 'sp-metric-row', style: { fontFamily: 'inherit' } },
+            (t.metrics?.uniquePlatforms || 1) >= 2
+              ? React.createElement('span', { className: 'ok' }, '🌐 ' + t.metrics.uniquePlatforms + ' платформ')
+              : React.createElement('span', null, '🌐 1 платформа'),
+            t.clusterMetrics.isNovel === false
+              ? React.createElement('span', { style: { color: 'var(--yellow)' } }, '🔁 Дубль кластера')
+              : React.createElement('span', { className: 'ok' }, '🆕 Новый'),
+            (t.clusterMetrics.batchSize > 1) && React.createElement('span', null, '📦 batch:' + t.clusterMetrics.batchSize),
+            (t.clusterMetrics.dbRecentCount > 0) && React.createElement('span', null, '🗄 db:' + t.clusterMetrics.dbRecentCount),
+            (t.clusterMetrics.junkPenalty > 0) && React.createElement('span', { className: 'danger' }, '🗑 junk:' + t.clusterMetrics.junkPenalty),
+            t.junkReasons && t.junkReasons.length > 0 && React.createElement('span', { className: 'danger' }, '⚠ ' + t.junkReasons.join(', ')),
+            t.memeShapeSignals && t.memeShapeSignals.length > 0 && React.createElement('span', { className: 'ok' }, '✨ ' + t.memeShapeSignals.join(', '))
+          )
         ),
-        t.xSearchData.subjectName && React.createElement('div',{style:{fontSize:12,color:'var(--text2)'}},
-          '🏷 Subject: ',React.createElement('b',{style:{color:'var(--text)'}}, '"'+t.xSearchData.subjectName+'"'),
-          ' · strength ',React.createElement('b',{style:{color:'var(--text)'}}, t.xSearchData.nameStrength)
+
+      // ── COLLAPSIBLE: Image gallery (if multiple) ───────────────────────
+      (t.imageUrls && t.imageUrls.length > 1) &&
+        React.createElement(Collapsible, { title: '🖼 Картинки (' + t.imageUrls.length + ')', defaultOpen: false },
+          React.createElement('div', { className: 'sp-thumbs' },
+            t.imageUrls.slice(0, 8).map((u, i) =>
+              React.createElement('a', { key: i, href: u, target: '_blank', rel: 'noopener' },
+                React.createElement('img', { src: u, alt: '', loading: 'lazy' })
+              )
+            )
+          )
         ),
-        // Bonus / penalty deltas applied by Stage 2 — explain meme potential drift
-        (t.stage2Penalty || t.stage2StoryBonus || t.stage2NameBonus) && React.createElement('div',{style:{fontSize:11,color:'var(--text3)',marginTop:8,paddingTop:8,borderTop:'1px solid rgba(91,192,235,.15)'}},
-          t.stage2Penalty && t.stage2Penalty.mult < 1 && React.createElement('div',null,'⛔ Penalty ×'+t.stage2Penalty.mult.toFixed(2)+(t.stage2Penalty.reasons?.length?' ('+t.stage2Penalty.reasons.join(', ')+')':'')),
-          t.stage2StoryBonus && t.stage2StoryBonus.bonus > 0 && React.createElement('div',null,'📖 Story bonus +'+t.stage2StoryBonus.bonus+' (story score '+t.stage2StoryBonus.storyScore+')'),
-          t.stage2NameBonus  && t.stage2NameBonus.bonus > 0 && React.createElement('div',null,'🏷 Name bonus +'+t.stage2NameBonus.bonus+' (strength '+t.stage2NameBonus.nameStrength+')')
-        )
-      ),
 
-      // ── Meta chips ─────────────────────────────────────────────────────────
-      React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:8,marginTop:14,fontSize:11}},
-        t.category && React.createElement('span',{className:'chip'},'📁 ' + t.category),
-        t.sentiment && React.createElement('span',{className:'chip'},'💭 ' + t.sentiment),
-        t.predictedLifespan && React.createElement('span',{className:'chip'},'⏱ ' + t.predictedLifespan),
-        t.narrativePhase && React.createElement('span',{className:'chip'},'🌀 ' + t.narrativePhase),
-        t.marketStage && t.marketStage !== 'none' && React.createElement('span',{className:'chip'},'📊 ' + t.marketStage)
-      ),
-
-      // Telegram status
-      result.alerts && result.alerts.length > 0 && React.createElement('div',{style:{marginTop:18,padding:12,background:'rgba(91,192,235,.08)',border:'1px solid rgba(91,192,235,.25)',borderRadius:8}},
-        React.createElement('div',{style:{fontSize:12,fontWeight:700,color:'#5bc0eb',marginBottom:6}},'📨 Отправка в Telegram'),
-        React.createElement('div',{style:{fontSize:12,color:'var(--text2)'}},
-          '✅ Успешно: ' + result.alerts.filter(a=>a.ok).length + ' / ' + result.alerts.length,
-          result.alerts.some(a=>!a.ok) && React.createElement('div',{style:{color:'#ff9b6b',marginTop:4}},
-            '⚠ Ошибки: ' + result.alerts.filter(a=>!a.ok).map(a=>a.reason).join(', ')
+      // ── TG broadcast status (only after a fresh send) ──────────────────
+      result.alerts && result.alerts.length > 0 &&
+        React.createElement('div', { className: 'sp-block accent-tg' },
+          React.createElement('div', { className: 'sp-block-label' }, '📨 Отправка в Telegram'),
+          React.createElement('div', { style: { fontSize: 12, color: 'var(--text2)' } },
+            '✅ Успешно: ' + result.alerts.filter(a => a.ok).length + ' / ' + result.alerts.length,
+            result.alerts.some(a => !a.ok) && React.createElement('div', { style: { color: 'var(--yellow)', marginTop: 4 } },
+              '⚠ Ошибки: ' + result.alerts.filter(a => !a.ok).map(a => a.reason).join(', ')
+            )
           )
         )
-      ),
-
-      // Image preview
-      (t.imageUrls && t.imageUrls.length > 0) && React.createElement('div',{style:{marginTop:16}},
-        React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'var(--text2)',marginBottom:6}},'🖼 Картинки (' + t.imageUrls.length + ')'),
-        React.createElement('div',{style:{display:'flex',gap:6,overflowX:'auto',paddingBottom:6}},
-          t.imageUrls.slice(0,6).map((u,i)=>React.createElement('img',{key:i,src:u,alt:'',style:{height:120,borderRadius:6,border:'1px solid var(--border)'}}))
-        )
-      )
     )
   );
 }
 
-function scoreBox(label, value, cls) {
-  if (!cls) cls = value >= 70 ? 'score-hot' : value >= 40 ? 'score-warm' : '';
-  const color = cls === 'score-hot' ? '#ff6b35' : cls === 'score-warm' ? '#ffa94d' : cls === 'score-bad' ? '#ff5252' : '#5bc0eb';
-  return React.createElement('div',{style:{padding:'10px 12px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:8}},
-    React.createElement('div',{style:{fontSize:10,color:'var(--text3)',marginBottom:4,fontWeight:600,letterSpacing:'.3px'}},label),
-    React.createElement('div',{style:{fontSize:20,fontWeight:800,color,fontFamily:'JetBrains Mono, monospace'}},value + '/100')
+// ── SubmitPage — manual URL / narrative analysis ─────────────────────────────
+// Persists analyses across reloads: every successful submit lands in the
+// trends table with raw_metrics.manualSubmitted=true; on mount we pull
+// that list via GET /api/manual-trends and render it as a horizontal
+// history strip above the detail card. Operator can switch between past
+// analyses without re-running the pipeline.
+function SubmitPage() {
+  const [url, setUrl] = useState('');
+  const [sendTg, setSendTg] = useState(false);
+  // Comment is shared between the page-level submit form and the per-card
+  // "Отправить алерт" button (the user's intent — one comment, used wherever
+  // they hit send next).
+  const [comment, setComment] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [history, setHistory] = useState([]);
+  const [activeId, setActiveId] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+
+  const COMMENT_MAX = 500;
+
+  // Load history on mount.
+  useEffect(() => {
+    let alive = true;
+    api('/api/manual-trends?limit=80')
+      .then(d => {
+        if (!alive) return;
+        const items = (d.items || []).map(it => ({ ...it, alerts: [] }));
+        setHistory(items);
+        if (items.length) setActiveId(items[0].trend.id);
+      })
+      .catch(() => {})
+      .finally(() => { if (alive) setHistoryLoading(false); });
+    return () => { alive = false; };
+  }, []);
+
+  const submit = async () => {
+    const clean = url.trim();
+    if (!clean) { setError('Вставь URL'); return; }
+    if (!/^https?:\\/\\//i.test(clean)) { setError('URL должен начинаться с http(s)://'); return; }
+    setError(''); setLoading(true);
+    try {
+      const res = await api('/api/submit-narrative', 'POST', {
+        url: clean,
+        sendToTelegram: sendTg,
+        comment: sendTg ? comment.trim() : '',
+      });
+      // Prepend to history, dedup by id (re-submitting the same URL UPSERTs
+      // the row in DB but we still want it on top).
+      const newItem = {
+        trend: res.trend,
+        pipeline: res.pipeline,
+        alerts: res.alerts || [],
+        elapsedMs: res.elapsedMs,
+        submittedAt: res.trend?.manualSubmittedAt || new Date().toISOString(),
+      };
+      setHistory(prev => {
+        const filtered = prev.filter(it => it.trend.id !== newItem.trend.id);
+        return [newItem, ...filtered];
+      });
+      setActiveId(newItem.trend.id);
+      setUrl('');
+    } catch (e) {
+      setError(e.message || 'Ошибка анализа');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const removeFromHistory = async (id) => {
+    if (!id) return;
+    if (!window.confirm('Убрать из истории? Сам тренд останется в БД.')) return;
+    try {
+      await api('/api/manual-trends/' + id, 'DELETE');
+    } catch (e) {
+      alert('Не удалось удалить: ' + (e.message || 'unknown'));
+      return;
+    }
+    setHistory(prev => {
+      const next = prev.filter(it => it.trend.id !== id);
+      // If we just removed the active one, fall back to the new top.
+      if (activeId === id) setActiveId(next[0]?.trend?.id || null);
+      return next;
+    });
+  };
+
+  const updateActiveAlerts = (alerts) => {
+    setHistory(prev => prev.map(it =>
+      it.trend.id === activeId ? { ...it, alerts } : it
+    ));
+  };
+
+  const active = history.find(it => it.trend.id === activeId) || null;
+
+  return React.createElement('div', null,
+    // ── PAGE HEADER (matches ScannersPage / DecisionsPage idiom) ──────────
+    React.createElement('div', { className: 'page-header' },
+      React.createElement('h2', null, '🧪 Ручной анализ нарратива'),
+      React.createElement('p', null,
+        'Закинь URL поста (Twitter / Reddit / TikTok / любой сайт с og:image) — прогоним через полный пайплайн анализа (Stage 1 + Stage 2 Grok), сохраним в БД и опционально отправим в Telegram. История сохраняется между сессиями.'
+      )
+    ),
+
+    // ── SUBMIT FORM ────────────────────────────────────────────────────────
+    React.createElement('div', { className: 'card', style: { marginBottom: 16 } },
+      React.createElement('div', { className: 'sp-form' },
+        React.createElement('div', null,
+          React.createElement('label', { className: 'sp-form-label' }, 'URL поста'),
+          React.createElement('input', {
+            type: 'url',
+            className: 'sp-input',
+            value: url,
+            onChange: e => setUrl(e.target.value),
+            onKeyDown: e => { if (e.key === 'Enter' && !loading) submit(); },
+            placeholder: 'https://twitter.com/user/status/12345  или  https://reddit.com/r/xyz/comments/...',
+            disabled: loading,
+          })
+        ),
+        React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 } },
+          React.createElement('input', { type: 'checkbox', checked: sendTg, onChange: e => setSendTg(e.target.checked), disabled: loading }),
+          React.createElement('span', null, '📨 Отправить в Telegram всем активным подписчикам после анализа')
+        ),
+        sendTg && React.createElement('div', null,
+          React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 } },
+            React.createElement('label', { className: 'sp-form-label', style: { marginBottom: 0 } }, '💬 Комментарий к алерту (необязательно)'),
+            React.createElement('span', { className: 'sp-counter' + (comment.length > COMMENT_MAX ? ' over' : '') }, comment.length + '/' + COMMENT_MAX)
+          ),
+          React.createElement('textarea', {
+            className: 'sp-textarea',
+            value: comment,
+            onChange: e => setComment(e.target.value.slice(0, COMMENT_MAX + 50)),
+            placeholder: 'Например: смотрите реплаи под этим постом — там эпичный слив',
+            disabled: loading,
+            rows: 2,
+          })
+        ),
+        React.createElement('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+          React.createElement('button', { className: 'btn btn-primary', onClick: submit, disabled: loading || !url.trim() },
+            loading ? '⏳ Анализ идёт...' : '🚀 Проанализировать'
+          ),
+          error && React.createElement('span', { className: 'sp-error-inline' }, '⚠ ' + error)
+        )
+      )
+    ),
+
+    loading && React.createElement('div', { className: 'sp-loading' },
+      React.createElement('div', { className: 'sp-loading-icon' }, '⚙️'),
+      React.createElement('div', { style: { fontSize: 13 } }, 'Тянем метаданные → Stage 1 (батч-скоринг) → Stage 2 (Grok x_search deep-dive)...'),
+      React.createElement('div', { style: { fontSize: 11, marginTop: 6, color: 'var(--text2)', opacity: .8 } }, 'Обычно 10-30 секунд')
+    ),
+
+    // ── HISTORY STRIP ──────────────────────────────────────────────────────
+    history.length > 0 && React.createElement('div', { style: { marginBottom: 14 } },
+      React.createElement('div', { className: 'sp-history-head' },
+        React.createElement('div', { className: 'sp-history-title' }, '📚 История анализов (' + history.length + ')'),
+        React.createElement('div', { className: 'sp-history-hint' }, 'Клик — открыть детали · 🗑 убрать из списка')
+      ),
+      React.createElement('div', { className: 'sp-history-strip' },
+        history.map(it => React.createElement(ManualHistoryItem, {
+          key: it.trend.id,
+          item: it,
+          active: it.trend.id === activeId,
+          onSelect: setActiveId,
+          onDelete: removeFromHistory,
+        }))
+      )
+    ),
+
+    historyLoading && history.length === 0 && React.createElement('div', { className: 'sp-loading' }, '⏳ Загружаем историю...'),
+
+    !historyLoading && history.length === 0 && !loading && React.createElement('div', { className: 'sp-empty' },
+      React.createElement('span', { className: 'sp-empty-icon' }, '📭'),
+      React.createElement('div', { style: { fontSize: 14, marginBottom: 6 } }, 'История пуста'),
+      React.createElement('div', { style: { fontSize: 12 } }, 'Закинь первый URL в форме выше')
+    ),
+
+    // ── ACTIVE DETAIL CARD ─────────────────────────────────────────────────
+    active && React.createElement(ManualResultCard, {
+      result: active,
+      comment, setComment,
+      onAlertSent: updateActiveAlerts,
+    })
+  );
+}
+
+// ── spTile (score tile) — used inside ManualResultCard's score grid ─────────
+// Auto-derives a tone class (hot / warm / bad / blue default) from the value.
+// Caller can pass cls ("hot" | "warm" | "bad") to force a tone — used by
+// the Junk tile which is always red.
+function spTile(label, value, cls) {
+  const tone = cls || (value >= 70 ? 'hot' : value >= 40 ? 'warm' : '');
+  return React.createElement('div', { className: 'sp-score-tile' + (tone ? ' ' + tone : '') },
+    React.createElement('div', { className: 'sp-score-tile-label' }, label),
+    React.createElement('div', { className: 'sp-score-tile-value' }, value + '/100')
   );
 }
 
@@ -4571,12 +4959,9 @@ function ExamplesPage() {
   );
 }
 
-function narrativeBox(label, content) {
-  return React.createElement('div',{style:{marginBottom:12}},
-    React.createElement('div',{style:{fontSize:10,color:'var(--text3)',marginBottom:4,fontWeight:600,letterSpacing:'.3px'}},label),
-    React.createElement('div',{style:{fontSize:13,lineHeight:1.5,color:'var(--text)',padding:'8px 12px',background:'rgba(255,255,255,.02)',borderLeft:'2px solid var(--accent)',borderRadius:'0 6px 6px 0'}},content)
-  );
-}
+// narrativeBox helper removed 2026-04-30 — its callers (AI explanation /
+// description blocks) now render via .sp-block + .sp-narrative classes
+// for visual consistency with the rest of the SubmitPage card.
 
 // ── App Root ──────────────────────────────────────────────────────────────────
 function App() {
@@ -4628,104 +5013,36 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
   }
 
   // ── Manual narrative submit ──────────────────────────────────────────────────
-  // Resolves a user-supplied URL into a synthetic trend, runs it through the
-  // scorer, persists the row with a manual flag, and (optionally) pushes the
-  // alert to every active Telegram user. Bypasses scan-cycle gates on purpose.
+  // Thin wrapper around runManualAnalysis() that adds the admin-specific
+  // option of broadcasting to every active TG user after the analysis lands.
+  // Dashboard + TG bot use runManualAnalysis() directly without broadcast.
   async _submitNarrative(rawUrl, sendToTelegram, opts = {}) {
-    const startedAt = Date.now();
-    this.logger.info(`[ManualSubmit] ${rawUrl} (tg=${sendToTelegram ? 'yes' : 'no'})`);
+    const result = await runManualAnalysis({
+      scorer: this.scorer,
+      db: this.db,
+      url: rawUrl,
+      save: true,           // admin path → adds the trend to the global feed
+      logger: this.logger,
+      actorId: 'admin',
+    });
+    const { trend, dbId, elapsedMs, pipeline, fromCache, cacheAgeMs } = result;
 
-    const synthetic = await this._resolveUrlToTrend(rawUrl);
-    if (!synthetic) throw new Error('Could not resolve URL metadata');
-
-    // Run full scorer (Stage 1 batch + Stage 2 Grok if threshold met)
-    const scored = await this.scorer.scoreTrends([synthetic]);
-    const trend = scored[0] || synthetic;
-
-    // Persist with manual marker in raw_metrics
-    trend.metrics = trend.metrics || {};
-    trend.metrics.manualSubmitted = true;
-    trend.metrics.manualSubmittedAt = new Date().toISOString();
-    const dbId = this.db.saveTrend({ ...trend, pipelineStatus: 'scored' });
-    trend._dbId = dbId;
-
-    // Optional: broadcast to all active users right now
     const alertResults = sendToTelegram
       ? await this._broadcastTrendAlert(trend, dbId, { comment: opts.comment || '' })
       : [];
-
-    const elapsedMs = Date.now() - startedAt;
-    this.logger.info(`[ManualSubmit] done in ${elapsedMs}ms — trend #${dbId}, score=${trend.score}, meme=${trend.memePotential}, alerts=${alertResults.filter(a => a.ok).length}/${alertResults.length}`);
-
-    // Stage 2 status — explain to operator why deep-dive ran or didn't.
-    // Mirrors the gate logic in scorer.js (_buildAnalysisPipeline).
-    const s2Threshold = parseInt(this.db.getSetting?.('stage2Threshold', '60'), 10) || 60;
-    const s2Ran = !!trend.xSearchData;
-    let s2SkipReason = null;
-    if (!s2Ran) {
-      if ((trend.memePotential || 0) < s2Threshold) {
-        s2SkipReason = `memePotential ${trend.memePotential || 0} < threshold ${s2Threshold}`;
-      } else if (trend.source === 'google_trends') {
-        s2SkipReason = 'google_trends source skipped from Stage 2';
-      } else if (trend.clusterMetrics?.isNovel === false) {
-        s2SkipReason = 'duplicate cluster (isNovel=false)';
-      } else {
-        s2SkipReason = 'cap reached or Stage 2 disabled';
-      }
+    if (sendToTelegram) {
+      this.logger.info(`[ManualSubmit] alerts=${alertResults.filter(a => a.ok).length}/${alertResults.length}`);
     }
 
     return {
       ok: true,
       elapsedMs,
-      pipeline: {
-        stage1Ran: typeof trend.memePotential === 'number',
-        stage2Ran: s2Ran,
-        stage2SkipReason: s2SkipReason,
-        stage2Threshold: s2Threshold,
-      },
-      trend: {
-        id: dbId,
-        source: trend.source,
-        title: trend.title,
-        originalTitle: trend.originalTitle || trend.title,
-        url: trend.url,
-        description: trend.description || null,
-        score: trend.score,
-        viralityScore: trend.viralityScore || null,
-        memePotential: trend.memePotential,
-        emergenceScore: trend.emergenceScore,
-        adoptionScore: trend.adoptionScore,
-        storyScore: trend.xSearchData?.storyScore || 0,
-        storyHook: trend.xSearchData?.storyHook || '',
-        category: trend.category,
-        sentiment: trend.sentiment,
-        predictedLifespan: trend.predictedLifespan,
-        aiExplanation: trend.aiExplanation,
-        whyNow: trend.whyNow,
-        triggerText: trend.triggerText || trend.trigger?.text || null,
-        triggerSources: trend.triggerSources || trend.trigger?.sources || [],
-        triggerConfidence: trend.triggerConfidence || trend.trigger?.confidence || 0,
-        narrativePhase: trend.narrativePhase,
-        marketStage: trend.marketStage,
-        alertScore: trend.alertScore,
-        junkPenalty: trend.junkPenalty,
-        // Stage 2 deep-dive — only populated when scorer ran x_search
-        xSearchData: trend.xSearchData || null,
-        // Bonus / penalty deltas applied by Stage 2 (helpful for explaining
-        // why memePotential moved between Stage 1 and final)
-        stage2Penalty:    trend.stage2Penalty    || null,
-        stage2StoryBonus: trend.stage2StoryBonus || null,
-        stage2NameBonus:  trend.stage2NameBonus  || null,
-        // Cluster routing inputs (Aggregator → Clusterer outputs)
-        clusterMetrics: trend.clusterMetrics || null,
-        memeShapeSignals: trend.metrics?.memeShapeSignals || null,
-        junkReasons: trend.clusterMetrics?.junkReasons || trend.metrics?.junkReasons || [],
-        // Stage 0 PreStage enrichment (nano text classifier + gemini vision)
-        preStage: trend.preStage || null,
-        imageUrls: trend.metrics?.imageUrls || [],
-        videoUrl: trend.metrics?.videoUrl || null,
-        metrics: trend.metrics,
-      },
+      pipeline,
+      fromCache: !!fromCache,
+      cacheAgeMs: cacheAgeMs || 0,
+      // Shape via the shared helper so the live submit response and the
+      // /api/manual-trends history endpoint always render identically.
+      trend: this._shapeManualTrend(trend, dbId),
       alerts: alertResults,
     };
   }
@@ -4788,6 +5105,10 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       source:          row.source,
       title:           row.title,
       originalTitle:   row.original_title || row.title,
+      // description column on the trends table — needed by SubmitPage history
+      // so the "📝 Описание поста" block renders the same as on the live
+      // submit response.
+      description:     row.description || metrics.description || '',
       url:             row.url,
       category:        row.category,
       sentiment:       row.sentiment,
@@ -4801,6 +5122,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       rankScore:       metrics.rankScore       ?? null,
       alertScore:      metrics.alertScore      ?? null,
       alertBreakdown:  metrics.alertBreakdown  ?? null,
+      // Alert-type axis (event/trend/post). Prefer the dedicated column when
+      // hydrating from DB; fall back to the raw_metrics mirror so historical
+      // rows whose column is NULL but raw_metrics already has it (e.g. rows
+      // saved by the same process under the new schema before column-update)
+      // still surface the type in admin SubmitPage history.
+      alertType:       row.alert_type || metrics.alertType || null,
       marketStage:     metrics.marketStage     ?? null,
       junkPenalty:     metrics.junkPenalty     ?? 0,
       junkReasons:     metrics.junkReasons     ?? [],
@@ -4819,283 +5146,101 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       triggerConfidence: row.trigger_confidence | 0,
       predictedLifespan: row.predicted_lifespan,
       xSearchData:     metrics.xSearchData || { storyScore: metrics.storyScore || 0, storyHook: metrics.storyHook || '' },
+      // Stage 2 deltas — saved per-trend so the SubmitPage history can show
+      // the same penalty/bonus chips after page reload.
+      stage2Penalty:    metrics.stage2Penalty    || null,
+      stage2StoryBonus: metrics.stage2StoryBonus || null,
+      stage2NameBonus:  metrics.stage2NameBonus  || null,
+      // Cluster routing inputs (snapshot at scoring time).
+      clusterMetrics:   metrics.clusterMetrics   || null,
+      // Stage 1 viralityScore lives in raw_metrics for non-current rows; the
+      // SubmitPage chip block reads it via t.viralityScore.
+      viralityScore:    metrics.viralityScore    ?? row.virality_score ?? null,
+      // Manual-submit marker (drives 🧪 MANUAL chip + history visibility).
+      manualSubmitted:  metrics.manualSubmitted === true,
+      manualSubmittedAt: metrics.manualSubmittedAt || row.first_seen_at || null,
+      // Original creation time (Telegram alert showed first_seen_at; we
+      // reuse it as a "submitted at" timestamp in the history list).
+      firstSeenAt:      row.first_seen_at || null,
       metrics,
     };
   }
 
-  // Turn a raw URL into a synthetic trend with whatever metadata we can fetch.
-  // Supports twitter/x, reddit, tiktok, generic (og:image). Free APIs only.
-  async _resolveUrlToTrend(rawUrl) {
-    const url = rawUrl.trim();
-    const isTwitter = /^https?:\/\/(www\.|mobile\.)?(twitter|x)\.com\//i.test(url);
-    const isReddit  = /^https?:\/\/(www\.|old\.|new\.)?reddit\.com\//i.test(url);
-    const isTiktok  = /^https?:\/\/(www\.)?tiktok\.com\//i.test(url);
-
-    if (isTwitter) return this._resolveTwitterUrl(url);
-    if (isReddit)  return this._resolveRedditUrl(url);
-    if (isTiktok)  return this._resolveTiktokUrl(url);
-    return this._resolveGenericUrl(url);
+  // Shape a hydrated trend (from _submitNarrative or _hydrateTrendFromDb)
+  // into the public SubmitPage payload. Single source of truth so the
+  // initial submit response and the GET /api/manual-trends history list
+  // render identically.
+  _shapeManualTrend(trend, dbId) {
+    return {
+      id: dbId || trend._dbId || trend.id,
+      source: trend.source,
+      title: trend.title,
+      originalTitle: trend.originalTitle || trend.title,
+      url: trend.url,
+      description: trend.description || null,
+      score: trend.score,
+      viralityScore: trend.viralityScore ?? null,
+      memePotential: trend.memePotential,
+      emergenceScore: trend.emergenceScore,
+      adoptionScore: trend.adoptionScore,
+      storyScore: trend.xSearchData?.storyScore || trend.storyScore || 0,
+      storyHook: trend.xSearchData?.storyHook || trend.storyHook || '',
+      category: trend.category,
+      sentiment: trend.sentiment,
+      predictedLifespan: trend.predictedLifespan,
+      aiExplanation: trend.aiExplanation,
+      whyNow: trend.whyNow,
+      triggerText: trend.triggerText || trend.trigger?.text || null,
+      triggerSources: trend.triggerSources || trend.trigger?.sources || [],
+      triggerConfidence: trend.triggerConfidence || trend.trigger?.confidence || 0,
+      narrativePhase: trend.narrativePhase,
+      alertType: trend.alertType || null,
+      marketStage: trend.marketStage,
+      alertScore: trend.alertScore,
+      junkPenalty: trend.junkPenalty,
+      xSearchData: trend.xSearchData || null,
+      stage2Penalty: trend.stage2Penalty || null,
+      stage2StoryBonus: trend.stage2StoryBonus || null,
+      stage2NameBonus: trend.stage2NameBonus || null,
+      clusterMetrics: trend.clusterMetrics || null,
+      memeShapeSignals: trend.metrics?.memeShapeSignals || trend.memeShapeSignals || null,
+      junkReasons: trend.clusterMetrics?.junkReasons || trend.metrics?.junkReasons || trend.junkReasons || [],
+      preStage: trend.preStage || trend.metrics?.preStage || null,
+      imageUrls: trend.metrics?.imageUrls || [],
+      videoUrl: trend.metrics?.videoUrl || null,
+      metrics: trend.metrics,
+      manualSubmitted: trend.manualSubmitted === true || trend.metrics?.manualSubmitted === true,
+      manualSubmittedAt: trend.manualSubmittedAt || trend.metrics?.manualSubmittedAt || trend.firstSeenAt || null,
+    };
   }
 
-  async _resolveTwitterUrl(url) {
-    const m = url.match(/(?:twitter|x)\.com\/[^/?#]+\/status\/(\d+)/i);
-    if (!m) throw new Error('Not a valid tweet URL');
-    const [, tweetId] = m;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    try {
-      const r = await fetch(`https://api.fxtwitter.com/i/status/${tweetId}`, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Catalyst/3.0', 'Accept': 'application/json' },
-      });
-      clearTimeout(timer);
-      if (!r.ok) throw new Error(`fxtwitter ${r.status}`);
-      const data = await r.json();
-      const tw = data?.tweet;
-      if (!tw) throw new Error('Tweet not found');
-
-      const likes    = tw.likes    || 0;
-      const retweets = tw.retweets || 0;
-      const replies  = tw.replies  || 0;
-      const views    = tw.views    || 0;
-      const author   = tw.author?.screen_name || 'unknown';
-      const text     = tw.text || '';
-      const createdAt = tw.created_at ? new Date(tw.created_at) : null;
-      const ageHours  = createdAt ? Math.max(0.25, (Date.now() - createdAt.getTime()) / 3_600_000) : 1;
-      const engagement = likes + retweets * 2;
-      const velocity  = Math.round(engagement / ageHours);
-
-      // Pull media (main + quote + reply-parent) — mirrors /api/preview
-      const upgrade = (u) => {
-        if (!u || !/pbs\.twimg\.com\//.test(u)) return u;
-        try {
-          const x = new URL(u);
-          x.searchParams.set('name', 'orig');
-          if (!x.searchParams.get('format')) {
-            const ext = x.pathname.match(/\.(jpe?g|png|webp)$/i)?.[1] || 'jpg';
-            x.searchParams.set('format', ext.toLowerCase().replace('jpeg', 'jpg'));
-          }
-          return x.toString();
-        } catch { return u; }
-      };
-      const imageUrls = [];
-      const pushMedia = (list) => {
-        if (!Array.isArray(list)) return;
-        for (const m of list) {
-          const raw = m?.type === 'photo' ? (m.url || m.thumbnail_url) : (m?.thumbnail_url || m?.url);
-          const u = raw ? upgrade(raw) : null;
-          if (u && !imageUrls.includes(u)) imageUrls.push(u);
-        }
-      };
-      pushMedia(tw.media?.all);
-      pushMedia(tw.quote?.media?.all);
-      pushMedia(tw.replying_to?.media?.all);
-
-      // Video: pick from main, fallback quote/reply
-      const pickVideo = (list) => {
-        if (!Array.isArray(list)) return null;
-        for (const m of list) {
-          if (m?.type === 'video' || m?.type === 'gif') {
-            return m.url || m.thumbnail_url;
-          }
-        }
-        return null;
-      };
-      const videoUrl = pickVideo(tw.media?.all) || pickVideo(tw.quote?.media?.all) || null;
-
-      // Hashtags/tickers from text
-      const hashtags = [...new Set((text.match(/#\w+/g) || []).map(h => h.toLowerCase()))];
-      const tickers  = [...new Set(text.match(/\$[A-Z]{2,8}/g) || [])];
-
-      // Build title — prefer hashtags/tickers, fall back to cleaned text
-      const title = (hashtags[0] && tickers[0]) ? `${hashtags[0]} ${tickers[0]}`
-                  : hashtags[0] || tickers[0]
-                  || text.replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim().substring(0, 120);
-
-      return {
-        externalId: `manual_twitter_${tweetId}`,
-        source: 'twitter',
-        title: title || `Tweet by @${author}`,
-        originalTitle: title || `Tweet by @${author}`,
-        description: text.substring(0, 300),
-        url: `https://twitter.com/${author}/status/${tweetId}`,
-        metrics: {
-          views, likes, retweets, replies,
-          upvotes: engagement,
-          velocity,
-          ageHours: Math.round(ageHours * 10) / 10,
-          hashtags, tickers,
-          author: `@${author}`,
-          followers: tw.author?.followers || 0,
-          thumbnailUrl: imageUrls[0] || null,
-          imageUrls,
-          videoUrl,
-          searchQuery: '(manual)',
-        },
-      };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async _resolveRedditUrl(url) {
-    const jsonUrl = url.replace(/\/?(\?.*)?$/, '') + '.json?raw_json=1';
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    try {
-      const r = await fetch(jsonUrl, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Catalyst/3.0)', 'Accept': 'application/json' },
-      });
-      clearTimeout(timer);
-      if (!r.ok) throw new Error(`reddit ${r.status}`);
-      const data = await r.json();
-      const post = data?.[0]?.data?.children?.[0]?.data;
-      if (!post) throw new Error('Reddit post not found');
-
-      const score     = post.score || post.ups || 0;
-      const comments  = post.num_comments || 0;
-      const createdAt = post.created_utc ? new Date(post.created_utc * 1000) : null;
-      const ageHours  = createdAt ? Math.max(0.25, (Date.now() - createdAt.getTime()) / 3_600_000) : 1;
-      const velocity  = Math.round(score / ageHours);
-      const subreddit = post.subreddit || '';
-      const author    = post.author || '';
-
-      // Pull best-quality image
-      let imageUrl = null;
-      const directUrl = post.url_overridden_by_dest || post.url;
-      if (directUrl && /\.(jpe?g|png|gif|webp)(\?|$)/i.test(directUrl)) imageUrl = directUrl;
-      else if (post.preview?.images?.[0]?.source?.url) imageUrl = post.preview.images[0].source.url;
-      else if (post.is_gallery && post.media_metadata) {
-        const firstId = post.gallery_data?.items?.[0]?.media_id;
-        const item = firstId && post.media_metadata[firstId];
-        imageUrl = item?.s?.u || item?.s?.gif || null;
+  // Reconstruct the gate-trace shown above the score grid. For history items
+  // we don't have the live-pipeline trace anymore, so we re-derive from
+  // saved fields the same way _submitNarrative does inline.
+  _derivePipelineTrace(trend) {
+    const s2Threshold = parseInt(this.db.getSetting?.('stage2Threshold', '60'), 10) || 60;
+    const stage1Ran = typeof trend.memePotential === 'number';
+    const stage2Ran = !!trend.xSearchData && (
+      typeof trend.xSearchData.xBuzz === 'string' ||
+      typeof trend.xSearchData.narrativeMomentum === 'string' ||
+      typeof trend.xSearchData.organicity === 'string' ||
+      (trend.xSearchData.storyScore || 0) > 0
+    );
+    let stage2SkipReason = null;
+    if (!stage2Ran) {
+      if ((trend.memePotential || 0) < s2Threshold) {
+        stage2SkipReason = `memePotential ${trend.memePotential || 0} < threshold ${s2Threshold}`;
+      } else if (trend.source === 'google_trends') {
+        stage2SkipReason = 'google_trends source skipped from Stage 2';
+      } else if (trend.clusterMetrics?.isNovel === false) {
+        stage2SkipReason = 'duplicate cluster (isNovel=false)';
+      } else {
+        stage2SkipReason = 'cap reached or Stage 2 disabled';
       }
-      // Gallery: collect all images
-      const imageUrls = [];
-      if (imageUrl) imageUrls.push(imageUrl);
-      if (post.is_gallery && post.media_metadata && post.gallery_data?.items) {
-        for (const it of post.gallery_data.items) {
-          const m = post.media_metadata[it.media_id];
-          const u = m?.s?.u || m?.s?.gif;
-          if (u && !imageUrls.includes(u)) imageUrls.push(u);
-        }
-      }
-
-      const videoUrl = post.preview?.reddit_video_preview?.fallback_url
-                    || post.media?.reddit_video?.fallback_url
-                    || null;
-
-      return {
-        externalId: `manual_reddit_${post.id}`,
-        source: 'reddit',
-        title: post.title || '(untitled Reddit post)',
-        originalTitle: post.title || '(untitled Reddit post)',
-        description: (post.selftext || '').substring(0, 400),
-        url: 'https://reddit.com' + (post.permalink || ''),
-        metrics: {
-          upvotes: score,
-          comments,
-          velocity,
-          ageHours: Math.round(ageHours * 10) / 10,
-          subreddit,
-          author: `u/${author}`,
-          thumbnailUrl: imageUrls[0] || null,
-          imageUrls,
-          videoUrl,
-          searchQuery: '(manual)',
-        },
-      };
-    } finally {
-      clearTimeout(timer);
     }
+    return { stage1Ran, stage2Ran, stage2SkipReason, stage2Threshold: s2Threshold };
   }
 
-  async _resolveTiktokUrl(url) {
-    const videoIdMatch = url.match(/\/video\/(\d+)/);
-    if (!videoIdMatch) throw new Error('Not a valid TikTok URL');
-    const videoId = videoIdMatch[1];
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    try {
-      const r = await fetch(`https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Catalyst/3.0', 'Accept': 'application/json' },
-      });
-      clearTimeout(timer);
-      if (!r.ok) throw new Error(`tiktok ${r.status}`);
-      const data = await r.json();
-      const title  = (data.title || '').substring(0, 200);
-      const author = data.author_name || '';
-      const thumb  = data.thumbnail_url || null;
-      return {
-        externalId: `manual_tiktok_${videoId}`,
-        source: 'tiktok',
-        title: title || '(TikTok video)',
-        originalTitle: title || '(TikTok video)',
-        description: title,
-        url,
-        metrics: {
-          upvotes: 0, // oembed doesn't expose play counts
-          comments: 0,
-          velocity: 0,
-          ageHours: 1,
-          author: `@${author}`,
-          thumbnailUrl: thumb,
-          imageUrls: thumb ? [thumb] : [],
-          videoUrl: null,
-          searchQuery: '(manual)',
-        },
-      };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async _resolveGenericUrl(url) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    try {
-      const r = await fetch(url, {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Catalyst/3.0)' },
-      });
-      clearTimeout(timer);
-      if (!r.ok) throw new Error(`fetch ${r.status}`);
-      const ct = (r.headers.get('content-type') || '').toLowerCase();
-      if (!ct.includes('text/html')) throw new Error('Not an HTML page');
-      const html = await r.text();
-      const pick = (re) => { const m = html.match(re); return m ? m[1] : ''; };
-      const title = pick(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
-                 || pick(/<title[^>]*>([^<]+)<\/title>/i);
-      const desc  = pick(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i)
-                 || pick(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
-      const image = pick(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
-      const cleanTitle = (title || '').replace(/\s+/g, ' ').trim().substring(0, 200);
-      const cleanDesc  = (desc  || '').replace(/\s+/g, ' ').trim().substring(0, 400);
-      if (!cleanTitle) throw new Error('No title or og:title found on page');
-      return {
-        externalId: `manual_web_${Buffer.from(url).toString('base64').substring(0, 16)}`,
-        source: 'web',
-        title: cleanTitle,
-        originalTitle: cleanTitle,
-        description: cleanDesc,
-        url,
-        metrics: {
-          upvotes: 0,
-          comments: 0,
-          velocity: 0,
-          ageHours: 1,
-          thumbnailUrl: image || null,
-          imageUrls: image ? [image] : [],
-          videoUrl: null,
-          searchQuery: '(manual)',
-        },
-      };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
 
   // ── Start ────────────────────────────────────────────────────────────────────
   start() {

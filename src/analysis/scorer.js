@@ -4,8 +4,29 @@ import {
   STAGE1_RESPONSE_SCHEMA,
   STAGE2_SYSTEM_PROMPT,
   buildStage2Prompt,
+  normalizeAlertType,
 } from './prompts.js';
 import { normalizeLifespan } from './lifespan.js';
+
+/**
+ * Deterministic alert-type derivation — used (a) when AI returns an invalid
+ * value, (b) for the heuristic / fallback paths where AI never ran.
+ * Rule:
+ *   non-empty whyNow                                 → 'event'
+ *   uniquePlatforms ≥ 2 OR cluster items ≥ 3        → 'trend'
+ *   otherwise                                        → 'post'
+ */
+export function deriveAlertType(trend) {
+  const why = String(trend?.whyNow || trend?.why_now || '').trim();
+  if (why.length > 0) return 'event';
+  const platforms = trend?.clusterMetrics?.uniquePlatforms
+    ?? trend?.metrics?.uniquePlatforms
+    ?? 0;
+  const clusterSize = trend?.clusterMetrics?.itemCount
+    ?? (Array.isArray(trend?.items) ? trend.items.length : 0);
+  if (platforms >= 2 || clusterSize >= 3) return 'trend';
+  return 'post';
+}
 // [MARKET_STAGE] optional import — remove this line + applyStage2MarketPatch call to disable
 import { applyStage2MarketPatch } from './market-stage.js';
 
@@ -633,6 +654,16 @@ class Scorer {
         // Trigger event — only populated when the model found an explicit cause.
         // We trim and cap to keep it one line; empty string means "no trigger".
         whyNow:           (a.whyNow || '').trim().slice(0, 280),
+        // alertType: trust AI when it returned a valid enum, otherwise derive
+        // deterministically from whyNow + cluster signals. We pass a probe
+        // object that includes the freshly-trimmed whyNow so derivation sees
+        // the post-cap value (not a.whyNow which may differ).
+        alertType: normalizeAlertType(a.alertType) || deriveAlertType({
+          whyNow: (a.whyNow || '').trim(),
+          clusterMetrics: trend.clusterMetrics,
+          metrics: trend.metrics,
+          items: trend.items,
+        }),
         // Normalize so legacy descriptive forms ("flash (hours)") that may
         // appear from non-strict providers get folded back to bare keywords.
         predictedLifespan:normalizeLifespan(a.predictedLifespan) || 'unknown',
@@ -994,6 +1025,7 @@ class Scorer {
       aiExplanation:    'AI scoring disabled — heuristic score applied',
       predictedLifespan:'unknown',
       isGenuinelyInteresting: true,
+      alertType:        deriveAlertType(trend),
     };
   }
 
@@ -1023,6 +1055,7 @@ class Scorer {
         aiExplanation:    reason,
         predictedLifespan:'unknown',
         isGenuinelyInteresting: true,
+        alertType:        deriveAlertType(t),
       };
     });
   }
