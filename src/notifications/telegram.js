@@ -8,6 +8,7 @@ import { getTranslations } from '../i18n/index.js';
 import { normalizeLifespan } from '../analysis/lifespan.js';
 import TwitterChecker from '../collectors/twitter-check.js';
 import { UserRateLimiter } from '../utils/rate-limiter.js';
+import { runManualAnalysis, peekManualAnalysisCache } from '../analysis/manual-analysis.js';
 
 /**
  * Build a deep-link to grok.com with a pre-filled prompt asking Grok to
@@ -33,13 +34,16 @@ function buildGrokUrl(trend, lang = 'en') {
  * Each user has their own language, sources, threshold, and subscription.
  */
 class TelegramNotifier {
-  constructor(config, logger, db, solanaMonitor = null, triggerFinder = null) {
+  constructor(config, logger, db, solanaMonitor = null, triggerFinder = null, scorer = null) {
     this.logger = logger;
     this.botToken = config.telegram.botToken;
     this.db = db;
     this.config = config;
     this.solanaMonitor = solanaMonitor; // injected after creation, or passed directly
     this.triggerFinder = triggerFinder; // optional — pro-only trigger search via Grok reasoning
+    // Scorer for the pro/admin manual-analysis URL handler. Without it the
+    // /analyze command and bare-URL handler reply with "feature unavailable".
+    this.scorer = scorer;
     this.twitterChecker = new TwitterChecker(config, logger, db);
     this.enabled = !!this.botToken;
     // Rate limiter: max 30 interactions per user per minute
@@ -47,6 +51,9 @@ class TelegramNotifier {
     // State: users awaiting a text input (e.g. custom threshold)
     // Map<chatId, { type: 'threshold' }>
     this._awaitingInput = new Map();
+    // Manual analysis cooldown — Map<chatId, number[]> of timestamps within
+    // the rolling window. Reset on restart (in-memory only).
+    this._manualAnalysisHits = new Map();
 
     if (!this.botToken) {
       this.logger.warn('Telegram bot token not set — Telegram alerts disabled');
@@ -78,9 +85,10 @@ class TelegramNotifier {
   _registerBotCommands() {
     // English (default for all languages)
     const enCommands = [
-      { command: 'start', description: 'Start the bot / register' },
-      { command: 'menu',  description: 'Open settings menu' },
-      { command: 'top',   description: 'Top-10 memecoin narratives (24h)' },
+      { command: 'start',   description: 'Start the bot / register' },
+      { command: 'menu',    description: 'Open settings menu' },
+      { command: 'top',     description: 'Top-10 memecoin narratives (24h)' },
+      { command: 'analyze', description: 'Analyze a URL (Pro / Admin)' },
     ];
 
     // Keep command descriptions in English for all locales
@@ -154,6 +162,56 @@ class TelegramNotifier {
         parse_mode: 'HTML',
         reply_markup: this._mainMenuKeyboard(user),
       });
+    });
+
+    // /analyze <url> — pro/admin only. Resolves the URL, runs the full
+    // scorer pipeline, and replies with a regular alert message (same
+    // rendering as autonomous alerts). Bare URLs from the same plans are
+    // also auto-detected by the message handler below.
+    this.bot.onText(/^\/analyze(?:@\w+)?(?:\s+(.+))?/i, async (msg, match) => {
+      const chatId = String(msg.chat.id);
+      const arg = (match?.[1] || '').trim();
+      const user = this.db.getOrCreateUser(msg.chat.id, msg.from?.username);
+      if (!arg) {
+        const text = user.language === 'ru'
+          ? 'Использование: <code>/analyze &lt;url&gt;</code>\n\nПример: <code>/analyze https://twitter.com/user/status/123</code>'
+          : 'Usage: <code>/analyze &lt;url&gt;</code>\n\nExample: <code>/analyze https://twitter.com/user/status/123</code>';
+        return this.bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
+      }
+      // Pull the first http(s) URL from the argument string. Tolerates a
+      // trailing comment like "/analyze https://x.com/... — посмотри это".
+      const m = arg.match(/(https?:\/\/\S+)/i);
+      if (!m) {
+        const txt = user.language === 'ru' ? '⚠ Не нашёл URL в сообщении' : '⚠ No URL found in message';
+        return this.bot.sendMessage(chatId, txt);
+      }
+      this._runManualAnalysisForUser(msg, user, m[1]).catch(e =>
+        this.logger.warn(`[Manual TG /analyze] ${e.message}`)
+      );
+    });
+
+    // Bare-URL handler — pro/admin can paste a URL with no command prefix
+    // and we run analysis automatically. Other plans are silently ignored
+    // (we don't want to nag every free user who shares a link in chat).
+    // Registered BEFORE the wizard handler so wizard inputs that happen to
+    // contain a URL still go through their state machine first.
+    this.bot.on('message', async (msg) => {
+      const chatId = String(msg.chat.id);
+      const text = msg.text || '';
+      if (!text || text.startsWith('/')) return;
+      // If the user is in a multi-step wizard (threshold input, feedback
+      // reason, etc.), the wizard handler claims this message — skip URL
+      // detection so we don't double-handle.
+      if (this._awaitingInput.has(chatId)) return;
+      const m = text.match(/(https?:\/\/\S+)/i);
+      if (!m) return;
+      const user = this.db.getOrCreateUser(msg.chat.id, msg.from?.username);
+      // Plan gate — silently ignore for free/test (no spam). Pro/admin get
+      // automatic analysis on bare URL paste; that's the whole feature.
+      if (user.plan_name !== 'pro' && user.plan_name !== 'admin') return;
+      this._runManualAnalysisForUser(msg, user, m[1]).catch(e =>
+        this.logger.warn(`[Manual TG bare-url] ${e.message}`)
+      );
     });
 
     // Free-text handler — processes awaited inputs (e.g. custom threshold)
@@ -295,6 +353,33 @@ class TelegramNotifier {
           const displayName = t.sourceNames[sourceName] || sourceName;
           await this.bot.answerCallbackQuery(query.id, { text: t.sourceToggled(displayName, isEnabled) });
           await this._editMessage(chatId, query.message.message_id, t.sourcesTitle, this._sourcesKeyboard(user));
+        }
+
+        // ── Alert types ───────────────────────
+        else if (data === 'alert_types') {
+          await this._editMessage(chatId, query.message.message_id, t.alertTypesTitle, this._alertTypesKeyboard(user));
+          await this.bot.answerCallbackQuery(query.id);
+        }
+        else if (data.startsWith('toggle_alert_type:')) {
+          const key = data.split(':')[1];
+          if (!['event', 'trend', 'post'].includes(key)) {
+            await this.bot.answerCallbackQuery(query.id);
+            return;
+          }
+          const current = this.db.getUserAlertTypes(user.telegram_chat_id);
+          // Toggle: if present → remove; if absent → add. Empty resulting
+          // array means "all" by handler contract — never silently mute.
+          const next = current.includes(key)
+            ? current.filter(k => k !== key)
+            : [...current, key];
+          this.db.setUserAlertTypes(user.telegram_chat_id, next);
+          const isEnabled = next.includes(key);
+          const labelKey = key === 'event' ? 'alertTypeNameEvent'
+                          : key === 'trend' ? 'alertTypeNameTrend'
+                          : 'alertTypeNamePost';
+          const label = t[labelKey] || key;
+          await this.bot.answerCallbackQuery(query.id, { text: t.alertTypeToggled(label, isEnabled).replace(/<[^>]*>/g, '') });
+          await this._editMessage(chatId, query.message.message_id, t.alertTypesTitle, this._alertTypesKeyboard(user));
         }
 
         // ── Language ──────────────────────────
@@ -574,11 +659,37 @@ class TelegramNotifier {
     return {
       inline_keyboard: [
         [{ text: t.btnSources, callback_data: 'sources' }, { text: t.btnThreshold, callback_data: 'threshold' }],
-        [{ text: t.btnLanguage, callback_data: 'language' }, { text: t.btnSubscription, callback_data: 'subscription' }],
+        [{ text: t.btnAlertTypes, callback_data: 'alert_types' }, { text: t.btnLanguage, callback_data: 'language' }],
+        [{ text: t.btnSubscription, callback_data: 'subscription' }],
         [{ text: t.btnTop, callback_data: 'top' }],
         [{ text: t.btnStartStop(user.status === 'paused'), callback_data: 'toggle_pause' }],
         [{ text: t.btnAskQuestion || '💬 Ask a question', url: 'https://t.me/support-bot' }],
         [{ text: t.btnClose, callback_data: 'close' }],
+      ]
+    };
+  }
+
+  /**
+   * Inline keyboard for the alert-types submenu. Three rows, one per type,
+   * showing ✅ when subscribed and ❌ when muted. Toggling a single button
+   * rewrites the user's CSV — empty = treated as "all" by the alert gate
+   * (handler in src/index.js).
+   */
+  _alertTypesKeyboard(user) {
+    const t = getTranslations(user.language);
+    const types = this.db.getUserAlertTypes(user.telegram_chat_id);
+    const has = (k) => types.includes(k);
+    const row = (key, label, emoji) => {
+      const enabled = has(key);
+      const icon = enabled ? '\u{2705}' : '\u{274C}';
+      return [{ text: `${icon} ${emoji} ${label}`, callback_data: `toggle_alert_type:${key}` }];
+    };
+    return {
+      inline_keyboard: [
+        row('event', t.alertTypeNameEvent, '\u{1F4F0}'),
+        row('trend', t.alertTypeNameTrend, '\u{1F4C8}'),
+        row('post',  t.alertTypeNamePost,  '\u{1F680}'),
+        [{ text: t.btnBack, callback_data: 'menu' }],
       ]
     };
   }
@@ -908,6 +1019,101 @@ class TelegramNotifier {
       parse_mode: 'HTML',
       disable_web_page_preview: true,
     });
+  }
+
+  // ── Manual analysis (pro/admin) ───────────────────────────────────────────
+  //
+  // Triggered by /analyze <url> or bare URL paste from a pro/admin user.
+  // Resolves the URL → runs scorer → replies with the regular alert format
+  // via sendAlertToUser. Result is NOT saved to the trends table — analyses
+  // are private to the requesting user's chat. Caller is expected to have
+  // already verified the user's plan; this method enforces it again as a
+  // defence in depth.
+  async _runManualAnalysisForUser(msg, user, url) {
+    const chatId = String(msg.chat.id);
+
+    if (user.plan_name !== 'pro' && user.plan_name !== 'admin') {
+      const txt = user.language === 'ru'
+        ? '🔒 Ручной анализ доступен только Pro и Admin. Открой /menu чтобы апгрейднуть план.'
+        : '🔒 Manual analysis is a Pro / Admin feature. Use /menu to upgrade.';
+      return this.bot.sendMessage(chatId, txt).catch(() => {});
+    }
+    if (!this.scorer) {
+      return this.bot.sendMessage(chatId, '⚠ Manual analysis is not configured on this server.').catch(() => {});
+    }
+
+    // Rate limit only when scorer will actually run. Cache hits are free
+    // and instant — letting them bypass means a pro user can re-paste a
+    // URL someone else just analysed without burning their daily quota.
+    const cacheAge = peekManualAnalysisCache(url);
+    if (cacheAge === null && user.plan_name !== 'admin') {
+      const now = Date.now();
+      const dayMs = 24 * 60 * 60 * 1000;
+      const cooldownMs = 30 * 1000;
+      const dailyCap = 20;
+      const hits = (this._manualAnalysisHits.get(chatId) || []).filter(t => now - t < dayMs);
+      if (hits.length && now - hits[hits.length - 1] < cooldownMs) {
+        const sec = Math.max(1, Math.ceil((cooldownMs - (now - hits[hits.length - 1])) / 1000));
+        const txt = user.language === 'ru'
+          ? `⏳ Подожди ${sec}с — анализ занимает 10-30 секунд.`
+          : `⏳ Wait ${sec}s — each analysis takes 10-30 seconds.`;
+        return this.bot.sendMessage(chatId, txt).catch(() => {});
+      }
+      if (hits.length >= dailyCap) {
+        const txt = user.language === 'ru'
+          ? `⛔ Дневной лимит исчерпан (${dailyCap}/24ч).`
+          : `⛔ Daily limit reached (${dailyCap} / 24h).`;
+        return this.bot.sendMessage(chatId, txt).catch(() => {});
+      }
+      hits.push(now);
+      this._manualAnalysisHits.set(chatId, hits);
+    }
+
+    // Acknowledge — analysis can take 10-30s, the user needs to know we
+    // received the request. Skip it on cache hits (instant) and delete
+    // this placeholder once the real result is ready.
+    let waitMsgId = null;
+    if (cacheAge === null) {
+      try {
+        const ackText = user.language === 'ru'
+          ? '⚙️ Анализирую... (Stage 1 + Stage 2 Grok, 10-30 сек)'
+          : '⚙️ Analyzing... (Stage 1 + Stage 2 Grok, 10-30 sec)';
+        const wm = await this.bot.sendMessage(chatId, ackText);
+        waitMsgId = wm?.message_id;
+      } catch { /* ack is cosmetic */ }
+    }
+
+    try {
+      const result = await runManualAnalysis({
+        scorer: this.scorer,
+        db: this.db,
+        url,
+        save: false,                          // private — don't pollute global feed
+        logger: this.logger,
+        actorId: chatId,
+      });
+      // Tear down the "analyzing..." placeholder before the alert lands so
+      // there's no visual stutter.
+      if (waitMsgId) {
+        try { await this.bot.deleteMessage(chatId, waitMsgId); } catch {}
+      }
+      // Send the result via the standard alert renderer — same media
+      // handling, same buttons, same caption logic. We don't record this
+      // as a notification (no DB row) and don't increment alert_count —
+      // it's a private analysis, not a broadcast.
+      const sent = await this.sendAlertToUser(result.trend, user);
+      if (!sent) {
+        const txt = user.language === 'ru' ? '⚠ Не удалось отправить результат.' : '⚠ Failed to deliver the result.';
+        await this.bot.sendMessage(chatId, txt).catch(() => {});
+      }
+    } catch (err) {
+      if (waitMsgId) {
+        try { await this.bot.deleteMessage(chatId, waitMsgId); } catch {}
+      }
+      this.logger.warn(`[Manual TG] failed for ${chatId}: ${err.message}`);
+      const head = user.language === 'ru' ? '⚠ Ошибка анализа: ' : '⚠ Analysis failed: ';
+      await this.bot.sendMessage(chatId, head + (err.message || 'unknown')).catch(() => {});
+    }
   }
 
   // ── Send alert to a specific user ─────────────────────────────────────────

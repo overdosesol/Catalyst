@@ -66,6 +66,18 @@ class TrendDatabase {
     // (we instruct the model to NOT guess). Rendered separately in UI/alerts.
     addIfMissing('trends', 'why_now', "TEXT NOT NULL DEFAULT ''");
 
+    // Alert type — orthogonal to category. One of 'event'|'trend'|'post' (see
+    // src/analysis/prompts.js → ALERT_TYPE_VALUES). Filled by Stage 1 AI;
+    // heuristic/fallback paths derive it deterministically. Legacy rows have
+    // NULL — readers treat NULL as "any type" (no filtering) for back-compat.
+    addIfMissing('trends', 'alert_type', 'TEXT');
+
+    // Per-user alert-type subscription filter — CSV of allowed types. Default
+    // all 3 included (back-compat: existing users keep getting all alerts).
+    // Empty string is treated by readers as "all" (silent allow if user
+    // disabled every checkbox — beats silently muting them).
+    addIfMissing('users', 'alert_types_filter', "TEXT NOT NULL DEFAULT 'event,trend,post'");
+
     // ── On-demand trigger search (replaces legacy whyItWillPump) ─────────────
     // Filled only when a user clicks the "Search Trigger" button (TG or dashboard).
     // First click triggers a Grok reasoning + x_search call; result is shared
@@ -391,9 +403,44 @@ class TrendDatabase {
    * Update user setting
    */
   updateUser(userId, field, value) {
-    const allowed = ['language', 'alert_threshold', 'disabled_sources', 'status', 'plan_id', 'subscription_expires_at', 'alert_count_today'];
+    const allowed = ['language', 'alert_threshold', 'disabled_sources', 'status', 'plan_id', 'subscription_expires_at', 'alert_count_today', 'alert_types_filter'];
     if (!allowed.includes(field)) throw new Error(`Cannot update field: ${field}`);
     this.db.prepare(`UPDATE users SET ${field} = ? WHERE id = ?`).run(value, userId);
+  }
+
+  /**
+   * Per-user alert-type subscription helpers.
+   *
+   * Storage: CSV in users.alert_types_filter (e.g. 'event,trend,post').
+   * Empty string is treated as "all" by callers — never silently mute a user
+   * who happened to uncheck every box.
+   *
+   * Validation: only canonical values from ALERT_TYPE_VALUES land in DB.
+   * Unknown tokens are dropped silently.
+   */
+  getUserAlertTypes(chatId) {
+    const row = this.db.prepare(
+      `SELECT alert_types_filter FROM users WHERE telegram_chat_id = ?`
+    ).get(String(chatId));
+    if (!row) return ['event', 'trend', 'post']; // unknown user → all
+    const raw = String(row.alert_types_filter || '').trim();
+    if (!raw) return ['event', 'trend', 'post'];
+    const valid = new Set(['event', 'trend', 'post']);
+    const arr = raw.split(',').map(s => s.trim().toLowerCase()).filter(s => valid.has(s));
+    return arr.length > 0 ? arr : ['event', 'trend', 'post'];
+  }
+
+  setUserAlertTypes(chatId, types) {
+    const valid = new Set(['event', 'trend', 'post']);
+    const cleaned = (Array.isArray(types) ? types : [])
+      .map(s => String(s || '').trim().toLowerCase())
+      .filter(s => valid.has(s));
+    // Empty array → store empty string → readers interpret as "all".
+    const csv = cleaned.length === 0 ? '' : Array.from(new Set(cleaned)).join(',');
+    this.db.prepare(
+      `UPDATE users SET alert_types_filter = ? WHERE telegram_chat_id = ?`
+    ).run(csv, String(chatId));
+    return csv;
   }
 
   /**
@@ -808,6 +855,9 @@ class TrendDatabase {
       junkReasons:    trend.clusterMetrics?.junkReasons ?? [],                           // [JUNK_FILTER]
       alertScore:     trend.alertScore      ?? null,
       alertBreakdown: trend.alertBreakdown  ?? null,
+      // alertType also lives in raw_metrics so _hydrateTrendFromDb can read
+      // it from the legacy/raw blob path (admin manual-submit hydration).
+      alertType:      trend.alertType       ?? null,
       storyScore:     trend.xSearchData?.storyScore ?? 0,
       storyHook:      trend.xSearchData?.storyHook  ?? '',
       // PreStage enrichment — persisted so re-scoring or admin SubmitPage
@@ -833,7 +883,7 @@ class TrendDatabase {
         UPDATE trends SET
           score = ?, category = ?, sentiment = ?, ai_explanation = ?,
           predicted_lifespan = ?, raw_metrics = ?, pipeline_status = ?,
-          why_now = ?,
+          why_now = ?, alert_type = ?,
           last_seen_at = CURRENT_TIMESTAMP, times_seen = times_seen + 1
         WHERE id = ?
       `).run(
@@ -845,6 +895,7 @@ class TrendDatabase {
         rawMetrics,
         pipelineStatus,
         trend.whyNow || '',
+        trend.alertType || null,
         existingId
       );
       return existingId;
@@ -852,8 +903,8 @@ class TrendDatabase {
 
     // New trend — INSERT
     const result = this.db.prepare(`
-      INSERT INTO trends (external_id, source, title, original_title, description, url, score, category, sentiment, ai_explanation, predicted_lifespan, raw_metrics, pipeline_status, why_now)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO trends (external_id, source, title, original_title, description, url, score, category, sentiment, ai_explanation, predicted_lifespan, raw_metrics, pipeline_status, why_now, alert_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       trend.externalId || null,
       trend.source,
@@ -868,7 +919,8 @@ class TrendDatabase {
       trend.predictedLifespan || null,
       rawMetrics,
       pipelineStatus,
-      trend.whyNow || ''
+      trend.whyNow || '',
+      trend.alertType || null
     );
 
     return result.lastInsertRowid;
@@ -891,6 +943,49 @@ class TrendDatabase {
   getRecentTrends(hours = 24) {
     const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
     return this.db.prepare(`SELECT * FROM trends WHERE first_seen_at > ? ORDER BY score DESC`).all(cutoff);
+  }
+
+  /**
+   * Trends that came in via the admin's "Ручной анализ" tab.
+   *
+   * The flag lives inside `raw_metrics` JSON (see _submitNarrative in admin —
+   * `metrics.manualSubmitted = true`). We use a JSON-text LIKE filter rather
+   * than parsing every row server-side; the marker string is unique enough
+   * (no other field is named manualSubmitted) and SQLite handles this in
+   * <1ms even with thousands of rows because the count is small.
+   *
+   * Returns rows ordered newest-first. Limit is clamped to [1, 200].
+   */
+  getManualTrends(limit = 50) {
+    const cap = Math.max(1, Math.min(200, limit | 0 || 50));
+    return this.db.prepare(`
+      SELECT * FROM trends
+      WHERE raw_metrics LIKE '%"manualSubmitted":true%'
+      ORDER BY first_seen_at DESC
+      LIMIT ?
+    `).all(cap);
+  }
+
+  /**
+   * Strip the manualSubmitted marker from a trend's raw_metrics so it
+   * disappears from the SubmitPage history. We deliberately keep the row in
+   * the DB (it's still a valid trend, may have been alerted on) — only the
+   * marker is cleared.
+   *
+   * Returns true if the row existed and the flag was actually present.
+   */
+  unsetManualSubmitted(trendId) {
+    if (!trendId) return false;
+    const row = this.db.prepare(`SELECT raw_metrics FROM trends WHERE id = ?`).get(trendId);
+    if (!row) return false;
+    let metrics = {};
+    try { metrics = JSON.parse(row.raw_metrics || '{}'); } catch { return false; }
+    if (!metrics.manualSubmitted) return false;
+    delete metrics.manualSubmitted;
+    delete metrics.manualSubmittedAt;
+    this.db.prepare(`UPDATE trends SET raw_metrics = ? WHERE id = ?`)
+      .run(JSON.stringify(metrics), trendId);
+    return true;
   }
 
   cleanup(daysOld = 30) {

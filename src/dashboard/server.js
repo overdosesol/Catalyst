@@ -14,6 +14,7 @@
 import http from 'http';
 import path from 'path';
 import { LIFESPAN_VALUES, normalizeLifespan } from '../analysis/lifespan.js';
+import { runManualAnalysis, peekManualAnalysisCache } from '../analysis/manual-analysis.js';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { timingSafeEqual, createHash } from 'crypto';
@@ -98,7 +99,7 @@ function html(res, content) {
 // ─── Dashboard class ──────────────────────────────────────────────────────────
 
 class DashboardServer {
-  constructor(config, logger, db, appState, scanFn, telegram = null, triggerFinder = null) {
+  constructor(config, logger, db, appState, scanFn, telegram = null, triggerFinder = null, extras = {}) {
     this.config        = config.dashboard;
     this.fullConfig    = config;   // keep reference for telegram.botUsername, etc.
     this.logger        = logger;
@@ -107,10 +108,18 @@ class DashboardServer {
     this.scanFn        = scanFn;   // callback to trigger manual scan
     this.telegram      = telegram; // TelegramNotifier for bot-username lookup
     this.triggerFinder = triggerFinder; // optional — pro-only Grok reasoning trigger search
+    // Optional injected dependencies (8th arg is options object — mirrors admin/server.js).
+    // Scorer powers the pro/admin manual-analysis endpoint; without it the
+    // endpoint replies 503 instead of crashing.
+    this.scorer        = extras.scorer || null;
     this.server        = null;
     this.started       = Date.now();
     this.sseClients    = new Set();  // active Server-Sent Event subscribers
     this._sseKeepAlive = null;
+    // In-memory rate-limit ring for /api/manual-analysis. Map<userId, number[]>
+    // — array of timestamps within the rolling window. Reset on restart, which
+    // is fine for a soft cap (only matters for sustained abuse).
+    this._manualAnalysisHits = new Map();
   }
 
   /** Broadcast an event to all connected SSE clients. */
@@ -233,9 +242,11 @@ class DashboardServer {
       if (path === '/api/settings'  && method === 'GET')  return this._handleSettingsGet(req, res);
       if (path === '/api/settings'  && method === 'POST') return this._handleSettingsPost(req, res);
       if (path === '/api/user/threshold'  && method === 'POST') return this._handleUserThresholdPost(req, res);
+      if (path === '/api/user/alert-types' && method === 'POST') return this._handleUserAlertTypesPost(req, res);
       if (path.match(/^\/api\/collectors\/[\w_]+\/toggle$/) && method === 'POST') return this._handleCollectorToggle(req, res, path);
       if (path.match(/^\/api\/trends\/\d+\/feedback$/) && method === 'POST') return this._handleTrendFeedback(req, res, path);
       if (path.match(/^\/api\/trends\/\d+\/trigger$/)  && method === 'POST') return this._handleTrendTrigger(req, res, path);
+      if (path === '/api/manual-analysis' && method === 'POST') return this._handleManualAnalysis(req, res);
 
       // SPA fallback — serve dashboard HTML for all non-API routes
       if (!path.startsWith('/api/')) return html(res, this._buildSPA());
@@ -321,6 +332,11 @@ class DashboardServer {
       plan:       user.plan_name || 'free',
       status:     user.status || 'active',
       threshold:  user.alert_threshold ?? null,
+      // Subscription filter for the alert-type axis — array of canonical
+      // values ('event'|'trend'|'post'). Empty/legacy → all 3 (handled by
+      // db.getUserAlertTypes). The settings page uses this to render
+      // checkboxes; client never sends raw CSV back, only the array.
+      alertTypes: this.db.getUserAlertTypes(user.telegram_chat_id || user.chat_id || ''),
       subscriptionExpiresAt: user.subscription_expires_at || null,
       // Avatar — present iff we've successfully fetched a profile photo from TG.
       // Cache-busting key: fileUniqueId changes when user updates their photo.
@@ -631,6 +647,27 @@ class DashboardServer {
     return json(res, 200, { ok: true, threshold: val });
   }
 
+  /**
+   * POST /api/user/alert-types — body { types: ['event','trend','post'] }
+   * Persists the user's per-type subscription as a CSV in the users table.
+   * Empty array is treated by the alert gate as "all" (matching db helper).
+   * Reply echoes the canonical post-validation array so the client can
+   * reconcile UI state without re-fetching /me.
+   */
+  async _handleUserAlertTypesPost(req, res) {
+    const user = req.user;
+    if (!user) return json(res, 401, { error: 'Not authenticated' });
+    let body;
+    try { body = await parseBody(req); }
+    catch { return json(res, 400, { error: 'Invalid JSON' }); }
+    const arr = Array.isArray(body?.types) ? body.types : null;
+    if (arr === null) return json(res, 400, { error: 'types must be an array' });
+    this.db.setUserAlertTypes(user.telegram_chat_id, arr);
+    const saved = this.db.getUserAlertTypes(user.telegram_chat_id);
+    this.logger.info(`[Dashboard] user ${user.telegram_chat_id} alert_types → ${saved.join(',')}`);
+    return json(res, 200, { ok: true, alertTypes: saved });
+  }
+
   _handleCollectorToggle(req, res, path) {
     const name = path.split('/')[3]; // /api/collectors/:name/toggle
     const disabled = this.appState.disabledCollectors;
@@ -812,6 +849,132 @@ class DashboardServer {
     }
   }
 
+  /**
+   * POST /api/manual-analysis — pro/admin only.
+   *
+   * Body: { url: string }
+   * Response:
+   *   200 { ok, elapsedMs, pipeline, trend: <_formatTrend-shaped> }
+   *   400 { error }
+   *   403 { error, reason: 'plan'|'cooldown'|'daily', minLeft? }
+   *   503 { error, reason: 'disabled' }
+   *
+   * Does NOT save the trend to the global feed — analyses are private to the
+   * user's session. Rate-limited per user (admin bypass): 30s between calls
+   * and max 20 / 24h. Stage 2 deep-dive can cost ~5¢, so unlimited access
+   * is a footgun even for paying customers.
+   */
+  async _handleManualAnalysis(req, res) {
+    if (!this.scorer) {
+      return json(res, 503, { error: 'Manual analysis unavailable on this server', reason: 'disabled' });
+    }
+    const userId = String(req.user?.telegram_chat_id || '').trim();
+    if (!userId) return json(res, 401, { error: 'Authenticated user has no chat_id' });
+    const planName = req.user?.plan_name || 'free';
+    if (planName !== 'pro' && planName !== 'admin') {
+      return json(res, 403, { error: 'Manual analysis is a Pro-plan feature', reason: 'plan' });
+    }
+
+    let body;
+    try { body = await parseBody(req); }
+    catch (e) { return json(res, 400, { error: e.message }); }
+    const rawUrl = String(body?.url || '').trim();
+    if (!rawUrl) return json(res, 400, { error: 'url is required' });
+    if (!/^https?:\/\//i.test(rawUrl)) return json(res, 400, { error: 'URL must start with http(s)://' });
+
+    // Rate limit only when the analysis will actually run the scorer. Cache
+    // hits cost zero and arrive instantly, so we let them bypass — that
+    // keeps a pro user from burning their daily cap on duplicate URL clicks.
+    const cacheAge = peekManualAnalysisCache(rawUrl);
+    if (cacheAge === null && planName !== 'admin') {
+      const now = Date.now();
+      const dayMs = 24 * 60 * 60 * 1000;
+      const cooldownMs = 30 * 1000;
+      const dailyCap = 20;
+      const hits = (this._manualAnalysisHits.get(userId) || []).filter(t => now - t < dayMs);
+      if (hits.length && now - hits[hits.length - 1] < cooldownMs) {
+        const secLeft = Math.max(1, Math.ceil((cooldownMs - (now - hits[hits.length - 1])) / 1000));
+        return json(res, 403, { error: 'Cooldown active — analysis can take 10-30s', reason: 'cooldown', secLeft });
+      }
+      if (hits.length >= dailyCap) {
+        return json(res, 403, { error: 'Daily limit reached (' + dailyCap + ' / 24h)', reason: 'daily' });
+      }
+      hits.push(now);
+      this._manualAnalysisHits.set(userId, hits);
+    }
+
+    try {
+      const result = await runManualAnalysis({
+        scorer: this.scorer,
+        db: this.db,
+        url: rawUrl,
+        save: false,                          // private to caller, don't pollute global feed
+        logger: this.logger,
+        actorId: userId,
+      });
+      // Adapt scorer output to the dashboard's trend-card shape so TrendModal
+      // can render it the same way as a feed item. _formatTrend reads a flat
+      // DB row — for a synthetic (in-memory) trend we hand-roll the same fields.
+      const t = result.trend;
+      const m = t.metrics || {};
+      const synthId = 'manual-' + Date.now();
+      const shaped = {
+        id:              synthId,
+        title:           t.title,
+        originalTitle:   t.originalTitle || t.title,
+        source:          t.source,
+        category:        t.category,
+        sentiment:       t.sentiment,
+        score:           t.score,
+        memePotential:   t.memePotential || 0,
+        adoptionScore:   t.adoptionScore  ?? t.memePotential ?? 0,
+        emergenceScore:  t.emergenceScore ?? 0,
+        storyScore:      t.xSearchData?.storyScore ?? t.storyScore ?? 0,
+        storyHook:       t.xSearchData?.storyHook ?? t.storyHook ?? '',
+        narrativePhase:  t.narrativePhase ?? null,
+        rankScore:       t.rankScore      ?? null,
+        alertScore:      t.alertScore     ?? null,
+        alertBreakdown:  t.alertBreakdown ?? null,
+        marketStage:     t.marketStage    ?? null,
+        junkPenalty:     t.junkPenalty    ?? 0,
+        junkReasons:     t.junkReasons    ?? [],
+        velocity:        m.velocity       ?? 0,
+        uniquePlatforms: m.uniquePlatforms ?? 1,
+        manualSubmitted: true,
+        aiExplanation:   t.aiExplanation || '',
+        whyNow:          t.whyNow || '',
+        trigger:         null,
+        predictedLifespan: normalizeLifespan(t.predictedLifespan),
+        url:             t.url,
+        tgMessageUrl:    null,
+        userFeedback:    0,
+        firstSeen:       new Date().toISOString(),
+        lastSeen:        new Date().toISOString(),
+        timesSeen:       1,
+        imageUrl:        m.imageUrls?.[0] || m.thumbnailUrl || null,
+        imageUrls:       Array.isArray(m.imageUrls) ? m.imageUrls.slice(0, 10) : [],
+        videoUrl:        m.videoUrl || null,
+        feedback:        { likes: 0, dislikes: 0, score: 0, userVote: 0, userReason: '' },
+        // Manual-analysis-only extras (the SPA can show these in a debug panel)
+        xSearchData:     t.xSearchData || null,
+      };
+      return json(res, 200, {
+        ok: true,
+        elapsedMs: result.elapsedMs,
+        pipeline: result.pipeline,
+        // fromCache + cacheAgeMs let the UI show "from cache, X min ago" so
+        // the user understands why a result came back instantly. Cache TTL
+        // is 1h; serves any other pro/admin who already analysed this URL.
+        fromCache: !!result.fromCache,
+        cacheAgeMs: result.cacheAgeMs || 0,
+        trend: shaped,
+      });
+    } catch (err) {
+      this.logger.error(`[ManualAnalysis] failed for user ${userId}: ${err.message}`);
+      return json(res, 500, { error: err.message });
+    }
+  }
+
   _handleStream(req, res) {
     res.writeHead(200, {
       'Content-Type':        'text/event-stream',
@@ -903,6 +1066,12 @@ class DashboardServer {
       originalTitle:   row.original_title || row.title,
       source:          row.source,
       category:        row.category,
+      // Alert type — orthogonal to category. NULL means legacy/pre-rollout
+      // row; the SPA renders no chip in that case (treats as wildcard).
+      // Prefer the dedicated column; fall back to the raw_metrics mirror so
+      // freshly scored manual submissions that haven't been hydrated yet
+      // still surface the type.
+      alertType:       row.alert_type || metrics.alertType || null,
       sentiment:       row.sentiment,
       score:           row.score,
       memePotential:   metrics.memePotential || 0,
@@ -2228,6 +2397,15 @@ class DashboardServer {
     .cat-boring      { background: rgba(255,255,255,.04); color: var(--dim); border: 1px solid var(--border); }
     .cat-other       { background: rgba(255,255,255,.04); color: var(--dim); border: 1px solid var(--border); }
     .badge-manual    { background: rgba(180,140,255,.12); color: #b48cff; border: 1px solid rgba(180,140,255,.3); }
+    /* Alert-type chips — orthogonal to category. event = warm red-orange,
+       trend = green (movement), post = blue (single signal). */
+    .badge-atype-event { background: rgba(255,107,107,.12); color: #ff8a65; border: 1px solid rgba(255,107,107,.3); font-weight: 600; }
+    .badge-atype-trend { background: rgba(46,213,115,.12); color: #2ed573; border: 1px solid rgba(46,213,115,.3); font-weight: 600; }
+    .badge-atype-post  { background: rgba(116,185,255,.12); color: #74b9ff; border: 1px solid rgba(116,185,255,.3); font-weight: 600; }
+    /* Sidebar chip variants — paint phase-chip same colours when filtering. */
+    .phase-chip.atype-chip-event.active { border-color: rgba(255,107,107,.5); background: rgba(255,107,107,.10); color: #ff8a65; }
+    .phase-chip.atype-chip-trend.active { border-color: rgba(46,213,115,.5);  background: rgba(46,213,115,.10);  color: #2ed573; }
+    .phase-chip.atype-chip-post.active  { border-color: rgba(116,185,255,.5); background: rgba(116,185,255,.10); color: #74b9ff; }
 
     /* ── Source chip ── */
     .source-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--dim); white-space: nowrap; padding: 2px 7px; border-radius: 5px; background: rgba(255,255,255,.04); }
@@ -2312,6 +2490,120 @@ class DashboardServer {
     /* ── Settings panel ── */
     .settings-panel { padding: 20px 24px; max-width: 680px; animation: fadeIn .25s ease; }
     .settings-header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+
+    /* ── Analyze panel (pro/admin manual URL → trend) ── */
+    .analyze-panel { padding: 20px 24px; max-width: 720px; animation: fadeIn .25s ease; }
+    .analyze-intro { color: var(--dim); font-size: 13px; line-height: 1.5; margin-bottom: 18px; }
+    .analyze-form {
+      background: rgba(var(--accent-rgb), .04);
+      border: 1px solid rgba(var(--accent-rgb), .18);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .analyze-label { font-size: 11px; font-weight: 700; color: var(--dim); text-transform: uppercase; letter-spacing: .6px; }
+    .analyze-input {
+      width: 100%;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+    }
+    .analyze-input:focus { border-color: rgba(var(--accent-rgb), .55); }
+    .analyze-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .analyze-hint { font-size: 11px; color: var(--dim); }
+    .analyze-error { font-size: 12px; color: var(--red); }
+    .analyze-empty {
+      text-align: center; padding: 28px 20px;
+      color: var(--dim); font-size: 13px;
+      border: 1px dashed var(--border);
+      border-radius: 12px;
+    }
+    .analyze-result {
+      background: linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,.005));
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 0;
+      overflow: hidden;
+    }
+    .analyze-hero {
+      display: flex; align-items: flex-start; gap: 14px;
+      padding: 16px;
+      background: linear-gradient(135deg, rgba(var(--accent-rgb), .08), rgba(var(--accent-rgb), .02));
+      border-bottom: 1px solid var(--border);
+    }
+    .analyze-thumb {
+      width: 84px; height: 84px;
+      object-fit: cover; border-radius: 12px;
+      border: 1px solid var(--border);
+      flex-shrink: 0; background: var(--bg2);
+    }
+    .analyze-thumb-fb {
+      width: 84px; height: 84px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--bg2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 36px; flex-shrink: 0;
+    }
+    .analyze-hero-body { flex: 1; min-width: 0; }
+    .analyze-hero-title { font-size: 16px; font-weight: 800; color: var(--text); line-height: 1.3; margin-bottom: 4px; word-break: break-word; }
+    .analyze-hero-meta { font-size: 11px; color: var(--dim); margin-bottom: 10px; }
+    .analyze-hero-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .analyze-trace { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 16px 0; }
+    .analyze-pill {
+      display: inline-flex; align-items: center;
+      padding: 3px 10px; border-radius: 999px;
+      font-size: 11px; font-weight: 700;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,.03);
+      color: var(--dim);
+    }
+    .analyze-pill.ok {
+      color: var(--green);
+      border-color: color-mix(in srgb, var(--green) 38%, transparent);
+      background: color-mix(in srgb, var(--green) 12%, transparent);
+    }
+    .analyze-pill.warn {
+      color: var(--yellow);
+      border-color: color-mix(in srgb, var(--yellow) 38%, transparent);
+      background: color-mix(in srgb, var(--yellow) 10%, transparent);
+    }
+    .analyze-scores {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 8px;
+      padding: 12px 16px;
+    }
+    .analyze-score {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .analyze-score-label { font-size: 10px; font-weight: 700; letter-spacing: .4px; color: var(--dim); text-transform: uppercase; margin-bottom: 4px; }
+    .analyze-score-value { font-size: 18px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--blue); font-family: 'JetBrains Mono', Consolas, monospace; }
+    .analyze-score.high .analyze-score-value { color: var(--green); }
+    .analyze-score.mid  .analyze-score-value { color: var(--yellow); }
+    .analyze-score.low  .analyze-score-value { color: #ff7849; }
+    .analyze-explain {
+      padding: 12px 16px 16px;
+      border-top: 1px solid var(--border);
+    }
+    .analyze-explain-label { font-size: 10px; font-weight: 700; letter-spacing: .5px; color: var(--dim); text-transform: uppercase; margin-bottom: 6px; }
+    .analyze-explain-body {
+      font-size: 13px; line-height: 1.55;
+      color: var(--text);
+      padding: 8px 12px;
+      background: rgba(255,255,255,.025);
+      border-left: 3px solid rgba(var(--accent-rgb), .55);
+      border-radius: 0 8px 8px 0;
+    }
 
     /* ── Account hero card ── */
     .account-hero {
@@ -2520,6 +2812,25 @@ class DashboardServer {
       transition: transform .15s ease;
     }
     .pref-toggle.on .pref-toggle-knob { transform: translateX(20px); }
+
+    /* ── Alert-type toggle group (settings card) ── */
+    .atype-toggle-group { display: flex; flex-direction: column; gap: 6px; min-width: 280px; }
+    .atype-toggle {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--card2); color: var(--text); cursor: pointer;
+      font-size: 12px; text-align: left; line-height: 1.3;
+      transition: background .12s, border-color .12s;
+    }
+    .atype-toggle:hover { border-color: var(--accent); background: rgba(255,255,255,.04); }
+    .atype-toggle.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .atype-toggle:disabled { opacity: 0.6; cursor: wait; }
+    .atype-toggle-icon { font-size: 14px; line-height: 1; }
+    .atype-toggle-label { flex: 1; }
+    .atype-foot { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; font-size: 11px; }
+    .atype-saved { color: var(--green2, #2ed573); }
+    .atype-err   { color: var(--red2, #ff6b6b); }
+    .atype-hint  { color: var(--dim); font-style: italic; }
 
     /* ── Body preference classes (applied by applyPrefsToDOM) ── */
     body.prefs-no-anim *, body.prefs-no-anim *:before, body.prefs-no-anim *:after {
@@ -3686,6 +3997,22 @@ const I18N = {
     'nav.settings': 'Settings',
     'nav.feed': 'Feed',
     'nav.account': 'Account',
+    'nav.analyze': 'Analyze',
+    'analyze.title': 'Manual analysis',
+    'analyze.intro': 'Paste a Twitter / Reddit / TikTok / og:image URL — we will run it through the full pipeline (Stage 1 + Stage 2 Grok) and show the result. Pro / Admin only.',
+    'analyze.url_label': 'Post URL',
+    'analyze.url_placeholder': 'https://twitter.com/user/status/12345',
+    'analyze.run_btn': 'Analyze',
+    'analyze.running': 'Analyzing...',
+    'analyze.subtitle': 'Usually takes 10-30 seconds',
+    'analyze.locked': 'Manual analysis is a Pro-plan feature.',
+    'analyze.cooldown': 'Cooldown active — please wait {sec}s.',
+    'analyze.daily_cap': 'Daily limit reached (20 / 24h).',
+    'analyze.error_prefix': 'Analysis failed: ',
+    'analyze.open_full': 'Open full view',
+    'analyze.empty': 'Paste a URL above to run analysis.',
+    'analyze.from_cache': 'from cache · {min} min ago',
+    'analyze.fresh_run': 'fresh · {sec}s',
 
     // Time
     'time.just_now': 'just now',
@@ -3758,8 +4085,24 @@ const I18N = {
     // Sidebar
     'sidebar.sources': 'Sources',
     'sidebar.phase': 'Phase',
+    'sidebar.alert_type': 'Type',
     'sidebar.filters': 'Filters',
     'sidebar.manual_only': 'Manual only',
+    'feed.atype.event': 'Event',
+    'feed.atype.trend': 'Trend',
+    'feed.atype.post':  'Post',
+    'feed.atype_chip': (label) => label, // for badge in feed cards
+    'badge.alert_type.event': '📰 EVENT',
+    'badge.alert_type.trend': '📈 TREND',
+    'badge.alert_type.post':  '🚀 POST',
+    'account.alert_types':       'Alert types',
+    'account.alert_types_desc':  'Choose which kinds of alerts to receive (subscription, applies to Telegram + this dashboard).',
+    'account.alert_types_event': '📰 Events — concrete trigger (someone did something specific)',
+    'account.alert_types_trend': '📈 Trends — narrative bubbling across platforms / many posts',
+    'account.alert_types_post':  '🚀 Posts — a single viral post',
+    'account.alert_types_save':  'Save',
+    'account.alert_types_saved': '✓ Saved',
+    'account.alert_types_all_off_hint': 'All off = receive all (we never silently mute you).',
     'sidebar.show_all': 'Show all',
     'sidebar.reset': 'Reset',
     'sidebar.window': '⏱ Window',
@@ -3969,6 +4312,22 @@ const I18N = {
     'nav.settings': 'Настройки',
     'nav.feed': 'Фид',
     'nav.account': 'Аккаунт',
+    'nav.analyze': 'Анализ',
+    'analyze.title': 'Ручной анализ',
+    'analyze.intro': 'Закинь URL поста (Twitter / Reddit / TikTok / любой сайт с og:image) — прогоним через полный пайплайн (Stage 1 + Stage 2 Grok). Доступно только Pro/Admin.',
+    'analyze.url_label': 'URL поста',
+    'analyze.url_placeholder': 'https://twitter.com/user/status/12345',
+    'analyze.run_btn': 'Анализ',
+    'analyze.running': 'Анализ идёт...',
+    'analyze.subtitle': 'Обычно 10-30 секунд',
+    'analyze.locked': 'Ручной анализ доступен только на Pro-плане.',
+    'analyze.cooldown': 'Подожди {sec} с — анализ ещё идёт.',
+    'analyze.daily_cap': 'Лимит на сегодня исчерпан (20 / 24ч).',
+    'analyze.error_prefix': 'Ошибка: ',
+    'analyze.open_full': 'Открыть карточку',
+    'analyze.empty': 'Вставь URL выше чтобы запустить анализ.',
+    'analyze.from_cache': 'из кэша · {min} мин назад',
+    'analyze.fresh_run': 'свежий · {sec}с',
 
     // Time
     'time.just_now': 'только что',
@@ -4041,8 +4400,24 @@ const I18N = {
     // Sidebar
     'sidebar.sources': 'Источники',
     'sidebar.phase': 'Фаза',
+    'sidebar.alert_type': 'Тип',
     'sidebar.filters': 'Фильтры',
     'sidebar.manual_only': 'Только ручные',
+    'feed.atype.event': 'Событие',
+    'feed.atype.trend': 'Тренд',
+    'feed.atype.post':  'Пост',
+    'feed.atype_chip': (label) => label,
+    'badge.alert_type.event': '📰 СОБЫТИЕ',
+    'badge.alert_type.trend': '📈 ТРЕНД',
+    'badge.alert_type.post':  '🚀 ПОСТ',
+    'account.alert_types':       'Типы алертов',
+    'account.alert_types_desc':  'Выберите, какие алерты получать (подписка, применяется к Telegram и дашборду).',
+    'account.alert_types_event': '📰 События — конкретный триггер (кто-то что-то сделал/сказал)',
+    'account.alert_types_trend': '📈 Тренды — нарратив набирает обороты на разных платформах',
+    'account.alert_types_post':  '🚀 Посты — один вирусный пост',
+    'account.alert_types_save':  'Сохранить',
+    'account.alert_types_saved': '✓ Сохранено',
+    'account.alert_types_all_off_hint': 'Если выключить все — приходят все (мы никогда не мутим вас молча).',
     'sidebar.show_all': 'Показать все',
     'sidebar.reset': 'Сбросить',
     'sidebar.window': '⏱ Окно',
@@ -4817,6 +5192,11 @@ function FeedCard({ trend, onOpen }) {
           h('span', { className: 'feed-time' }, fmtTime(trend.firstSeen)),
           h('div', { className: 'feed-badges' },
             trend.manualSubmitted ? h('span', { className: 'badge badge-manual', title: t('feed.manual_tip') }, '🧪 MANUAL') : null,
+            // Alert-type chip — first slot so the user instantly sees signal
+            // shape. NULL alertType (legacy rows) renders nothing.
+            trend.alertType
+              ? h('span', { className: 'badge badge-atype badge-atype-' + trend.alertType }, t('badge.alert_type.' + trend.alertType))
+              : null,
             phase ? h(PhaseBadge, { phase }) : null,
             h(MarketStageBadge, { stage: trend.marketStage }),
             h('span', { className: 'badge ' + catCls, title: t('feed.category_tip') }, catIco + ' ' + (trend.category || 'other'))
@@ -5148,6 +5528,9 @@ function TrendModal({ trend, onClose, me = null }) {
 
       // Head
       h('div', { className: 'modal-head' },
+        trend.alertType
+          ? h('span', { className: 'badge badge-atype badge-atype-' + trend.alertType }, t('badge.alert_type.' + trend.alertType))
+          : null,
         h('span', { className: 'badge ' + catCls }, catIco + ' ' + (trend.category || 'other')),
         trend.manualSubmitted ? h('span', { className: 'badge badge-manual', title: t('feed.manual_tip') }, '🧪 MANUAL') : null,
         h('div', { className: 'source-chip' }, srcIco, ' ', srcLbl),
@@ -5530,6 +5913,142 @@ function HeroPanel({ stats, hours, refreshIn, scanning, onScan, onOpenStats }) {
         style: { fontSize: 11, padding: '4px 11px' }
       }, scanning ? t('hero.scanning') : t('hero.scan_now'))
     )
+  );
+}
+
+// ── AnalyzePanel — pro/admin manual URL analysis ────────────────────────────
+// Mirrors AccountPanel/SettingsPanel layout. Posts to /api/manual-analysis,
+// renders a compact preview of the scored trend, and lets the user pop the
+// full TrendModal via onOpenTrend(trend). Plan gate is ALSO enforced
+// server-side — this UI is only rendered when me.plan ∈ {pro, admin}, but
+// the endpoint will 403 if the user changes plan mid-session.
+function AnalyzePanel({ onBack, onOpenTrend }) {
+  useLang();
+  const [url, setUrl] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+
+  const run = async () => {
+    const clean = url.trim();
+    if (!clean) { setError(t('analyze.url_label')); return; }
+    if (!/^https?:\\/\\//i.test(clean)) { setError('URL must start with http(s)://'); return; }
+    setError(''); setLoading(true); setResult(null);
+    try {
+      const r = await fetch('/api/manual-analysis', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(AUTH_TOKEN ? { 'Authorization': 'Bearer ' + AUTH_TOKEN } : {}),
+        },
+        body: JSON.stringify({ url: clean }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        if (data.reason === 'plan')     { setError(t('analyze.locked')); return; }
+        if (data.reason === 'cooldown') { setError(t('analyze.cooldown', { sec: data.secLeft || 30 })); return; }
+        if (data.reason === 'daily')    { setError(t('analyze.daily_cap')); return; }
+        setError(t('analyze.error_prefix') + (data.error || 'unknown'));
+        return;
+      }
+      setResult(data);
+    } catch (e) {
+      setError(t('analyze.error_prefix') + (e.message || 'network error'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const tr = result?.trend;
+  const memeCls = tr ? (tr.memePotential >= 70 ? 'high' : tr.memePotential >= 40 ? 'mid' : 'low') : '';
+
+  return h('div', { className: 'analyze-panel' },
+    h('div', { className: 'settings-header' },
+      h('button', { className: 'btn btn-ghost', onClick: onBack }, t('app.back')),
+      h('span', { className: 'settings-title' }, '🧪 ' + t('analyze.title'))
+    ),
+    h('div', { className: 'analyze-intro' }, t('analyze.intro')),
+
+    h('div', { className: 'analyze-form' },
+      h('label', { className: 'analyze-label' }, t('analyze.url_label')),
+      h('input', {
+        type: 'url',
+        className: 'analyze-input',
+        value: url,
+        onChange: e => setUrl(e.target.value),
+        onKeyDown: e => { if (e.key === 'Enter' && !loading) run(); },
+        placeholder: t('analyze.url_placeholder'),
+        disabled: loading,
+      }),
+      h('div', { className: 'analyze-row' },
+        h('button', { className: 'btn btn-primary', onClick: run, disabled: loading || !url.trim() },
+          loading ? t('analyze.running') : ('🚀 ' + t('analyze.run_btn'))
+        ),
+        loading ? h('span', { className: 'analyze-hint' }, t('analyze.subtitle')) : null,
+        error ? h('span', { className: 'analyze-error' }, '⚠ ' + error) : null
+      )
+    ),
+
+    !result && !loading && !error ? h('div', { className: 'analyze-empty' }, t('analyze.empty')) : null,
+
+    result && tr ? h('div', { className: 'analyze-result' },
+      // Hero strip
+      h('div', { className: 'analyze-hero' },
+        tr.imageUrl
+          ? h('img', { src: tr.imageUrl, alt: '', loading: 'lazy', className: 'analyze-thumb' })
+          : h('div', { className: 'analyze-thumb-fb' },
+              tr.source === 'twitter' ? '🐦' : tr.source === 'reddit' ? '🟠' : tr.source === 'tiktok' ? '🎵' : '🌐'
+            ),
+        h('div', { className: 'analyze-hero-body' },
+          h('div', { className: 'analyze-hero-title' }, tr.title),
+          h('div', { className: 'analyze-hero-meta' },
+            tr.source +
+            ' · ' + (result.fromCache
+              ? t('analyze.from_cache', { min: Math.max(1, Math.round((result.cacheAgeMs || 0) / 60000)) })
+              : t('analyze.fresh_run', { sec: (result.elapsedMs / 1000).toFixed(1) })) +
+            (tr.category ? ' · ' + tr.category : '')
+          ),
+          h('div', { className: 'analyze-hero-actions' },
+            tr.url ? h('a', { href: tr.url, target: '_blank', rel: 'noopener', className: 'btn btn-ghost btn-sm' }, '🔗 ' + tr.source) : null,
+            h('button', { className: 'btn btn-primary btn-sm', onClick: () => onOpenTrend(tr) }, '👁 ' + t('analyze.open_full'))
+          )
+        )
+      ),
+      // Pipeline trace
+      result.pipeline ? h('div', { className: 'analyze-trace' },
+        h('span', { className: 'analyze-pill ' + (result.pipeline.stage1Ran ? 'ok' : 'warn') },
+          (result.pipeline.stage1Ran ? '✓' : '✗') + ' Stage 1'
+        ),
+        h('span', {
+          className: 'analyze-pill ' + (result.pipeline.stage2Ran ? 'ok' : 'warn'),
+          title: result.pipeline.stage2SkipReason || 'Stage 2 ran',
+        }, (result.pipeline.stage2Ran ? '✓' : '⏭') + ' Stage 2' + (result.pipeline.stage2SkipReason ? ' — ' + result.pipeline.stage2SkipReason : ''))
+      ) : null,
+      // Score grid
+      h('div', { className: 'analyze-scores' },
+        h('div', { className: 'analyze-score ' + memeCls },
+          h('div', { className: 'analyze-score-label' }, '💎 Meme'),
+          h('div', { className: 'analyze-score-value' }, (tr.memePotential || 0) + '/100')
+        ),
+        h('div', { className: 'analyze-score' },
+          h('div', { className: 'analyze-score-label' }, '🌊 Emergence'),
+          h('div', { className: 'analyze-score-value' }, (tr.emergenceScore || 0) + '/100')
+        ),
+        h('div', { className: 'analyze-score' },
+          h('div', { className: 'analyze-score-label' }, '🔥 Adoption'),
+          h('div', { className: 'analyze-score-value' }, (tr.adoptionScore || 0) + '/100')
+        ),
+        (tr.storyScore || 0) > 0 ? h('div', { className: 'analyze-score' },
+          h('div', { className: 'analyze-score-label' }, '📖 Story'),
+          h('div', { className: 'analyze-score-value' }, tr.storyScore + '/100')
+        ) : null
+      ),
+      // AI explanation
+      tr.aiExplanation ? h('div', { className: 'analyze-explain' },
+        h('div', { className: 'analyze-explain-label' }, '🤖 AI'),
+        h('div', { className: 'analyze-explain-body' }, tr.aiExplanation)
+      ) : null
+    ) : null
   );
 }
 
@@ -5948,6 +6467,85 @@ function AlertSensitivityRow({ initial }) {
   });
 }
 
+/**
+ * AlertTypesRow — three checkboxes (event/trend/post) that POST the new
+ * subscription to the server. Initial state comes from user.alertTypes
+ * (already canonicalised by db.getUserAlertTypes via _publicUser).
+ *
+ * UX rules:
+ *  • toggling is optimistic — user sees the change instantly, server roundtrip
+ *    is fire-and-forget. On error we revert and toast.
+ *  • all-off is allowed (server treats empty CSV as "all" — see hint string).
+ *
+ * Variable name "selected" is a Set so flipping a single value is O(1) and
+ * order-independent.
+ */
+function AlertTypesRow({ initial }) {
+  useLang();
+  const init = Array.isArray(initial) ? initial : ['event','trend','post'];
+  const [selected, setSelected] = useState(() => new Set(init));
+  const [saving, setSaving] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [err, setErr] = useState('');
+
+  const toggle = async (key) => {
+    const next = new Set(selected);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setSelected(next);
+    setSaving(true);
+    setErr('');
+    try {
+      const r = await fetch('/api/user/alert-types', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json',
+                   ...(AUTH_TOKEN ? { 'Authorization': 'Bearer ' + AUTH_TOKEN } : {}) },
+        body: JSON.stringify({ types: Array.from(next) }),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error(e.error || ('HTTP ' + r.status));
+      }
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 1500);
+    } catch (e) {
+      setErr(e.message);
+      // rollback so UI matches server
+      setSelected(new Set(selected));
+    }
+    setSaving(false);
+  };
+
+  const Box = ({ k, label }) => {
+    const on = selected.has(k);
+    return h('button', {
+      type: 'button',
+      className: 'atype-toggle' + (on ? ' on' : ''),
+      onClick: () => toggle(k),
+      disabled: saving,
+    },
+      h('span', { className: 'atype-toggle-icon' }, on ? '✅' : '⬜'),
+      h('span', { className: 'atype-toggle-label' }, label)
+    );
+  };
+
+  return h(Row, {
+    icon: '🔔',
+    title: t('account.alert_types'),
+    desc: t('account.alert_types_desc'),
+    control: h('div', { className: 'atype-toggle-group' },
+      h(Box, { k: 'event', label: t('account.alert_types_event') }),
+      h(Box, { k: 'trend', label: t('account.alert_types_trend') }),
+      h(Box, { k: 'post',  label: t('account.alert_types_post')  }),
+      h('div', { className: 'atype-foot' },
+        savedFlash ? h('span', { className: 'atype-saved' }, t('account.alert_types_saved')) : null,
+        err ? h('span', { className: 'atype-err' }, '⚠ ' + err) : null,
+        h('span', { className: 'atype-hint' }, t('account.alert_types_all_off_hint'))
+      )
+    )
+  });
+}
+
 // ── AccountPanel — profile / plan / logout (extracted from SettingsPanel) ─────
 function AccountPanel({ onBack, user, onLogout }) {
   useLang();
@@ -6031,6 +6629,10 @@ function AccountPanel({ onBack, user, onLogout }) {
       user?.threshold != null
         ? h(AlertSensitivityRow, { initial: user.threshold })
         : null,
+      // Per-user subscription to alert types (event / trend / post).
+      // Always rendered — there is no "free" gate here, the gate logic is
+      // applied server-side in the alert pipeline.
+      h(AlertTypesRow, { initial: user?.alertTypes || ['event','trend','post'] }),
       h(Row, {
         icon: '🚪', title: t('settings.logout'),
         desc: t('settings.logout_desc'),
@@ -6273,13 +6875,18 @@ function ColumnResizer({ side }) {
 
 // Unified bottom nav — shown in both trends sidebar and settings/stats sidebar.
 // Single source of truth for "Feed / Stats / Settings" navigation.
-function BottomNav({ view, setView }) {
+// The me prop is the authenticated user (or null/false). When their plan
+// is pro or admin, the "Analyze" tab is rendered alongside Feed + Stats.
+function BottomNav({ view, setView, me }) {
   useLang(); // re-render on language switch
   // Settings/Account live in top-right of the nav bar — not duplicated here.
+  const plan = (me && (me.plan || me.plan_name)) || 'free';
+  const canAnalyze = plan === 'pro' || plan === 'admin';
   const tabs = [
-    { id: 'trends', icon: '🔥', label: t('nav.feed')  },
-    { id: 'stats',  icon: '📊', label: t('nav.stats') },
+    { id: 'trends',  icon: '🔥', label: t('nav.feed')  },
+    { id: 'stats',   icon: '📊', label: t('nav.stats') },
   ];
+  if (canAnalyze) tabs.push({ id: 'analyze', icon: '🧪', label: t('nav.analyze') });
   return h('div', { className: 'sidebar-footer' },
     h('div', { className: 'sb-foot-nav', role: 'tablist' },
       tabs.map(tab => h('button', {
@@ -6334,6 +6941,15 @@ function App() {
   const [manualOnly, setManualOnly] = useState(() => {
     try { return localStorage.getItem('ts_manual_only') === '1'; }
     catch (e) { return false; }
+  });
+  // Alert-type chip filter — '' = all, 'event'|'trend'|'post' = restrict.
+  // Pure client-side (the feed already includes the type per-row), so no
+  // round-trip to the server. Persisted in localStorage.
+  const [alertTypeFilter, setAlertTypeFilter] = useState(() => {
+    try {
+      const v = localStorage.getItem('ts_alert_type_filter') || '';
+      return ['event', 'trend', 'post'].includes(v) ? v : '';
+    } catch (e) { return ''; }
   });
   const toastId = useRef(0);
   const sentinelRef = useRef(null);
@@ -6586,6 +7202,11 @@ function App() {
     ? searchFiltered.filter(t => !hiddenSources.has(t.source))
     : searchFiltered;
   if (manualOnly) visibleTrends = visibleTrends.filter(t => t.manualSubmitted);
+  if (alertTypeFilter) {
+    // Wildcard semantics: legacy rows without alertType still pass any
+    // filter so we don't hide the back-catalog.
+    visibleTrends = visibleTrends.filter(t => !t.alertType || t.alertType === alertTypeFilter);
+  }
 
   // ── Auth gate ───────────────────────────────────────────────────────────
   if (me === false) return h(LoginScreen, { onLoggedIn: handleLoggedIn });
@@ -6740,6 +7361,50 @@ function App() {
 
             h('div', { className: 'sidebar-divider' }),
 
+            // ── Alert type filter chips (event / trend / post) ──
+            // Pure client-side filter — does NOT change subscription. The
+            // user's subscription lives in /api/user/alert-types and is
+            // edited from SettingsPanel.
+            h('div', { className: 'sidebar-section' },
+              h('span', null, t('sidebar.alert_type')),
+              alertTypeFilter
+                ? h('span', { className: 'sidebar-section-link', onClick: () => {
+                    setAlertTypeFilter('');
+                    try { localStorage.setItem('ts_alert_type_filter', ''); } catch (e) {}
+                  }, title: t('tooltip.reset') }, t('sidebar.reset'))
+                : null
+            ),
+            h('div', { className: 'sidebar-phase' },
+              h('button', {
+                type: 'button',
+                className: 'phase-chip' + (alertTypeFilter === '' ? ' active' : ''),
+                onClick: () => {
+                  setAlertTypeFilter('');
+                  try { localStorage.setItem('ts_alert_type_filter', ''); } catch (e) {}
+                }
+              }, h('span', { className: 'phase-chip-dot' }, '◆'),
+                 h('span', { className: 'phase-chip-label' }, t('feed.filter.all'))
+              ),
+              [['event','📰','feed.atype.event'],['trend','📈','feed.atype.trend'],['post','🚀','feed.atype.post']].map(spec => {
+                const key = spec[0], emoji = spec[1], i18nKey = spec[2];
+                return h('button', {
+                  key: key,
+                  type: 'button',
+                  className: 'phase-chip atype-chip-' + key + (alertTypeFilter === key ? ' active' : ''),
+                  onClick: () => {
+                    const next = alertTypeFilter === key ? '' : key;
+                    setAlertTypeFilter(next);
+                    try { localStorage.setItem('ts_alert_type_filter', next); } catch (e) {}
+                  }
+                },
+                  h('span', { className: 'phase-chip-dot' }, emoji),
+                  h('span', { className: 'phase-chip-label' }, t(i18nKey))
+                );
+              })
+            ),
+
+            h('div', { className: 'sidebar-divider' }),
+
             h('div', { className: 'sidebar-section' },
               h('span', null, t('sidebar.filters')),
               (hours !== 24 || minMeme !== 0 || category || sort !== 'rank')
@@ -6819,8 +7484,8 @@ function App() {
 
             h('div', { style: { flex: 1 } }),
 
-            // Unified bottom nav (Feed / Stats / Settings)
-            h(BottomNav, { view, setView })
+            // Unified bottom nav (Feed / Stats / Settings + Analyze for pro/admin)
+            h(BottomNav, { view, setView, me })
           ),
 
           // Draggable divider between sidebar and main feed
@@ -6963,6 +7628,19 @@ function App() {
         stats, hours,
         onBack: () => setView('trends'),
         onOpenTrend: setModalTrend,
+      })
+    ) : null,
+
+    view === 'analyze' ? h(Sheet, {
+      title: t('analyze.title'),
+      icon: '🧪',
+      onClose: () => setView('trends'),
+    },
+      h(AnalyzePanel, {
+        onBack: () => setView('trends'),
+        // Pop the analyzed (synthetic) trend in the same TrendModal feed
+        // items use — full carousel + score bars + Ask Grok / source link.
+        onOpenTrend: (trend) => { setModalTrend(trend); setView('trends'); },
       })
     ) : null
   );

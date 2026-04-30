@@ -21,7 +21,12 @@ export function formatTelegramAlert(trend, lang = 'en') {
   const memePotential = trend.memePotential || 0;
 
   const DIV = '\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501';
-  let msg = t.alertHeader(memePotential) + '\n';
+  // Alert-type chip \u2014 rendered above the header so it's the very first line
+  // the user sees. NULL alertType (legacy / pre-rollout rows) \u2192 no chip.
+  const typeChip = formatAlertTypeChip(trend.alertType, t);
+  let msg = '';
+  if (typeChip) msg += typeChip + '\n';
+  msg += t.alertHeader(memePotential) + '\n';
   msg += DIV + '\n';
 
   // Single-line title. Historical note: earlier prompts returned both `title`
@@ -169,6 +174,19 @@ export function formatTwitterResult(result, query, lang = 'en', extras = {}) {
 }
 
 // ── Utility ──────────────────────────────────────────────────────────────────
+
+/**
+ * Build the alert-type chip line: "📰 СОБЫТИЕ" / "📈 ТРЕНД" / "🚀 ПОСТ".
+ * Returns empty string when the trend has no alertType (legacy rows) so
+ * the formatter can simply skip emitting the line.
+ */
+function formatAlertTypeChip(alertType, t) {
+  if (!alertType) return '';
+  if (alertType === 'event') return `\u{1F4F0} <b>${escHtml(t.alertTypeEvent)}</b>`;
+  if (alertType === 'trend') return `\u{1F4C8} <b>${escHtml(t.alertTypeTrend)}</b>`;
+  if (alertType === 'post')  return `\u{1F680} <b>${escHtml(t.alertTypePost)}</b>`;
+  return '';
+}
 
 function escHtml(text) {
   if (!text) return '';
