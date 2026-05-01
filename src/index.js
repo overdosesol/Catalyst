@@ -62,6 +62,21 @@ const telegram = new TelegramNotifier(config, logger, db, null, triggerFinder, s
 // Prune muxed video cache on startup (files older than 7 days)
 try { telegram.cleanupVideoCache(5); } catch {}
 
+// Hidden trends archive — sweep entries older than 7 days. Run once on
+// startup, then daily. Per-user dashboard archive feature; rows accumulate
+// until either the user restores them or this sweeper drops them.
+const HIDDEN_TREND_RETENTION_DAYS = 7;
+try {
+  const swept = db.cleanupExpiredHiddenTrends(HIDDEN_TREND_RETENTION_DAYS);
+  if (swept > 0) logger.info(`[Maintenance] hidden_trends: pruned ${swept} entries older than ${HIDDEN_TREND_RETENTION_DAYS}d`);
+} catch (e) { logger.warn(`[Maintenance] hidden_trends sweep failed: ${e.message}`); }
+setInterval(() => {
+  try {
+    const swept = db.cleanupExpiredHiddenTrends(HIDDEN_TREND_RETENTION_DAYS);
+    if (swept > 0) logger.info(`[Maintenance] hidden_trends: pruned ${swept} entries (daily)`);
+  } catch (e) { logger.warn(`[Maintenance] hidden_trends sweep failed: ${e.message}`); }
+}, 24 * 60 * 60 * 1000);
+
 // ── Initialize Solana Pay Monitor ───────────────────────────────────────────
 const solanaMonitor = new SolanaPayMonitor(
   config,

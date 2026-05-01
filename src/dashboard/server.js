@@ -269,6 +269,11 @@ class DashboardServer {
       if (path.match(/^\/api\/collectors\/[\w_]+\/toggle$/) && method === 'POST') return this._handleCollectorToggle(req, res, path);
       if (path.match(/^\/api\/trends\/\d+\/feedback$/) && method === 'POST') return this._handleTrendFeedback(req, res, path);
       if (path.match(/^\/api\/trends\/\d+\/trigger$/)  && method === 'POST') return this._handleTrendTrigger(req, res, path);
+      // Per-user hide / unhide / archive list. /hidden ≠ \d+ so collision-free.
+      if (path.match(/^\/api\/trends\/\d+\/hide$/)     && method === 'POST') return this._handleTrendHide(req, res, path);
+      if (path.match(/^\/api\/trends\/\d+\/unhide$/)   && method === 'POST') return this._handleTrendUnhide(req, res, path);
+      if (path === '/api/trends/hidden'        && method === 'GET')  return this._handleHiddenTrends(req, res);
+      if (path === '/api/trends/hidden/clear'  && method === 'POST') return this._handleHiddenTrendsClear(req, res);
       if (path === '/api/manual-analysis' && method === 'POST') return this._handleManualAnalysis(req, res);
 
       // SPA fallback — serve dashboard HTML for all non-API routes
@@ -546,10 +551,22 @@ class DashboardServer {
     else if (sortParam === 'emergence') orderBy = "CAST(JSON_EXTRACT(raw_metrics, '$.emergenceScore') AS INT) DESC";
     else                                orderBy = "CAST(JSON_EXTRACT(raw_metrics, '$.rankScore') AS INT) DESC";
 
+    // Per-user hidden trends — exclude IDs the current user dismissed.
+    // chat_id is set after auth middleware; for anonymous (no auth in dev?)
+    // hiddenIds is empty so the filter is a no-op.
+    const userIdEarly = String(req.user?.telegram_chat_id || '').trim() || null;
+    const hiddenIds = userIdEarly ? this.db.getHiddenTrendIdsByChat(userIdEarly, 7) : [];
+
     const cutoff = new Date(Date.now() - hours * 3_600_000).toISOString();
     let query = `SELECT * FROM trends WHERE first_seen_at > ?`;
     const params = [cutoff];
 
+    if (hiddenIds.length > 0) {
+      // Use a parameterized IN list — SQLite supports up to 999 params per
+      // statement; with retention=7d a sane user won't accumulate that many.
+      query += ` AND id NOT IN (${hiddenIds.map(() => '?').join(',')})`;
+      params.push(...hiddenIds);
+    }
     if (category)         { query += ` AND category = ?`;                                                                              params.push(category); }
     if (source)           { query += ` AND source = ?`;                                                                                params.push(source); }
     if (phaseList.length > 0) {
@@ -904,6 +921,70 @@ class DashboardServer {
     }
   }
 
+  // ── Per-user hide / archive ────────────────────────────────────────────────
+  // Personal visual filter: clicking ✕ on a feed card stores
+  // (trend_id, chat_id) in `hidden_trends`. The /api/trends feed query
+  // excludes these IDs for the current user. Cleanup loop in index.js
+  // sweeps rows older than HIDDEN_TREND_RETENTION_DAYS (7).
+
+  _handleTrendHide(req, res, path) {
+    const m = path.match(/^\/api\/trends\/(\d+)\/hide$/);
+    if (!m) return json(res, 400, { error: 'Invalid path' });
+    const trendId = parseInt(m[1], 10);
+    const userId = String(req.user?.telegram_chat_id || '').trim();
+    if (!userId) return json(res, 401, { error: 'Authenticated user has no chat_id' });
+    try {
+      this.db.hideTrend(trendId, userId);
+      return json(res, 200, { ok: true, hidden: true });
+    } catch (err) {
+      this.logger.warn(`hide trend #${trendId} for ${userId}: ${err.message}`);
+      return json(res, 500, { error: err.message });
+    }
+  }
+
+  _handleTrendUnhide(req, res, path) {
+    const m = path.match(/^\/api\/trends\/(\d+)\/unhide$/);
+    if (!m) return json(res, 400, { error: 'Invalid path' });
+    const trendId = parseInt(m[1], 10);
+    const userId = String(req.user?.telegram_chat_id || '').trim();
+    if (!userId) return json(res, 401, { error: 'Authenticated user has no chat_id' });
+    try {
+      this.db.unhideTrend(trendId, userId);
+      return json(res, 200, { ok: true, hidden: false });
+    } catch (err) {
+      this.logger.warn(`unhide trend #${trendId} for ${userId}: ${err.message}`);
+      return json(res, 500, { error: err.message });
+    }
+  }
+
+  _handleHiddenTrends(req, res) {
+    const userId = String(req.user?.telegram_chat_id || '').trim();
+    if (!userId) return json(res, 401, { error: 'Authenticated user has no chat_id' });
+    try {
+      const rows = this.db.getHiddenTrendsByChat(userId, 7, 200);
+      const trends = rows.map(row => {
+        const shaped = this._formatTrend(row, userId);
+        shaped.hiddenAt = row.hidden_at;
+        return shaped;
+      });
+      return json(res, 200, { trends, retentionDays: 7 });
+    } catch (err) {
+      this.logger.warn(`hidden list for ${userId}: ${err.message}`);
+      return json(res, 500, { error: err.message });
+    }
+  }
+
+  _handleHiddenTrendsClear(req, res) {
+    const userId = String(req.user?.telegram_chat_id || '').trim();
+    if (!userId) return json(res, 401, { error: 'Authenticated user has no chat_id' });
+    try {
+      const cleared = this.db.clearHiddenTrendsByChat(userId);
+      return json(res, 200, { ok: true, cleared });
+    } catch (err) {
+      return json(res, 500, { error: err.message });
+    }
+  }
+
   /**
    * POST /api/manual-analysis — pro/admin only.
    *
@@ -995,6 +1076,14 @@ class DashboardServer {
         junkReasons:     t.junkReasons    ?? [],
         velocity:        m.velocity       ?? 0,
         uniquePlatforms: m.uniquePlatforms ?? 1,
+        // Engagement passthrough — same shape as feed-row _formatTrend so the
+        // modal's metrics row works identically for manual-analysis trends.
+        engagement: {
+          views:    m.views    ?? m.plays    ?? m.upvotes ?? null,
+          likes:    m.likes    ?? null,
+          comments: m.comments ?? m.replies  ?? null,
+          reposts:  m.retweets ?? m.shares   ?? null,
+        },
         manualSubmitted: true,
         aiExplanation:   t.aiExplanation || '',
         whyNow:          t.whyNow || '',
@@ -1143,6 +1232,16 @@ class DashboardServer {
       junkReasons:     metrics.junkReasons     ?? [],  // [JUNK_FILTER]
       velocity:        metrics.velocity        ?? 0,
       uniquePlatforms: metrics.uniquePlatforms ?? 1,
+      // Per-source engagement counts surfaced in TrendModal's metrics grid.
+      // Different platforms use different field names; this is the unified
+      // shape the modal renders (👁 views · ❤️ likes · 💬 comments · 🔁 reposts).
+      // Reddit posts have no views — `upvotes` falls back into the views slot.
+      engagement: {
+        views:    metrics.views    ?? metrics.plays    ?? metrics.upvotes ?? null,
+        likes:    metrics.likes    ?? null,
+        comments: metrics.comments ?? metrics.replies  ?? null,
+        reposts:  metrics.retweets ?? metrics.shares   ?? null,
+      },
       manualSubmitted: metrics.manualSubmitted === true,
       aiExplanation:   row.ai_explanation,
       // Trigger event — empty string when the AI found no explicit cause.
@@ -1859,7 +1958,7 @@ class DashboardServer {
     }
 
     /* ── Layout (classic 2-col for settings/stats) ── */
-    .layout { display: flex; min-height: calc(100vh - 50px - 28px); }
+    .layout { display: flex; min-height: calc(100vh - 50px); }
 
     /* ── Sidebar ── */
     .sidebar {
@@ -1868,8 +1967,9 @@ class DashboardServer {
       border-right: 1px solid var(--border);
       padding: 14px 10px 10px;
       display: flex; flex-direction: column; gap: 2px;
-      /* classic layout: sticky scroll, subtract nav(50) + statusbar(28) */
-      position: sticky; top: 50px; height: calc(100vh - 50px - 28px); overflow-y: auto;
+      /* classic layout: sticky scroll, subtract nav(50). Statusbar removed
+         2026-05-02 — viewport extends to bottom edge. */
+      position: sticky; top: 50px; height: calc(100vh - 50px); overflow-y: auto;
     }
     /* In dashboard-grid the sidebar is app-shell (overrides above) */
     .sidebar-section {
@@ -2100,7 +2200,7 @@ class DashboardServer {
     /* ── Main content ── */
     .main {
       flex: 1; min-width: 0; padding: 18px 20px 24px;
-      height: calc(100vh - 50px - 28px); overflow-y: auto;
+      height: calc(100vh - 50px); overflow-y: auto;
     }
     .settings-panel { padding-bottom: 40px; }
 
@@ -2917,7 +3017,7 @@ class DashboardServer {
     }
     .setting-control input[type=range] { width: 130px; accent-color: var(--accent); height: 3px; cursor: pointer; }
     .setting-val { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: var(--accent2); min-width: 30px; text-align: right; }
-    .settings-actions { display: flex; gap: 10px; margin-top: 10px; justify-content: flex-end; }
+    .settings-actions { display: flex; gap: 10px; margin-top: 10px; justify-content: center; }
     .settings-flash {
       margin-left: auto; font-size: 11px; font-weight: 600; color: var(--accent2);
       background: var(--accent-glow); border: 1px solid rgba(var(--accent-rgb), .22);
@@ -3228,6 +3328,53 @@ class DashboardServer {
     .modal-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: .7px; color: var(--dim); font-weight: 600; }
     .modal-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 2px; }
 
+    /* Engagement metrics row inside the Virality stat cell — emoji + count
+       per signal (views/likes/comments/reposts). Two-column grid so 4
+       metrics never overflow on narrow modals. */
+    .modal-engagement {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 4px 10px;
+    }
+    .modal-engagement-item {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      color: var(--text);
+      font-weight: 700;
+      letter-spacing: .2px;
+    }
+    .modal-engagement-ico { font-size: 11px; opacity: .85; }
+    .modal-engagement-num { font-variant-numeric: tabular-nums; }
+
+    /* Story hook — pull-quote rendered after the score bars. Accent left
+       border + slight surface lift, italic body, big quote marks. Not a
+       generic blockquote because the modal content is dense and we want
+       the hook to read as a single line, not a paragraph. */
+    .story-hook {
+      margin-top: 10px;
+      padding: 10px 14px 10px 12px;
+      border-left: 3px solid var(--accent);
+      background: linear-gradient(90deg, rgba(var(--accent-rgb), .06), rgba(255,255,255,.01) 60%);
+      border-radius: 6px;
+      display: flex; align-items: flex-start; gap: 6px;
+      font-size: 13px; line-height: 1.5;
+      color: var(--text);
+      font-style: italic;
+      box-shadow: var(--gloss-top);
+    }
+    .story-hook-mark {
+      font-family: Georgia, serif;
+      font-size: 22px;
+      line-height: 1;
+      color: var(--accent);
+      font-weight: 700;
+      flex-shrink: 0;
+      transform: translateY(2px);
+    }
+    .story-hook-mark.right { transform: translateY(8px); }
+    .story-hook-text { flex: 1; }
+
     /* ── Sentiment ── */
     .sentiment-pos { color: var(--green2); font-weight: 600; }
     .sentiment-neg { color: var(--red2);   font-weight: 600; }
@@ -3244,7 +3391,7 @@ class DashboardServer {
     .dashboard-grid {
       display: grid;
       grid-template-columns: var(--col-left) 6px 1fr 6px var(--col-right);
-      height: calc(100vh - 50px - 28px); /* viewport - nav - statusbar */
+      height: calc(100vh - 50px); /* viewport - nav (statusbar removed 2026-05-02) */
       overflow: hidden;
     }
 
@@ -3616,7 +3763,9 @@ class DashboardServer {
       background: rgba(255,255,255,.025);
       border: 1px solid var(--border);
     }
-    .feed-badges { display: flex; gap: 5px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+    /* margin-right reserves space for the absolute-positioned .feed-hide-btn
+       in the card's top-right so badges don't slide under it on hover. */
+    .feed-badges { display: flex; gap: 5px; margin-left: auto; margin-right: 28px; align-items: center; flex-wrap: wrap; }
     /* Normalise badge sizing — manual / alert-type / phase / category all
        use the same padding + font-size so the row reads as a coherent
        chip-set instead of a mixed bag. */
@@ -3639,6 +3788,162 @@ class DashboardServer {
       50%      { box-shadow: 0 0 0 4px rgba(46,213,115,0); }
     }
     .feed-card.is-fresh { border-left: 2px solid rgba(46,213,115,.35); }
+
+    /* Hide button — top-right, hover-only. Per-user dismiss; result lands in
+       hidden_trends and is filtered server-side from feed. Square shape +
+       border-radius 5 mirrors the .badge style next to it (PHASE / FORMING
+       / category chips), so it reads as part of the chip-row rather than a
+       circular floating action. */
+    .feed-hide-btn {
+      position: absolute; top: 9px; right: 9px;
+      width: 22px; height: 22px; border-radius: 5px;
+      background: rgba(0,0,0,.5);
+      border: 1px solid var(--border2);
+      color: var(--text2);
+      font-size: 11px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity .12s, background .12s, color .12s, border-color .12s;
+      z-index: 2;
+    }
+    .feed-card:hover .feed-hide-btn { opacity: 1; }
+    .feed-hide-btn:hover {
+      background: rgba(248,113,113,.18);
+      color: #fca5a5;
+      border-color: rgba(248,113,113,.45);
+    }
+    /* Touch devices have no hover — show the button always but at lower
+       contrast so it's discoverable without dominating the card. */
+    @media (hover: none) {
+      .feed-hide-btn { opacity: .6; }
+    }
+
+    /* Undo toast — fixed bottom-center, single instance. Separate from the
+       top-right .toast notification system (different purpose: actionable
+       undo vs informational). 2026-05-02: bottom: 24 (was 64) since the
+       statusbar strip is gone. Bottom-nav on mobile sits above this. */
+    .undo-toast {
+      position: fixed;
+      bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: var(--surface);
+      border: 1px solid var(--border3);
+      padding: 10px 14px;
+      border-radius: 10px;
+      display: flex; align-items: center; gap: 12px;
+      box-shadow: 0 6px 20px rgba(0,0,0,.5), var(--gloss-top);
+      z-index: 1000;
+      font-size: 13px;
+      animation: undo-toast-slide-up .18s ease-out;
+      max-width: calc(100vw - 32px);
+    }
+    @keyframes undo-toast-slide-up {
+      from { transform: translate(-50%, 12px); opacity: 0; }
+      to   { transform: translateX(-50%); opacity: 1; }
+    }
+    .undo-toast-text { color: var(--text); }
+    .undo-toast-btn {
+      background: transparent;
+      color: var(--accent);
+      border: none;
+      font-weight: 700;
+      cursor: pointer;
+      font-size: 13px;
+      padding: 4px 6px;
+      letter-spacing: .2px;
+    }
+    .undo-toast-btn:hover { text-decoration: underline; }
+
+    /* Archive card — collapsible. Closed by default so a long retention list
+       doesn't blow up the Settings sheet height. The .archive-head button
+       replaces the usual .settings-card-title in this card. */
+    .archive-card .archive-card-desc { margin-bottom: 0; }
+    .archive-head {
+      display: flex; align-items: center; gap: 8px;
+      width: 100%;
+      background: transparent;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      color: var(--text);
+      font-size: 13px; font-weight: 700;
+      text-align: left;
+    }
+    .archive-head-caret {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 14px; height: 14px;
+      font-size: 10px; color: var(--text3);
+      transition: transform .15s;
+    }
+    .archive-card.open .archive-head-caret { transform: rotate(90deg); color: var(--accent); }
+    .archive-head-title { flex: 1; }
+    .archive-head-count {
+      font-size: 11px; color: var(--text3); font-weight: 500;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .archive-body {
+      margin-top: 10px;
+      animation: archive-fade-in .14s ease-out;
+    }
+    @keyframes archive-fade-in {
+      from { opacity: 0; transform: translateY(-3px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .archive-actions-top {
+      margin-top: 0; margin-bottom: 10px;
+      justify-content: flex-end;
+    }
+
+    /* Archive list (in Settings sheet) */
+    .archive-list {
+      display: flex; flex-direction: column; gap: 6px;
+      max-height: 400px; overflow-y: auto;
+      margin-top: 0;
+    }
+    .archive-row {
+      display: grid;
+      grid-template-columns: 28px 1fr auto auto;
+      gap: 10px; align-items: center;
+      padding: 8px 10px;
+      border: 1px solid var(--border2);
+      border-radius: 8px;
+      background: rgba(255,255,255,.015);
+      transition: border-color .12s, background .12s;
+    }
+    .archive-row:hover { border-color: var(--border3); background: rgba(255,255,255,.03); }
+    .archive-row-icon {
+      width: 28px; height: 28px; border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 13px;
+      border: 1px solid var(--border2);
+    }
+    .archive-row-body { min-width: 0; }
+    .archive-row-title {
+      font-size: 13px; color: var(--text); font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .archive-row-meta { font-size: 11px; color: var(--text3); margin-top: 2px; }
+    .archive-row-btn {
+      background: transparent;
+      border: 1px solid var(--border2);
+      color: var(--text2);
+      border-radius: 6px;
+      padding: 4px 9px;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .archive-row-btn:hover { color: var(--accent); border-color: var(--accent); }
+    .archive-empty {
+      color: var(--text3); font-size: 13px;
+      padding: 16px; text-align: center;
+      border: 1px dashed var(--border2);
+      border-radius: 8px;
+    }
+    .archive-actions {
+      display: flex; gap: 8px; justify-content: flex-end;
+      margin-top: 12px;
+    }
 
     .feed-title {
       font-size: 14px; font-weight: 700; color: var(--text);
@@ -3977,6 +4282,79 @@ class DashboardServer {
     .activity-val.orange { color: var(--orange); }
     .activity-sub { font-size: 10px; color: var(--dim); font-weight: 500; }
 
+    /* Live indicator dot in the Activity-section title (replaces the bottom
+       statusbar's pulse). Green = scanning; red = paused. */
+    .right-live-dot {
+      display: inline-block;
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green2);
+      box-shadow: 0 0 6px var(--green), 0 0 0 2px rgba(34,197,94,.12);
+      animation: pulse 2.5s ease-in-out infinite;
+      margin-right: 8px;
+      vertical-align: middle;
+      transform: translateY(-1px);
+    }
+    .right-live-dot.paused {
+      background: var(--red2);
+      box-shadow: 0 0 5px var(--red);
+      animation: none;
+    }
+
+    /* Sources sub-block inside the Activity section. Each source = a small
+       pill with a status dot + emoji. Hover shows full source name. */
+    .right-sources {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px dashed var(--border2);
+    }
+    .right-sources-head {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 6px;
+    }
+    .right-sources-label {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 1.2px;
+      color: var(--muted); font-weight: 700;
+    }
+    .right-sources-count {
+      font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700;
+    }
+    .right-sources-list {
+      display: flex; flex-wrap: wrap; gap: 5px;
+    }
+    .right-sources-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 7px;
+      background: rgba(255,255,255,.025);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 11px;
+      transition: opacity .15s, border-color .15s, background .15s;
+    }
+    .right-sources-pill.off { opacity: .4; }
+    .right-sources-pill.on:hover { border-color: var(--border2); background: rgba(255,255,255,.05); }
+    .right-sources-dot {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--green2); flex-shrink: 0;
+    }
+    .right-sources-pill.off .right-sources-dot { background: var(--red2); }
+    /* Glyph (R / G / X / ♪ / #) — brand-tinted letter-marks. Matches the
+       sidebar source-icon palette so the right panel reads consistently. */
+    .right-sources-glyph {
+      font-weight: 800; font-size: 11px;
+      color: var(--text2); letter-spacing: 0;
+      line-height: 1;
+    }
+    .right-sources-pill[title^="Reddit"] .right-sources-glyph,
+    .right-sources-pill[title^="reddit"] .right-sources-glyph { color: #ff5800; }
+    .right-sources-pill[title^="Twitter"] .right-sources-glyph,
+    .right-sources-pill[title^="twitter"] .right-sources-glyph { color: var(--text); }
+    .right-sources-pill[title^="TikTok"] .right-sources-glyph,
+    .right-sources-pill[title^="tiktok"] .right-sources-glyph { color: #ff2469; }
+    .right-sources-pill[title^="Google"] .right-sources-glyph,
+    .right-sources-pill[title^="google"] .right-sources-glyph { color: #4285f4; }
+    .right-sources-pill[title^="X Trends"] .right-sources-glyph { color: #1d9bf0; }
+    .right-sources-pill.off .right-sources-glyph { color: var(--dim); }
+
     /* ── Category mini-legend in right panel ── */
     .cat-row {
       display: flex; align-items: center; gap: 7px;
@@ -4004,56 +4382,6 @@ class DashboardServer {
       .dashboard-grid > .sidebar,
       .dashboard-grid > .col-resizer { display: none; }
     }
-
-    /* ── Bottom status bar ── */
-    .statusbar {
-      position: fixed; bottom: 0; left: 0; right: 0; z-index: 300;
-      height: 28px;
-      /* 2026-05-01: theme-tied bg — sister to the nav fix above. Mirrored
-         gradient (bg→surface, top→bottom) so the bar reads as a footer
-         rising slightly from the dark content above it. */
-      background: linear-gradient(180deg, var(--bg) 0%, var(--surface) 100%);
-      border-top: 1px solid var(--border);
-      backdrop-filter: blur(14px) saturate(1.15);
-      -webkit-backdrop-filter: blur(14px) saturate(1.15);
-      display: flex; align-items: center; gap: 10px;
-      padding: 0 14px; font-size: 10px; font-family: 'JetBrains Mono', monospace; color: var(--text2);
-      box-shadow: 0 -2px 16px rgba(0,0,0,.35);
-    }
-    .statusbar::before {
-      content: ''; position: absolute; left: 0; right: 0; top: -1px; height: 1px;
-      background: linear-gradient(90deg, transparent 0%, rgba(var(--accent-rgb), .2) 15%, rgba(var(--accent-rgb), .2) 85%, transparent 100%);
-      pointer-events: none;
-    }
-    .statusbar-dot {
-      width: 6px; height: 6px; border-radius: 50%;
-      background: var(--green2); flex-shrink: 0;
-      box-shadow: 0 0 8px var(--green), 0 0 0 2px rgba(34,197,94,.12);
-      animation: pulse 2.5s ease-in-out infinite;
-    }
-    .statusbar-dot.paused { background: var(--red2); box-shadow: 0 0 6px var(--red); animation: none; }
-    .statusbar-item {
-      display: flex; align-items: center; gap: 5px; white-space: nowrap;
-      padding: 2px 8px; border-radius: 999px;
-      background: rgba(255,255,255,.02); border: 1px solid transparent;
-      transition: border-color .15s, background .15s;
-    }
-    .statusbar-item:hover { background: rgba(255,255,255,.04); border-color: var(--border); }
-    .statusbar-item b { color: var(--text); font-weight: 700; letter-spacing: .2px; }
-    .statusbar-item .sb-key { color: var(--dim); text-transform: uppercase; font-size: 9px; letter-spacing: .8px; }
-    .statusbar-sep {
-      width: 1px; height: 14px;
-      background: linear-gradient(180deg, transparent, var(--border2), transparent);
-      flex-shrink: 0;
-    }
-    .statusbar-hint { margin-left: auto; color: var(--dim); opacity: .7; display: flex; align-items: center; gap: 8px; }
-    .statusbar-kbd {
-      display: inline-flex; align-items: center; gap: 4px;
-      padding: 1px 6px; border-radius: 4px;
-      background: rgba(255,255,255,.04); border: 1px solid var(--border);
-      font-size: 9px; color: var(--text2); letter-spacing: .3px;
-    }
-    .statusbar-kbd b { color: var(--accent2); font-weight: 700; margin-right: 1px; }
 
     /* ── Responsive ── */
     @media (max-width: 1100px) { .card-meta { flex-wrap: wrap; } }
@@ -4198,12 +4526,6 @@ const I18N = {
     // Status bar
     'status.live': 'LIVE',
     'status.offline': 'OFFLINE',
-    'status.signals': 'signals',
-    'status.alerts': 'alerts',
-    'status.sources': 'sources',
-    'status.updating': '⏳ updating',
-    'status.kbd.refresh': 'refresh',
-    'status.kbd.close': 'close',
 
     // Nav
     'nav.live': 'Live',
@@ -4258,7 +4580,6 @@ const I18N = {
     'bar.emergence': '🌊 Emergence',
     'bar.adoption': '💊 Adoption',
     'bar.story': '📖 Story',
-    'story.hook_label': 'Hook',
 
     // Feed card
     'feed.details': '📖 Details',
@@ -4358,8 +4679,11 @@ const I18N = {
     'right.no_signals': 'No signals yet',
     'right.source_pulse': '📡 Source Pulse',
     'right.live_count': '{a}/{t} live',
-    'right.activity': '📊 Activity',
+    'right.activity': '🟢 Live',
     'right.activity_hours': '{h}h',
+    'right.sources_label': 'Sources',
+    'right.sources_active': 'Active sources',
+    'right.kbd_hint': 'R refresh · Esc close',
     'right.signals': 'Signals',
     'right.alerts': 'Alerts',
     'right.avg_virality': 'Avg virality',
@@ -4380,9 +4704,7 @@ const I18N = {
     'trigger.cooldown':      '⏳ You can run another trigger search in {min} min',
     'trigger.error':         '❌ Trigger search failed: {err}',
     'trigger.disabled':      '❌ Trigger search is currently unavailable.',
-    'trigger.help_quick':    '↳ Quick stage-1 hint. Run a deep Grok search for the live catalyst.',
     'modal.market_stage': '💹 Market Stage',
-    'modal.phase': '🧭 Narrative phase',
     'modal.metrics': '📊 Stats',
     'modal.meme_score': 'Meme Score',
     'modal.lifespan': 'Lifespan',
@@ -4448,6 +4770,19 @@ const I18N = {
     'settings.hidden_count': '{n} hidden. Visual filter in this browser only.',
     'settings.hidden_none': 'Nothing hidden — click sources in the sidebar to hide them.',
     'settings.hidden_show_all': 'Show all',
+
+    // ── Per-trend hide / archive (per-user, server-side, 7d retention) ──
+    'feed.hide_btn_tip': 'Hide this alert',
+    'toast.alert_hidden': 'Hidden',
+    'toast.undo': 'Undo',
+    'archive.title': '📦 Archive',
+    'archive.desc': 'Alerts you hid. Kept for 7 days, then auto-removed.',
+    'archive.empty': 'Nothing here yet — click ✕ on a card to hide it.',
+    'archive.restore': '↺ Restore',
+    'archive.clear_all': 'Clear archive',
+    'archive.clear_confirm': 'Remove all hidden alerts? This cannot be undone.',
+    'archive.count': '{n} hidden',
+    'archive.loading': 'Loading…',
 
     'settings.language': '🌐 Language',
     'settings.language_desc': 'Dashboard language. Bot stays in your Telegram language.',
@@ -4525,12 +4860,6 @@ const I18N = {
     // Status bar
     'status.live': 'LIVE',
     'status.offline': 'OFFLINE',
-    'status.signals': 'сигналы',
-    'status.alerts': 'алерты',
-    'status.sources': 'источники',
-    'status.updating': '⏳ обновляем',
-    'status.kbd.refresh': 'обновить',
-    'status.kbd.close': 'закрыть',
 
     // Nav
     'nav.live': 'Онлайн',
@@ -4585,7 +4914,6 @@ const I18N = {
     'bar.emergence': '🌊 Emergence',
     'bar.adoption': '💊 Adoption',
     'bar.story': '📖 Story',
-    'story.hook_label': 'Хук',
 
     // Feed card
     'feed.details': '📖 Подробнее',
@@ -4683,8 +5011,11 @@ const I18N = {
     'right.no_signals': 'Пока нет сигналов',
     'right.source_pulse': '📡 Пульс источников',
     'right.live_count': '{a}/{t} активных',
-    'right.activity': '📊 Активность',
+    'right.activity': '🟢 Live',
     'right.activity_hours': '{h}ч',
+    'right.sources_label': 'Источники',
+    'right.sources_active': 'Активных источников',
+    'right.kbd_hint': 'R обновить · Esc закрыть',
     'right.signals': 'Сигналы',
     'right.alerts': 'Алерты',
     'right.avg_virality': 'Ср. виральность',
@@ -4705,9 +5036,7 @@ const I18N = {
     'trigger.cooldown':      '⏳ Следующий поиск через {min} мин',
     'trigger.error':         '❌ Ошибка поиска триггера: {err}',
     'trigger.disabled':      '❌ Поиск триггера недоступен.',
-    'trigger.help_quick':    '↳ Быстрая stage-1 подсказка. Запусти глубокий Grok-поиск катализатора.',
     'modal.market_stage': '💹 Стадия рынка',
-    'modal.phase': '🧭 Фаза нарратива',
     'modal.metrics': '📊 Метрики',
     'modal.meme_score': 'Meme Score',
     'modal.lifespan': 'Срок жизни',
@@ -4773,6 +5102,19 @@ const I18N = {
     'settings.hidden_count': 'Сейчас скрыто: {n}. Это только визуальная фильтрация в твоём браузере.',
     'settings.hidden_none': 'Ничего не скрыто — можешь скрывать источники кликом в сайдбаре.',
     'settings.hidden_show_all': 'Показать все',
+
+    // ── Скрытие алертов / архив (per-user, server-side, 7 дней) ──
+    'feed.hide_btn_tip': 'Скрыть алерт',
+    'toast.alert_hidden': 'Скрыто',
+    'toast.undo': 'Отменить',
+    'archive.title': '📦 Архив',
+    'archive.desc': 'Алерты, которые ты скрыл. Хранятся 7 дней, потом удаляются.',
+    'archive.empty': 'Пусто — клик по ✕ на карточке скроет её.',
+    'archive.restore': '↺ Вернуть',
+    'archive.clear_all': 'Очистить архив',
+    'archive.clear_confirm': 'Удалить все скрытые алерты? Это нельзя отменить.',
+    'archive.count': 'Скрыто: {n}',
+    'archive.loading': 'Загрузка…',
 
     'settings.language': '🌐 Язык',
     'settings.language_desc': 'Язык дашборда. Бот остаётся на языке вашего Telegram.',
@@ -5481,7 +5823,7 @@ function FeedbackBar({ trend, variant }) {
   );
 }
 
-function FeedCard({ trend, onOpen }) {
+function FeedCard({ trend, onOpen, onHide }) {
   useLang();
   const catCls = CAT_CLS[trend.category] || 'cat-other';
   const catIco = CAT_ICONS[trend.category] || '📌';
@@ -5532,6 +5874,12 @@ function FeedCard({ trend, onOpen }) {
   const isFresh = ageMs < 60 * 60 * 1000;
 
   return h('div', { className: 'feed-card' + (isFresh ? ' is-fresh' : ''), onClick: handleClick },
+    onHide ? h('button', {
+      className: 'feed-hide-btn',
+      title: t('feed.hide_btn_tip'),
+      'aria-label': t('feed.hide_btn_tip'),
+      onClick: (e) => { e.stopPropagation(); onHide(trend); }
+    }, '✕') : null,
     h('div', { className: 'feed-card-head' },
       h('div', { className: 'feed-avatar ' + avatarCls },
         SOURCE_LOGOS[trend.source] ? h(SourceMark, { src: trend.source }) : srcIco
@@ -5622,8 +5970,8 @@ function FeedCard({ trend, onOpen }) {
 // Backward-compat alias so existing JSX keeps working if any remains
 const TrendCard = FeedCard;
 
-// ── RightPanel — AIO Feeds-style column with Top narratives / Pulse / Activity ─
-function RightPanel({ stats, hours, onOpenTrend }) {
+// ── RightPanel — AIO Feeds-style column with Top narratives / Live / Sources ─
+function RightPanel({ stats, hours, sources, scanning, onOpenTrend }) {
   useLang();
   // Top narratives from server-side stats (real top by adoption for the full window)
   // stats.topTrends is populated by /api/stats — same data as /top in TG bot
@@ -5635,6 +5983,14 @@ function RightPanel({ stats, hours, onOpenTrend }) {
   const totalSignals = stats ? stats.total || 0 : 0;
   const totalAlerts  = stats ? stats.alerts || 0 : 0;
   const avgScore     = stats ? stats.avgScore || 0 : 0;
+  const paused       = !!(stats && stats.paused);
+
+  // Sources mini-list — active vs disabled. Used to live in the bottom strip
+  // (StatusBar) which we removed; now collapses next to Activity here.
+  const srcList   = Array.isArray(sources) ? sources : [];
+  const activeSrc = srcList.filter(s => s.enabled).length;
+  const totalSrc  = srcList.length;
+  const srcOk     = totalSrc > 0 && activeSrc === totalSrc;
 
   return h('div', { className: 'right-panel-sticky' },
    h('div', { className: 'right-panel' },  // inner scroll container via right-panel-inner wrapper below
@@ -5672,10 +6028,16 @@ function RightPanel({ stats, hours, onOpenTrend }) {
 
     h('div', { className: 'right-sep' }),
 
-    // ── Activity summary ──
+    // ── Live activity (formerly "Activity" section + bottom statusbar) ──
+    // Title is just "🟢 Live" (or red dot when scanner paused) — replaces the
+    // bottom strip we removed. Sources sub-block lives here too: each source
+    // shows enabled state via a colored dot, total count in the head.
     h('div', { className: 'right-section' },
       h('div', { className: 'right-section-head' },
-        h('span', { className: 'right-section-title' }, t('right.activity')),
+        h('span', { className: 'right-section-title' },
+          h('span', { className: 'right-live-dot' + (paused ? ' paused' : '') }),
+          paused ? t('status.offline') : t('status.live')
+        ),
         h('span', { className: 'right-section-count' }, t('right.activity_hours', { h: hours }))
       ),
       h('div', { className: 'right-section-body' },
@@ -5692,7 +6054,27 @@ function RightPanel({ stats, hours, onOpenTrend }) {
             h('span', { className: 'activity-label' }, t('right.avg_virality')),
             h('span', { className: 'activity-val green' }, avgScore, h('span', { style: { fontSize: 11, color: 'var(--dim)', marginLeft: 4 } }, '/100'))
           )
-        )
+        ),
+        // ── Sources sub-block — moved here from the deleted bottom strip ──
+        totalSrc > 0 ? h('div', { className: 'right-sources' },
+          h('div', { className: 'right-sources-head' },
+            h('span', { className: 'right-sources-label' }, t('right.sources_label')),
+            h('span', {
+              className: 'right-sources-count',
+              style: { color: srcOk ? 'var(--green2)' : 'var(--orange)' }
+            }, activeSrc + '/' + totalSrc)
+          ),
+          h('div', { className: 'right-sources-list' },
+            srcList.map(s => h('span', {
+              key: s.source,
+              className: 'right-sources-pill' + (s.enabled ? ' on' : ' off'),
+              title: (SOURCE_LABELS[s.source] || s.source) + (s.enabled ? '' : ' — off')
+            },
+              h('span', { className: 'right-sources-dot' }),
+              h('span', { className: 'right-sources-glyph' }, SOURCE_ICONS[s.source] || '📡')
+            ))
+          )
+        ) : null
       )
     ),
 
@@ -5799,11 +6181,6 @@ function TriggerSection({ trend, lang, me }) {
           style: { color: 'var(--dim)', fontStyle: 'italic', opacity: 0.75 },
         }, t('modal.why_now_empty')),
 
-    // Quick-hint helper text — only when whyNow is present and the user can dig deeper
-    (trend.whyNow && isPro)
-      ? h('div', { style: { marginTop: 4, fontSize: 11, color: 'var(--dim)' } }, t('trigger.help_quick'))
-      : null,
-
     h('div', { style: { marginTop: 10 } },
       isPro
         ? h('button', {
@@ -5884,13 +6261,16 @@ function TrendModal({ trend, onClose, me = null }) {
   return h('div', { className: 'modal-overlay', onClick: e => { if (e.target === e.currentTarget) onClose(); } },
     h('div', { className: 'modal-drawer' },
 
-      // Head
+      // Head — alertType / category / manual / phase / source / time / close
+      // Phase moved here (used to live in its own labelled section). Without
+      // its old subtitle hint — the badge color + label is enough signal.
       h('div', { className: 'modal-head' },
         trend.alertType
           ? h('span', { className: 'badge badge-atype badge-atype-' + trend.alertType }, t('badge.alert_type.' + trend.alertType))
           : null,
         h('span', { className: 'badge ' + catCls }, catIco + ' ' + (trend.category || 'other')),
         trend.manualSubmitted ? h('span', { className: 'badge badge-manual', title: t('feed.manual_tip') }, '🧪 MANUAL') : null,
+        trend.narrativePhase ? h(PhaseBadge, { phase: trend.narrativePhase }) : null,
         h('div', { className: 'source-chip' }, srcIco, ' ', srcLbl),
         h('span', { className: 'time-cell', style: { fontSize: 11 } }, fmtTime(trend.firstSeen)),
         h('button', { className: 'modal-close', onClick: onClose }, t('app.esc_close'))
@@ -6023,32 +6403,25 @@ function TrendModal({ trend, onClose, me = null }) {
           )
         ) : null,
 
-        // Phase + two bars
-        trend.narrativePhase ? h('div', { className: 'modal-section' },
-          h('div', { className: 'modal-section-label' }, t('modal.phase')),
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 } },
-            h(PhaseBadge, { phase: trend.narrativePhase }),
-            h('span', { style: { fontSize: 12, color: 'var(--dim)' } },
-              phaseHint(trend.narrativePhase) || phaseHint('early')
-            )
-          ),
+        // Score bars \u2014 phase label and its hint moved out to the header chip.
+        // Story hook (when present) renders below the bars as a styled pull-
+        // quote so it reads as a narrative one-liner, not a slider sub-label.
+        h('div', { className: 'modal-section' },
           h(ScoreBar, { label: t('bar.emergence'), value: trend.emergenceScore || 0 }),
           h('div', { style: { height: 4 } }),
           h(ScoreBar, { label: t('bar.adoption'),  value: trend.adoptionScore || trend.memePotential || 0 }),
           (trend.storyScore || 0) > 0 ? h('div', { style: { height: 4 } }) : null,
           (trend.storyScore || 0) > 0
-            ? h(ScoreBar, {
-                label: t('bar.story'),
-                value: trend.storyScore || 0,
-                sub: trend.storyHook
-                  ? h('span', null,
-                      h('span', { style: { color: 'var(--dim)', marginRight: 6 } }, t('story.hook_label') + ':'),
-                      h('span', { style: { color: 'var(--text)', fontStyle: 'italic' } }, '\u201C' + trend.storyHook + '\u201D')
-                    )
-                  : null,
-              })
+            ? h(ScoreBar, { label: t('bar.story'), value: trend.storyScore || 0 })
+            : null,
+          (trend.storyScore || 0) > 0 && trend.storyHook
+            ? h('div', { className: 'story-hook' },
+                h('span', { className: 'story-hook-mark' }, '\u201C'),
+                h('span', { className: 'story-hook-text' }, trend.storyHook),
+                h('span', { className: 'story-hook-mark right' }, '\u201D')
+              )
             : null
-        ) : null,
+        ),
 
         // Stats grid — metrics at the very bottom
         h('div', { className: 'modal-section' },
@@ -6062,10 +6435,41 @@ function TrendModal({ trend, onClose, me = null }) {
               h('div', { className: 'modal-stat-label' }, t('modal.lifespan')),
               h('span', { className: 'lifespan' }, lifespanLabel(trend.predictedLifespan))
             ),
-            h('div', { className: 'modal-stat' },
-              h('div', { className: 'modal-stat-label' }, t('modal.virality')),
-              h('span', { style: { fontFamily: 'JetBrains Mono', fontWeight: 700, color: 'var(--accent2)' } }, trend.score || 0)
-            ),
+            // Virality cell — replaced raw score with per-source engagement
+            // metrics (👁 views · ❤️ likes · 💬 comments · 🔁 reposts). Pulls
+            // from trend.engagement (server unifies twitter/tiktok/reddit).
+            // Falls back to the raw score number when no metrics are available
+            // (google_trends, x_trends, manual rows).
+            (() => {
+              const e = trend.engagement || {};
+              const fmtCount = (n) => {
+                if (typeof n !== 'number' || n <= 0) return null;
+                if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + 'M';
+                if (n >= 1_000)     return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1) + 'K';
+                return String(n);
+              };
+              // Reddit puts upvotes into the views slot — use ⬆️ for clarity.
+              const isReddit = trend.source === 'reddit';
+              const viewIco = isReddit ? '⬆️' : '👁';
+              const items = [
+                { ico: viewIco, n: e.views },
+                { ico: '❤️', n: e.likes },
+                { ico: '💬', n: e.comments },
+                { ico: '🔁', n: e.reposts },
+              ].filter(it => fmtCount(it.n) !== null);
+
+              return h('div', { className: 'modal-stat' },
+                h('div', { className: 'modal-stat-label' }, t('modal.virality')),
+                items.length
+                  ? h('div', { className: 'modal-engagement' },
+                      items.map((it, i) => h('span', { key: i, className: 'modal-engagement-item' },
+                        h('span', { className: 'modal-engagement-ico' }, it.ico),
+                        h('span', { className: 'modal-engagement-num' }, fmtCount(it.n))
+                      ))
+                    )
+                  : h('span', { style: { fontFamily: 'JetBrains Mono', fontWeight: 700, color: 'var(--accent2)' } }, trend.score || 0)
+              );
+            })(),
             h('div', { className: 'modal-stat' },
               h('div', { className: 'modal-stat-label' }, t('modal.sentiment')),
               h('span', { className: sentCls }, sentLabel)
@@ -6131,46 +6535,6 @@ function NavClock({ refreshAt }) {
   return h(React.Fragment, null,
     h('span', { className: 'refresh-badge' }, '\u21bb ' + refreshIn + 's'),
     h('span', { className: 'nav-time' }, new Date(now).toLocaleTimeString(localeTag(), { hour: '2-digit', minute: '2-digit' }))
-  );
-}
-
-// ── StatusBar — bottom strip ─────────────────────────────────────────────────
-function StatusBar({ stats, scanning, sources }) {
-  useLang();
-  const active = (sources || []).filter(function(s) { return s.enabled; }).length;
-  const total  = (sources || []).length;
-  const paused = !!(stats && stats.paused);
-  const srcOk  = active === total && total > 0;
-  return h('div', { className: 'statusbar' },
-    h('span', {
-      className: 'statusbar-item',
-      style: { color: paused ? 'var(--red2)' : 'var(--green2)', fontWeight: 700 }
-    },
-      h('div', { className: 'statusbar-dot' + (paused ? ' paused' : '') }),
-      paused ? t('status.offline') : t('status.live')
-    ),
-    h('div', { className: 'statusbar-sep' }),
-    h('span', { className: 'statusbar-item' },
-      h('span', { className: 'sb-key' }, t('status.signals')),
-      h('b', null, String(stats ? stats.total || 0 : 0))
-    ),
-    h('span', { className: 'statusbar-item' },
-      h('span', { className: 'sb-key' }, t('status.alerts')),
-      h('b', null, String(stats ? stats.alerts || 0 : 0))
-    ),
-    h('span', { className: 'statusbar-item' },
-      h('span', { className: 'sb-key' }, t('status.sources')),
-      h('b', { style: { color: srcOk ? 'var(--green2)' : 'var(--orange)' } }, active + '/' + total)
-    ),
-    scanning
-      ? h('span', { className: 'statusbar-item', style: { color: 'var(--accent2)' } },
-          h('span', { className: 'sb-key', style: { color: 'var(--accent2)' } }, t('status.updating'))
-        )
-      : null,
-    h('span', { className: 'statusbar-hint' },
-      h('span', { className: 'statusbar-kbd' }, h('b', null, 'R'), t('status.kbd.refresh')),
-      h('span', { className: 'statusbar-kbd' }, h('b', null, 'Esc'), t('status.kbd.close'))
-    )
   );
 }
 
@@ -6782,10 +7146,129 @@ function SettingsPanel({ onBack, onResetHiddenSources, hiddenSourcesCount }) {
       })
     ),
 
+    // ── Archive (per-user, server-side, 7d retention) ──
+    h(ArchiveCard, null),
+
     // ── Reset ──
     h('div', { className: 'settings-actions' },
       h('button', { className: 'btn btn-ghost', onClick: resetAllPrefs }, t('settings.reset_all'))
     )
+  );
+}
+
+// ── ArchiveCard — list of user's hidden alerts (Settings → Archive section) ──
+// Fetches /api/trends/hidden, renders compact rows with restore + clear-all.
+// Loads on first mount; refetches after restore/clear so the list stays sync'd.
+// Stays inside SettingsPanel as a card so the archive doesn't need its own
+// route — feels like a Twitter "muted" sublist.
+function ArchiveCard() {
+  useLang();
+  const [items, setItems] = useState(null); // null = not loaded yet
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  // Collapsed by default — with 7d retention the list can be long, and the
+  // user usually opens Settings for other reasons. Click on the head expands
+  // and triggers the lazy fetch (no API call until the user actually wants it).
+  const [open, setOpen] = useState(false);
+
+  const load = useCallback(async () => {
+    setErr('');
+    try {
+      const data = await api('/trends/hidden');
+      setItems(Array.isArray(data?.trends) ? data.trends : []);
+    } catch (e) { setErr(e.message || 'load failed'); setItems([]); }
+  }, []);
+
+  // Fetch the first time the user opens the section (and never again unless
+  // the component re-mounts — Settings sheet remount per-open handles that).
+  useEffect(() => { if (open && items === null) load(); }, [open, items, load]);
+
+  const restore = async (trendId) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api('/trends/' + trendId + '/unhide', { method: 'POST' });
+      setItems(prev => (prev || []).filter(it => it.id !== trendId));
+    } catch (e) { setErr(e.message || 'restore failed'); }
+    finally { setBusy(false); }
+  };
+
+  const clearAll = async () => {
+    if (busy) return;
+    if (!items || !items.length) return;
+    if (!confirm(t('archive.clear_confirm'))) return;
+    setBusy(true);
+    try {
+      await api('/trends/hidden/clear', { method: 'POST' });
+      setItems([]);
+    } catch (e) { setErr(e.message || 'clear failed'); }
+    finally { setBusy(false); }
+  };
+
+  const fmtAge = (iso) => {
+    const ms = Date.now() - Date.parse(iso || '');
+    if (!isFinite(ms) || ms < 0) return '';
+    const m = Math.round(ms / 60000);
+    if (m < 60)        return m + 'm';
+    if (m < 60 * 24)   return Math.round(m / 60) + 'h';
+    return Math.round(m / 60 / 24) + 'd';
+  };
+
+  const count = items && items.length;
+
+  return h('div', { className: 'settings-card archive-card' + (open ? ' open' : '') },
+    // Clickable head — toggles collapse. Caret rotates 90° when open.
+    h('button', {
+      className: 'archive-head',
+      onClick: () => setOpen(v => !v),
+      'aria-expanded': open,
+    },
+      h('span', { className: 'archive-head-caret' }, '▸'),
+      h('span', { className: 'archive-head-title' }, t('archive.title')),
+      count ? h('span', { className: 'archive-head-count' }, t('archive.count', { n: items.length })) : null
+    ),
+    h('div', { className: 'settings-card-desc archive-card-desc' }, t('archive.desc')),
+
+    // Body is rendered only when open. CSS handles the slide-down feel via
+    // archive-fade-in keyframes; we still gate the React work with the open
+    // flag so an unopened archive never paints 200 rows.
+    open ? h('div', { className: 'archive-body' },
+      // Clear-all moved to the TOP per UX request — easier to find than at
+      // the bottom of a long list. Only shows when there are items.
+      count ? h('div', { className: 'archive-actions archive-actions-top' },
+        h('button', {
+          className: 'btn btn-ghost',
+          disabled: busy,
+          onClick: clearAll
+        }, t('archive.clear_all'))
+      ) : null,
+
+      items === null
+        ? h('div', { className: 'archive-empty' }, t('archive.loading'))
+        : items.length === 0
+          ? h('div', { className: 'archive-empty' }, t('archive.empty'))
+          : h('div', { className: 'archive-list' },
+              items.map(it => h('div', { key: it.id, className: 'archive-row' },
+                h('span', {
+                  className: 'archive-row-icon',
+                  style: { color: 'var(--text)' }
+                }, SOURCE_ICONS[it.source] || '📡'),
+                h('div', { className: 'archive-row-body' },
+                  h('div', { className: 'archive-row-title', title: it.title }, it.title),
+                  h('div', { className: 'archive-row-meta' },
+                    (SOURCE_LABELS[it.source] || it.source) + ' · ' + fmtAge(it.hiddenAt)
+                  )
+                ),
+                h('button', {
+                  className: 'archive-row-btn',
+                  disabled: busy,
+                  onClick: () => restore(it.id)
+                }, t('archive.restore'))
+              ))
+            ),
+
+      err ? h('div', { style: { color: 'var(--red, #f87171)', fontSize: 12, marginTop: 8 } }, '⚠ ' + err) : null
+    ) : null
   );
 }
 
@@ -7314,6 +7797,12 @@ function App() {
   const [view,       setView]       = useState('trends');
   const [modalTrend, setModalTrend] = useState(null);
   const [toasts,     setToasts]     = useState([]);
+  // Per-user hide: optimistic-remove via localHidden until next server fetch
+  // (server filters them out via hidden_trends table). pendingUndo holds the
+  // single most-recently hidden trend for the bottom undo toast (5s window).
+  const [localHidden, setLocalHidden] = useState(() => new Set());
+  const [pendingUndo, setPendingUndo] = useState(null); // { trend, expiresAt }
+  const undoTimerRef = useRef(null);
   const [search,     setSearch]     = useState('');
   const [refreshAt,  setRefreshAt]  = useState(Date.now() + 90000);
   // Refresh pulse — stays on for at least MIN_PULSE_MS so the animation is visible
@@ -7356,6 +7845,40 @@ function App() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
 
+  // ── Per-trend hide / undo ─────────────────────────────────────────────────
+  // Click ✕ on a card → optimistic remove via localHidden + POST /hide. The
+  // bottom undo toast is exclusive (only 1 at a time); a second hide bumps
+  // the previous one. After 5s the toast vanishes and the trend stays hidden
+  // until the user restores it from Settings → Archive.
+  const hideTrend = useCallback(async (trend) => {
+    if (!trend?.id) return;
+    setLocalHidden(prev => { const n = new Set(prev); n.add(trend.id); return n; });
+    // Set undo target — replaces previous one (single-toast policy).
+    if (undoTimerRef.current) { clearTimeout(undoTimerRef.current); undoTimerRef.current = null; }
+    setPendingUndo({ trend, expiresAt: Date.now() + 5000 });
+    undoTimerRef.current = setTimeout(() => setPendingUndo(null), 5000);
+    try {
+      await api('/trends/' + trend.id + '/hide', { method: 'POST' });
+    } catch (e) {
+      // Server reject → roll back local hide and show error toast. Don't
+      // touch pendingUndo — the user already pressed ✕ and got feedback.
+      setLocalHidden(prev => { const n = new Set(prev); n.delete(trend.id); return n; });
+      addToast('⚠ ' + (e.message || 'hide failed'), 'error');
+    }
+  }, [addToast]);
+
+  const undoHide = useCallback(async (trend) => {
+    if (!trend?.id) return;
+    if (undoTimerRef.current) { clearTimeout(undoTimerRef.current); undoTimerRef.current = null; }
+    setPendingUndo(null);
+    setLocalHidden(prev => { const n = new Set(prev); n.delete(trend.id); return n; });
+    try {
+      await api('/trends/' + trend.id + '/unhide', { method: 'POST' });
+    } catch (e) {
+      addToast('⚠ ' + (e.message || 'undo failed'), 'error');
+    }
+  }, [addToast]);
+
   const fetchData = useCallback(async () => {
     const started = Date.now();
     const MIN_PULSE_MS = 650; // minimum duration the refresh indicator stays visible
@@ -7389,6 +7912,10 @@ function App() {
         });
       } else {
         setTrends(tr.trends || []);
+        // Server is the source of truth for hidden — clear the optimistic
+        // local set so a "Restore" from the archive (which un-hides on
+        // server) lets the trend reappear in the feed.
+        setLocalHidden(new Set());
       }
       setSources(sr.sources || []);
     } catch (ex) { setError(t('toast.error_prefix', { e: ex.message })); }
@@ -7425,6 +7952,8 @@ function App() {
       setStats(st);
       setTotal(tr.total || 0);
       setTrends(tr.trends || []);
+      // Reset optimistic local-hide on full reload — server is authoritative.
+      setLocalHidden(new Set());
       setSources(sr.sources || []);
     } catch (ex) { setError(t('toast.error_prefix', { e: ex.message })); }
     const elapsed = Date.now() - started;
@@ -7594,6 +8123,10 @@ function App() {
   let visibleTrends = hiddenSources.size
     ? searchFiltered.filter(t => !hiddenSources.has(t.source))
     : searchFiltered;
+  // Optimistic local-hide — server filters these out on next fetch via
+  // hidden_trends table, but we hide instantly so the card disappears the
+  // moment the user clicks ✕ (don't wait for round-trip).
+  if (localHidden.size) visibleTrends = visibleTrends.filter(t => !localHidden.has(t.id));
   if (manualOnly) visibleTrends = visibleTrends.filter(t => t.manualSubmitted);
   if (alertTypes) {
     // Wildcard semantics: legacy rows without alertType still pass any
@@ -7613,8 +8146,18 @@ function App() {
     // Toast notifications (fixed top-right)
     h(Toasts, { toasts }),
 
-    // Bottom status bar
-    h(StatusBar, { stats, scanning, sources }),
+    // Bottom undo toast for "hide alert" — fades out after 5s
+    pendingUndo ? h('div', { className: 'undo-toast' },
+      h('span', { className: 'undo-toast-text' }, t('toast.alert_hidden')),
+      h('button', {
+        className: 'undo-toast-btn',
+        onClick: () => undoHide(pendingUndo.trend)
+      }, t('toast.undo'))
+    ) : null,
+
+    // Bottom status bar removed 2026-05-02 — Live indicator + sources list
+    // moved into RightPanel's Activity section so the dashboard reads as a
+    // single Twitter-like column-set without a footer strip.
 
     // Side drawer modal
     modalTrend ? h(TrendModal, { trend: modalTrend, onClose: () => setModalTrend(null), me }) : null,
@@ -8013,7 +8556,7 @@ function App() {
                       h('div', { className: 'empty-feed-sub' }, t('feed.empty.hint'))
                     )
                   : h('div', { className: 'feed-list' + (refreshPulse ? ' is-refreshing' : '') },
-                      visibleTrends.map(t => h(FeedCard, { key: t.id, trend: t, onOpen: setModalTrend }))
+                      visibleTrends.map(t => h(FeedCard, { key: t.id, trend: t, onOpen: setModalTrend, onHide: hideTrend }))
                     ),
 
               // Infinite-scroll sentinel + "loading more" spinner.
@@ -8044,6 +8587,8 @@ function App() {
           h(RightPanel, {
             stats,
             hours,
+            sources,
+            scanning,
             onOpenTrend: setModalTrend,
           })
     ),

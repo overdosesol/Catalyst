@@ -387,13 +387,17 @@ CSS `.src-mark-svg { width/height: 60% }` от родительского чип
 
 ## Dashboard layout
 
-CSS Grid с draggable column dividers. Левая колонка (sidebar) 180-540px, правая (rail) 240-630px. Prefs в `ts_prefs_v1.colLeft/.colRight`. Double-click на divider = reset.
+CSS Grid с draggable column dividers. Левая колонка (sidebar) 180-540px, правая (rail) 240-630px. Prefs в `ts_prefs_v1.colLeft/.colRight`. Double-click на divider = reset. Высоты грида/панелей через `calc(100vh - 50px)` (только nav-h, нижней полосы нет).
 
 **Modal sheets** (Settings / Account / Stats / Analyze): центрированные с `backdrop-filter: blur(14px)` + затемнением. Body scroll lock. Закрываются по Esc / клик на фон / ✕.
 
 **Bottom nav**: Feed + Stats + Analyze (pro/admin only). Inline `repeat(${tabs.length}, 1fr)` чтобы tab'ы распределялись равномерно.
 
-**TrendModal**: 6-cell stats grid 3×2 (Meme / Lifespan / Virality / Sentiment / Platforms / Velocity). Платформ ≥2 → зелёное `🌐 N`. Скорость через `fmtVelocity` → `12.5/h ↑`.
+**TrendModal**: head — alertType / category / 🧪 MANUAL / phase-badge / source / time / ✕. Body — media → title → trigger/whyNow → links → feedback → score bars (emergence / adoption / story) → story-hook pull-quote → 6-cell stats grid (Meme / Lifespan / Virality / Sentiment / Platforms / Velocity). Virality cell рендерит per-source engagement через emoji (`👁/⬆️ ❤️ 💬 🔁`) с `fmtCount` (1.2M / 45K). При отсутствии метрик fallback на `trend.score`.
+
+**Right panel (rail)**: Top narratives (top-10 по adoption) → 🟢 Live (signals/alerts/avg-virality stats + sources sub-block с brand-tinted pill'ами). Раньше тут была отдельная Activity-секция + нижняя полоса с источниками — слиты воедино 2026-05-02.
+
+**Per-trend hide / archive**: ✕-кнопка в правом верхнем углу `.feed-card` (hover-only, 22×22, border-radius 5 — под стиль badges). Клик → `POST /api/trends/:id/hide` + 5s undo-toast снизу. Архив в `SettingsPanel` — collapsible `<ArchiveCard>` (lazy-load на open), retention 7 дней (server cleanup из `index.js`).
 
 **Account panel**: hero card + аватар (TG profile photo через `/api/auth/avatar`, disk cache TTL 7 дней, throttle refresh 6ч) + plan badge + threshold slider + logout.
 
@@ -446,7 +450,7 @@ CSS Grid с draggable column dividers. Левая колонка (sidebar) 180-5
 | `src/analysis/market-stage.js` | [opt-in] MarketStage detection (feature flag) |
 | `src/analysis/filter-profiles.js` | Junk-filter penalty defaults (used via preset-config import) |
 | `src/collectors/{reddit,twitter,tiktok,google,x-trends}.js` | Apify-based collectors per platform |
-| `src/db/database.js` | SQLite wrapper, migrations, settings table, feedback_votes |
+| `src/db/database.js` | SQLite wrapper, migrations, settings, feedback_votes, hidden_trends |
 | `src/admin/server.js` | Admin SPA (inline React in template literal) |
 | `src/dashboard/server.js` | Dashboard SPA (inline React in template literal) |
 | `src/notifications/telegram.js` | TG bot, alerts, /menu, /analyze, reason wizard, attachXButton |

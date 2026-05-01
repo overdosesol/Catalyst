@@ -45,10 +45,12 @@ const VISION_SYSTEM_PROMPT = `You are a VISUAL DESCRIPTION preprocessor for a me
 You DO NOT score. You DO NOT judge. You DO NOT filter. Even if the visual looks weird, low-quality, or off-topic, you STILL describe it accurately — the next stage decides what to do with the info.
 
 For each input, return:
-- "visualCaption":  ONE OR TWO sentences describing WHAT is visible (subjects, scene, art style). ≤300 chars. Concrete and factual ("Cartoon TREE characters with anthropomorphic faces in brown earth-tone palette") not promotional ("amazing viral meme!").
-- "visibleText":    Any text, captions, watermarks, or on-screen writing visible IN the visual. Empty string if none. Quote it directly.
+- "visualCaption":  1-2 complete sentences describing WHAT is visible (subjects, scene, art style). Concrete and factual ("Cartoon TREE characters with anthropomorphic faces in brown earth-tone palette") not promotional ("amazing viral meme!"). Keep it tight — finish your thought, do not pad.
+- "visibleText":    Any text, captions, watermarks, or on-screen writing visible IN the visual. Empty string if none. Quote it directly. If there is a lot of text, summarize the gist — do not enumerate every word.
 - "mood":           SHORT phrase (1-3 words) describing emotional tone — absurd, wholesome, dramatic, surreal, humorous, ominous, mundane, etc.
-- "videoSummary":   For VIDEO: how the content unfolds over time. ≤200 chars. Empty string for static images.
+- "videoSummary":   For VIDEO: how the content unfolds over time, in 2-3 complete sentences. Empty string for static images.
+
+CRITICAL LENGTH RULE: every field must be a COMPLETE thought ending with proper punctuation. Never cut mid-sentence or mid-word — finish what you started, then stop. Brevity over filler, but never truncate a sentence to save space.
 
 If the visual is a video, focus on: opening shot, key action/transition, visible captions/audio cues. Analyze the FIRST 30 SECONDS only — ignore content past that.
 
@@ -263,10 +265,18 @@ export class GeminiCaptioner {
     const startedAt = Date.now();
     const maxBytes = (kind === 'video' ? this.videoMaxMb : this.imageMaxMb) * 1024 * 1024;
 
+    // Reddit (v.redd.it) and some Twitter video CDN endpoints reject the
+    // default Node fetch User-Agent. Use a Chrome UA for media downloads —
+    // mirrors what the Reddit collector already does for JSON API calls.
+    const downloadHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+    };
+
     // 1. HEAD probe for early size rejection
     let contentLength = null;
     try {
-      const head = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(8000) });
+      const head = await fetch(url, { method: 'HEAD', headers: downloadHeaders, signal: AbortSignal.timeout(8000) });
       const cl = head.headers.get('content-length');
       if (cl) contentLength = parseInt(cl, 10);
     } catch { /* HEAD optional */ }
@@ -279,7 +289,7 @@ export class GeminiCaptioner {
     let buffer;
     let downloadContentType = null;
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(this.downloadTimeoutMs) });
+      const res = await fetch(url, { headers: downloadHeaders, signal: AbortSignal.timeout(this.downloadTimeoutMs) });
       if (!res.ok) {
         this.logger?.warn?.(`[GeminiCaptioner] ${kind} download HTTP ${res.status}`);
         return null;
@@ -344,9 +354,25 @@ export class GeminiCaptioner {
           { inlineData: { mimeType, data: base64 } },
         ],
       }],
+      // Reddit/Twitter memes regularly trip default safety thresholds for
+      // HARASSMENT/SEXUALLY_EXPLICIT/etc. Without this override Gemini eats
+      // input tokens (visible in AI Studio dashboard) but returns empty
+      // candidates with finishReason=SAFETY — looks like "no output" to us.
+      // We're a description preprocessor, not a content host — turn off.
+      safetySettings: [
+        { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },
+        { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_NONE' },
+        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+      ],
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: GOOGLE_RESPONSE_SCHEMA,
+        maxOutputTokens: 1024,
+        // Gemini 2.5 Flash has dynamic thinking on by default — for a vision
+        // captioner we don't need it, and the thinking budget can eat the
+        // output budget (returning empty `text` while consuming tokens).
+        thinkingConfig: { thinkingBudget: 0 },
       },
     };
 
@@ -399,7 +425,24 @@ export class GeminiCaptioner {
       const data = await res.json();
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
       if (!text) {
-        this.logger?.warn?.(`[GeminiCaptioner] Google ${kind} returned empty text`);
+        // Empty output usually means SAFETY block, MAX_TOKENS hit, or RECITATION.
+        // These all consume input tokens (visible in AI Studio dashboard) so
+        // surfacing the actual reason is critical — without it we just see
+        // "empty text" and assume Google is broken.
+        const cand = data.candidates?.[0] || {};
+        const finishReason = cand.finishReason || 'unknown';
+        const safetyBlocked = (cand.safetyRatings || [])
+          .filter(r => r.blocked || r.probability === 'HIGH' || r.probability === 'MEDIUM')
+          .map(r => `${r.category}=${r.probability}`)
+          .join(',') || 'none';
+        const promptBlock = data.promptFeedback?.blockReason || null;
+        const inputTok  = data.usageMetadata?.promptTokenCount     || 0;
+        const outputTok = data.usageMetadata?.candidatesTokenCount || 0;
+        this.logger?.warn?.(
+          `[GeminiCaptioner] Google ${kind} returned empty text — ` +
+          `finishReason=${finishReason}, promptBlock=${promptBlock || 'none'}, ` +
+          `safetyTriggers=${safetyBlocked}, tokens=${inputTok}+${outputTok}`
+        );
         return null;
       }
       const parsed = this._parseJsonLoose(text);
@@ -417,11 +460,15 @@ export class GeminiCaptioner {
         `— "${(trend.title || '').slice(0, 50)}"`
       );
 
+      // Length is now controlled by the system prompt ("complete sentences,
+      // never cut mid-word"). Slices below are runaway-token safety nets, not
+      // formatting controls — generous enough to never clip a well-formed
+      // response.
       return {
-        visualCaption: String(parsed.visualCaption || '').trim().slice(0, 400),
-        visibleText:   String(parsed.visibleText   || '').trim().slice(0, 200),
+        visualCaption: String(parsed.visualCaption || '').trim().slice(0, 800),
+        visibleText:   String(parsed.visibleText   || '').trim().slice(0, 600),
         mood:          String(parsed.mood          || '').trim().slice(0, 60),
-        videoSummary:  String(parsed.videoSummary  || '').trim().slice(0, 250),
+        videoSummary:  String(parsed.videoSummary  || '').trim().slice(0, 800),
       };
     } catch (e) {
       this.logger?.warn?.(`[GeminiCaptioner] Google ${kind} call failed: ${e.message}`);
@@ -489,8 +536,8 @@ export class GeminiCaptioner {
         );
 
         return {
-          visualCaption: String(parsed.visualCaption || '').trim().slice(0, 400),
-          visibleText:   String(parsed.visibleText   || '').trim().slice(0, 200),
+          visualCaption: String(parsed.visualCaption || '').trim().slice(0, 800),
+          visibleText:   String(parsed.visibleText   || '').trim().slice(0, 600),
           mood:          String(parsed.mood          || '').trim().slice(0, 60),
           videoSummary:  '',
         };
