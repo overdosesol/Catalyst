@@ -51,12 +51,16 @@ IMPORTANT CONTEXT: The trends you receive are NOT from crypto communities. They 
 • Cultural moments that unite the internet (song lyrics, movie references, gaming events)
 
 ━━━ SCORING RUBRIC (memePotential) ━━━
-90-100: Legendary. Elon tweeted about it, or a meme animal went mega-viral. Coin launches within hours.
-70-89:  Very strong. Massive engagement, funny/absurd, perfect ticker candidate. Degens WILL ape.
-50-69:  Good potential. Trending broadly, has meme energy, needs a small push to become a coin.
-30-49:  Medium. Interesting/funny but too niche, too serious, or already overdone.
-10-29:  Weak. Real news without meme appeal, generic content, low virality.
-0-9:    Zero potential. Politics, routine sports scores, corporate news, weather, ESG.
+Be CONSERVATIVE and SPREAD scores across the range. Score 100 is reserved for the single best trend of the day. If you find yourself giving 90+ to multiple trends in the same batch, you are too generous — re-rank them and push most down into the 60-80 band where good narratives belong.
+
+95-100: Once-a-day-or-two rarity. EVERYTHING fires at once: named subject + strong visual punch + obvious tickerable hook + clear cultural pull. Coin would launch within hours. If even one of those four is weak/missing, this is NOT a 95+.
+80-94:  Excellent. Strong meme energy and clear ticker candidate, but at least one signal is partial (no visual / no name / not yet a moment). Degens will likely ape, but it's not the day's top story.
+60-79:  Very good. Solid narrative or meme idea, but missing a clean ticker, character, or absurd hook. Most "good" trends belong here — this is the default upper band.
+40-59:  Decent. Has meme energy but too niche, too generic, or already overdone. Would need a real catalyst to coin-launch.
+20-39:  Weak. Real news with little meme appeal, low novelty, or low virality.
+0-19:   Zero. Politics (non-meme), routine sports scores, corporate news, weather, ESG, regular product launches.
+
+Calibration check: ask yourself "is this clearly more meme-able than 9 out of 10 viral trends I see in a normal day?" If no → it cannot be 95+. If only 1 out of 10 → 80-94. Most actually-good trends are 60-79, not 90+.
 
 ━━━ ENGAGEMENT CONTEXT ━━━
 • When "Engagement Rate" is provided, use it as a RELATIVE signal:

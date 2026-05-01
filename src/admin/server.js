@@ -2527,8 +2527,11 @@ function PreStageSection() {
   const [err, setErr] = useState('');
 
   useEffect(() => {
-    fetch('/api/prestage/nano')
-      .then(r => r.json())
+    // MUST use api() helper — bare fetch() skips the X-Admin-Key header and
+    // gets 401'd, leaving nanoEnabled stuck at its initial value (so UI looks
+    // like a working toggle but DB never gets the '0' write, and nano keeps
+    // running on every cycle / manual analysis).
+    api('/api/prestage/nano')
       .then(d => setNanoEnabled(!!d.enabled))
       .catch(e => setErr('Не удалось загрузить статус: ' + e.message));
   }, []);
@@ -2537,9 +2540,7 @@ function PreStageSection() {
     if (busy) return;
     setBusy(true); setErr('');
     try {
-      const r = await fetch('/api/prestage/nano/toggle', { method: 'POST' });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const d = await r.json();
+      const d = await api('/api/prestage/nano/toggle', 'POST');
       setNanoEnabled(!!d.enabled);
     } catch (e) {
       setErr('Не удалось переключить: ' + e.message);

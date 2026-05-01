@@ -134,6 +134,22 @@ class TrendDatabase {
     // AI prompt context bounded; any truncation happens BEFORE insert.
     addIfMissing('feedback_votes', 'reason', 'TEXT');
 
+    // Per-user hidden trends — visual archive feature in dashboard. When a
+    // user clicks the ✕ on a trend card it lands here; feed query filters
+    // these out for that user only. Cleanup deletes rows older than 7 days
+    // so the archive doesn't grow unboundedly. Mirrors feedback_votes shape.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS hidden_trends (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        trend_id   INTEGER NOT NULL REFERENCES trends(id),
+        chat_id    TEXT NOT NULL,
+        hidden_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(trend_id, chat_id)
+      )
+    `);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_hidden_trends_chat ON hidden_trends(chat_id)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_hidden_trends_at   ON hidden_trends(hidden_at)`);
+
     // ── Stage 1 calibration examples (admin-curated, fed into SYSTEM_PROMPT) ─
     // Each row is either a calibration example (specific trend → known score)
     // or a "mistake" / anti-pattern (rule the model commonly violates).
@@ -866,6 +882,64 @@ class TrendDatabase {
   getAllSettings() {
     const rows = this.db.prepare(`SELECT key, value FROM settings`).all();
     return Object.fromEntries(rows.map(r => [r.key, r.value]));
+  }
+
+  // ── Hidden trends (per-user dashboard archive) ───────────────────────────
+  // Cleanup runs from index.js maintenance loop — drops rows older than the
+  // configured retention (default 7 days). Visible feed query in dashboard
+  // server uses getHiddenTrendIdsByChat() to exclude.
+
+  hideTrend(trendId, chatId) {
+    if (!trendId || !chatId) return;
+    this.db.prepare(`
+      INSERT INTO hidden_trends (trend_id, chat_id, hidden_at)
+      VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(trend_id, chat_id) DO UPDATE SET hidden_at = CURRENT_TIMESTAMP
+    `).run(trendId, String(chatId));
+  }
+
+  unhideTrend(trendId, chatId) {
+    if (!trendId || !chatId) return;
+    this.db.prepare(`DELETE FROM hidden_trends WHERE trend_id = ? AND chat_id = ?`)
+      .run(trendId, String(chatId));
+  }
+
+  /** Returns trend_ids hidden by this user (within retention). Used by feed
+   *  query to filter out rows the user has dismissed. */
+  getHiddenTrendIdsByChat(chatId, retentionDays = 7) {
+    if (!chatId) return [];
+    const cutoff = new Date(Date.now() - retentionDays * 86400_000).toISOString();
+    return this.db.prepare(
+      `SELECT trend_id FROM hidden_trends WHERE chat_id = ? AND hidden_at > ?`
+    ).all(String(chatId), cutoff).map(r => r.trend_id);
+  }
+
+  /** Joined hidden trends for the archive panel — title/source/score/etc.
+   *  Caller is responsible for shaping into TrendCard payload. */
+  getHiddenTrendsByChat(chatId, retentionDays = 7, limit = 200) {
+    if (!chatId) return [];
+    const cutoff = new Date(Date.now() - retentionDays * 86400_000).toISOString();
+    return this.db.prepare(`
+      SELECT t.*, h.hidden_at as hidden_at
+      FROM hidden_trends h
+      JOIN trends t ON t.id = h.trend_id
+      WHERE h.chat_id = ? AND h.hidden_at > ?
+      ORDER BY h.hidden_at DESC
+      LIMIT ?
+    `).all(String(chatId), cutoff, limit);
+  }
+
+  clearHiddenTrendsByChat(chatId) {
+    if (!chatId) return 0;
+    return this.db.prepare(`DELETE FROM hidden_trends WHERE chat_id = ?`)
+      .run(String(chatId)).changes;
+  }
+
+  /** Sweep entries past the retention window. Called from maintenance loop. */
+  cleanupExpiredHiddenTrends(retentionDays = 7) {
+    const cutoff = new Date(Date.now() - retentionDays * 86400_000).toISOString();
+    return this.db.prepare(`DELETE FROM hidden_trends WHERE hidden_at < ?`)
+      .run(cutoff).changes;
   }
 
   // ── Trend Management ─────────────────────────────────────────────────────────

@@ -817,7 +817,11 @@ class Scorer {
       const storyBonus = Math.min(15, Math.round((storyScore - 60) * 0.4));
       if (storyBonus > 0) {
         const beforeMeme = trend.memePotential;
-        trend.memePotential = Math.min(100, trend.memePotential + storyBonus);
+        // Soft cap: bonus eats remaining headroom rather than hard-clipping at 100.
+        // Reserves 100 for trends that already scored ~100 in Stage 1.
+        // meme=70 +15 → ~79; meme=85 +15 → ~90; meme=95 +15 → ~96.
+        const headroomScale = Math.max(0, (100 - beforeMeme) / 50);
+        trend.memePotential = Math.min(100, Math.round(beforeMeme + storyBonus * headroomScale));
         trend.stage2StoryBonus = {
           storyScore,
           bonus: storyBonus,
@@ -841,7 +845,9 @@ class Scorer {
       const nameBonus = Math.min(10, Math.round((nameStrength - 60) * 0.25));
       if (nameBonus > 0) {
         const beforeMeme = trend.memePotential;
-        trend.memePotential = Math.min(100, trend.memePotential + nameBonus);
+        // Same soft cap as storyBonus — diminishing returns near 100.
+        const headroomScale = Math.max(0, (100 - beforeMeme) / 50);
+        trend.memePotential = Math.min(100, Math.round(beforeMeme + nameBonus * headroomScale));
         trend.stage2NameBonus = {
           subjectName,
           nameStrength,
