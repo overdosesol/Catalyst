@@ -120,6 +120,21 @@ class DashboardServer {
     // — array of timestamps within the rolling window. Reset on restart, which
     // is fine for a soft cap (only matters for sustained abuse).
     this._manualAnalysisHits = new Map();
+
+    // Brand logo cache-bust. Compute mtime of assets/logo.png ONCE at boot;
+    // SPA embeds it as ?v=<this> on the <img> src. When you replace the
+    // file and redeploy, Docker rebuild resets the layer mtime → version
+    // changes → URL changes → browser cache miss → fresh bytes. Same
+    // mechanic webpack uses for content-hashed bundles.
+    // Falls back to startup time when the file is missing (still busts on
+    // every restart, which is acceptable for the no-logo case).
+    this._logoVersion = (() => {
+      try {
+        const p = path.join(process.cwd(), 'assets', 'logo.png');
+        const s = fs.statSync(p);
+        return Math.floor(s.mtimeMs);
+      } catch { return this.started; }
+    })();
   }
 
   /** Broadcast an event to all connected SSE clients. */
@@ -179,6 +194,14 @@ class DashboardServer {
     if (path === '/api/auth/initiate' && method === 'POST') return this._handleAuthInitiate(req, res);
     if (path === '/api/auth/verify'   && method === 'POST') return this._handleAuthVerify(req, res);
     if (path === '/api/auth/status'   && method === 'GET')  return this._handleAuthStatus(req, res, url);
+
+    // Brand logo — public. Static file baked into the Docker image at
+    // /app/assets/logo.png (Dockerfile: COPY --chown=node:node . .).
+    // Falls through to a 404 if the file is missing; the client SPA has
+    // an onError fallback to a 🐱 emoji so the nav never looks broken.
+    if (path === '/assets/logo.png' && method === 'GET') {
+      return this._handleBrandLogo(req, res);
+    }
 
     // Reddit video proxy — public. <video> elements can't send custom
     // Authorization headers; and the content itself is already a public
@@ -384,6 +407,45 @@ class DashboardServer {
   }
 
   // ── Avatar proxy ────────────────────────────────────────────────────────
+  /**
+   * GET /assets/logo.png — brand logo, baked into the Docker image at
+   * /app/assets/logo.png by `COPY --chown=node:node . .` in Dockerfile.
+   *
+   * Resolution order:
+   *   1. ./assets/logo.png  (relative to project root / docker workdir)
+   *
+   * Returns 404 when the file is missing — the SPA has an onError handler
+   * that swaps in the 🐱 emoji so the nav never breaks.
+   *
+   * Long-cached (immutable) because the logo only changes on a redeploy,
+   * which busts the cache via a different filename or hard refresh.
+   */
+  async _handleBrandLogo(req, res) {
+    try {
+      const logoPath = path.join(process.cwd(), 'assets', 'logo.png');
+      const stat = await fs.promises.stat(logoPath).catch(() => null);
+      if (!stat || !stat.isFile()) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Logo not bundled — see assets/README.md' }));
+      }
+      res.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Content-Length': stat.size,
+        'Cache-Control': 'public, max-age=86400, immutable',
+      });
+      const stream = fs.createReadStream(logoPath);
+      stream.on('error', (e) => {
+        this.logger.warn(`[BrandLogo] read error: ${e.message}`);
+        try { res.end(); } catch {}
+      });
+      stream.pipe(res);
+    } catch (e) {
+      this.logger.warn(`[BrandLogo] handler error: ${e.message}`);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'logo handler failed' }));
+    }
+  }
+
   // Streams the user's Telegram profile photo via a local disk cache.
   // Cache key: avatar_file_unique_id (stable per-photo across CDN rotations).
   async _handleAuthAvatar(req, res) {
@@ -1462,249 +1524,135 @@ class DashboardServer {
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
-    /* ===== THEME SYSTEM =====
-       Default = "midnight" (deep ink + electric cyan).
-       Switch via <body data-theme="teal|abyss|violet|acid|sunset|cyberpunk">.
-       Component colors should use var(--accent), var(--accent-rgb), etc. so they retint on theme change. */
+    /* ===== THEME SYSTEM (rewritten 2026-05-01) =====
+       4 monochrome themes inspired by X (Twitter):
+         ink   — pure black + X-blue        (default, no data-theme attribute)
+         dim   — X dim-mode bluish-graphite + X-blue
+         slate — neutral graphite + warm white accent (Apple-style)
+         mono  — pure grayscale, no chroma in accent (true monotone)
+
+       Design principles:
+         • One accent colour per theme, used sparingly
+         • Borders are translucent white at low alpha (no saturated tint)
+         • Surfaces use very subtle top-down gradients via box-shadow
+           inset 0 1px 0 rgba(255,255,255,.04) for the "glassy" feel
+         • Semantic state colours (green/red/orange/yellow) stay constant
+           across themes so OK/error signals don't shift hue per theme
+
+       Component colours should use var(--accent), var(--accent-rgb), etc.
+       so they re-tint on theme change. */
     :root {
-      /* Structural (mostly theme-invariant, but overridden per theme for real differentiation) */
-      --bg:          #060811;
-      --surface:     #0b0e1c;
-      --card:        #0f1328;
-      --card2:       #141935;
-      --card3:       #1b2146;
-      --border:      rgba(160,180,255,.07);
-      --border2:     rgba(160,180,255,.11);
-      --border3:     rgba(160,180,255,.17);
-      --text:        #e6ecff;
-      --text2:       #c2cbe8;
-      --muted:       #7f8bac;
-      --dim:         #48527a;
+      /* ── ink (default) — X true-black ── */
+      --bg:          #000000;
+      --surface:     #0a0a0a;
+      --card:        #16181c;
+      --card2:       #1c1f24;
+      --card3:       #232730;
+      --border:      rgba(239,243,244,.08);
+      --border2:     rgba(239,243,244,.14);
+      --border3:     rgba(239,243,244,.22);
+      --text:        #e7e9ea;
+      --text2:       #c4c8cc;
+      --muted:       #71767b;
+      --dim:         #4d5258;
 
-      /* Accent (primary) */
-      --accent:      #00e5ff;
-      --accent2:     #5eead4;
-      --accent-rgb:  0,229,255;
-      --accent-glow: rgba(0,229,255,.18);
+      /* Accent — X blue. Single hue, no rainbow. */
+      --accent:      #1d9bf0;
+      --accent2:     #4cb1ff;
+      --accent-rgb:  29,155,240;
+      --accent-glow: rgba(29,155,240,.16);
 
-      /* Semantic palette */
-      --green:       #34e0a1;
-      --green2:      #6bf0bd;
-      --green-rgb:   52,224,161;
-      --red:         #ff3d6e;
-      --red2:        #ff7099;
-      --red-rgb:     255,61,110;
-      --orange:      #ffa641;
-      --orange2:     #ffcb87;
-      --orange-rgb:  255,166,65;
-      --yellow:      #f6d34a;
-      --yellow2:     #ffe89d;
-      --blue:        #38bdf8;
-      --pink:        #f472b6;
-      --teal:        #14e0d1;
-      --purple:      #a78bfa;
+      /* Semantic state palette — kept constant across themes so OK/error
+         signals don't shift hue per theme. Tuned to match X's own
+         verified-green / red and a slightly muted orange. */
+      --green:       #00ba7c;
+      --green2:      #4ed6a4;
+      --green-rgb:   0,186,124;
+      --red:         #f4212e;
+      --red2:        #ff6b6b;
+      --red-rgb:     244,33,46;
+      --orange:      #ffa726;
+      --orange2:     #ffcc80;
+      --orange-rgb:  255,167,38;
+      --yellow:      #ffd400;
+      --yellow2:     #ffe566;
+      --blue:        #1d9bf0;
+      --pink:        #f91880;
+      --teal:        #00ba7c;
+      --purple:      #8b5cf6;
 
       --radius:      10px;
       --radius-sm:   8px;
       --radius-xs:   6px;
-      --shadow:      0 4px 20px rgba(0,0,0,.55);
-      --shadow-lg:   0 8px 40px rgba(0,0,0,.7);
+      --shadow:      0 4px 20px rgba(0,0,0,.6);
+      --shadow-lg:   0 8px 40px rgba(0,0,0,.75);
+      /* Glass effect tokens — used by .feed-card, .sheet, .session-bar
+         to get a "glossy surface" look. Subtle inset highlight reads as
+         light catching the top edge of a panel. */
       --glass:       rgba(255,255,255,.03);
       --glass2:      rgba(255,255,255,.055);
+      --gloss-top:   inset 0 1px 0 rgba(255,255,255,.04);
+      --gloss-edge:  inset 0 0 0 1px rgba(255,255,255,.02);
     }
 
-    /* --- Teal / Bioluminescent --- */
-    body[data-theme="teal"] {
-      --bg:          #04131a;
-      --surface:     #07202a;
-      --card:        #0a2a37;
-      --card2:       #0f3645;
-      --card3:       #164656;
-      --border:      rgba(94,234,212,.08);
-      --border2:     rgba(94,234,212,.14);
-      --border3:     rgba(94,234,212,.22);
-      --text:        #e5fbf6;
-      --text2:       #bfefe4;
-      --muted:       #6fae9f;
-      --dim:         #3d6b62;
-      --accent:      #2dd4bf;
-      --accent2:     #5eead4;
-      --accent-rgb:  45,212,191;
-      --accent-glow: rgba(45,212,191,.22);
-      --green:       #5eead4;
-      --green2:      #99f6e4;
-      --green-rgb:   94,234,212;
-      --red:         #ff6b6b;
-      --red2:        #ff9090;
-      --red-rgb:     255,107,107;
-      --orange:      #fbbf24;
-      --orange2:     #fcd34d;
-      --orange-rgb:  251,191,36;
-      --yellow:      #fde68a;
-      --yellow2:     #fef3c7;
+    /* ── dim — X dim-mode ── */
+    body[data-theme="dim"] {
+      --bg:          #15202b;
+      --surface:     #1a2733;
+      --card:        #1e2c3c;
+      --card2:       #243345;
+      --card3:       #2a3d52;
+      --border:      rgba(139,152,165,.14);
+      --border2:     rgba(139,152,165,.22);
+      --border3:     rgba(139,152,165,.32);
+      --text:        #ffffff;
+      --text2:       #d6dde3;
+      --muted:       #8b98a5;
+      --dim:         #5c6c7b;
+      --accent:      #1d9bf0;
+      --accent2:     #4cb1ff;
+      --accent-rgb:  29,155,240;
+      --accent-glow: rgba(29,155,240,.18);
     }
 
-    /* --- Abyss / Very Dark --- */
-    body[data-theme="abyss"] {
-      --bg:          #000000;
-      --surface:     #050508;
-      --card:        #0a0a0f;
-      --card2:       #0f0f17;
-      --card3:       #16161f;
-      --border:      rgba(255,255,255,.04);
-      --border2:     rgba(255,255,255,.07);
-      --border3:     rgba(255,255,255,.12);
-      --text:        #e0e0ea;
-      --text2:       #b5b5c4;
-      --muted:       #6a6a7a;
-      --dim:         #3a3a44;
-      --accent:      #9ca3af;
-      --accent2:     #d1d5db;
-      --accent-rgb:  156,163,175;
-      --accent-glow: rgba(156,163,175,.14);
-      --green:       #4ade80;
-      --green2:      #86efac;
-      --green-rgb:   74,222,128;
-      --red:         #f87171;
-      --red2:        #fca5a5;
-      --red-rgb:     248,113,113;
-      --orange:      #fb923c;
-      --orange2:     #fdba74;
-      --orange-rgb:  251,146,60;
-      --yellow:      #facc15;
-      --yellow2:     #fde047;
-      --shadow:      0 4px 20px rgba(0,0,0,.8);
-      --shadow-lg:   0 8px 40px rgba(0,0,0,.9);
+    /* ── slate — Apple-style neutral graphite, white accent ── */
+    body[data-theme="slate"] {
+      --bg:          #0e0f10;
+      --surface:     #16181a;
+      --card:        #1c1e20;
+      --card2:       #25282b;
+      --card3:       #2f3236;
+      --border:      rgba(255,255,255,.06);
+      --border2:     rgba(255,255,255,.10);
+      --border3:     rgba(255,255,255,.18);
+      --text:        #f5f5f7;
+      --text2:       #c8c9cc;
+      --muted:       #86868b;
+      --dim:         #515154;
+      --accent:      #ffffff;
+      --accent2:     #d4d4d6;
+      --accent-rgb:  255,255,255;
+      --accent-glow: rgba(255,255,255,.10);
     }
 
-    /* --- Violet / Twilight --- */
-    body[data-theme="violet"] {
-      --bg:          #0d0520;
-      --surface:     #17092e;
-      --card:        #1e0c3c;
-      --card2:       #28114d;
-      --card3:       #341761;
-      --border:      rgba(196,181,253,.08);
-      --border2:     rgba(196,181,253,.13);
-      --border3:     rgba(196,181,253,.2);
-      --text:        #f3ecff;
-      --text2:       #d9ccf5;
-      --muted:       #9d8ec2;
-      --dim:         #5c4e7e;
-      --accent:      #c084fc;
-      --accent2:     #e9d5ff;
-      --accent-rgb:  192,132,252;
-      --accent-glow: rgba(192,132,252,.22);
-      --green:       #34d399;
-      --green2:      #6ee7b7;
-      --green-rgb:   52,211,153;
-      --red:         #fb7185;
-      --red2:        #fda4af;
-      --red-rgb:     251,113,133;
-      --orange:      #f59e0b;
-      --orange2:     #fbbf24;
-      --orange-rgb:  245,158,11;
-      --yellow:      #fcd34d;
-      --yellow2:     #fde68a;
-      --pink:        #f0abfc;
-      --purple:      #d8b4fe;
-    }
-
-    /* --- Acid / Toxic Green --- */
-    body[data-theme="acid"] {
-      --bg:          #060a04;
-      --surface:     #0a120a;
-      --card:        #0e1a0c;
-      --card2:       #142413;
-      --card3:       #1d311a;
-      --border:      rgba(163,230,53,.08);
-      --border2:     rgba(163,230,53,.15);
-      --border3:     rgba(163,230,53,.24);
-      --text:        #eaffd0;
-      --text2:       #cef29a;
-      --muted:       #84a368;
-      --dim:         #4a6237;
-      --accent:      #a3e635;
-      --accent2:     #d9f99d;
-      --accent-rgb:  163,230,53;
-      --accent-glow: rgba(163,230,53,.28);
-      --green:       #84cc16;
-      --green2:      #bef264;
-      --green-rgb:   132,204,22;
-      --red:         #f43f5e;
-      --red2:        #fb7185;
-      --red-rgb:     244,63,94;
-      --orange:      #f97316;
-      --orange2:     #fb923c;
-      --orange-rgb:  249,115,22;
-      --yellow:      #eab308;
-      --yellow2:     #facc15;
-      --pink:        #ec4899;
-    }
-
-    /* --- Sunset / Bonus warm --- */
-    body[data-theme="sunset"] {
-      --bg:          #140610;
-      --surface:     #200a18;
-      --card:        #2a0f1e;
-      --card2:       #3a1528;
-      --card3:       #4d1d34;
-      --border:      rgba(251,146,60,.08);
-      --border2:     rgba(251,146,60,.14);
-      --border3:     rgba(251,146,60,.22);
-      --text:        #fff1e6;
-      --text2:       #f5d5bd;
-      --muted:       #b38670;
-      --dim:         #6b4a3c;
-      --accent:      #fb7185;
-      --accent2:     #fda4af;
-      --accent-rgb:  251,113,133;
-      --accent-glow: rgba(251,113,133,.22);
-      --green:       #4ade80;
-      --green2:      #86efac;
-      --green-rgb:   74,222,128;
-      --red:         #ef4444;
-      --red2:        #f87171;
-      --red-rgb:     239,68,68;
-      --orange:      #fb923c;
-      --orange2:     #fdba74;
-      --orange-rgb:  251,146,60;
-      --yellow:      #fbbf24;
-      --yellow2:     #fcd34d;
-      --pink:        #f472b6;
-    }
-
-    /* --- Cyberpunk / Magenta + Cyan --- */
-    body[data-theme="cyberpunk"] {
-      --bg:          #0a0418;
-      --surface:     #130827;
-      --card:        #1a0b36;
-      --card2:       #251048;
-      --card3:       #32155e;
-      --border:      rgba(236,72,153,.09);
-      --border2:     rgba(236,72,153,.16);
-      --border3:     rgba(236,72,153,.26);
-      --text:        #fdf0ff;
-      --text2:       #f0c8ff;
-      --muted:       #b182c2;
-      --dim:         #64476f;
-      --accent:      #f0abfc;
-      --accent2:     #22d3ee;
-      --accent-rgb:  240,171,252;
-      --accent-glow: rgba(240,171,252,.28);
-      --green:       #22d3ee;
-      --green2:      #67e8f9;
-      --green-rgb:   34,211,238;
-      --red:         #ef4444;
-      --red2:        #f87171;
-      --red-rgb:     239,68,68;
-      --orange:      #fb923c;
-      --orange2:     #fdba74;
-      --orange-rgb:  251,146,60;
-      --yellow:      #fde047;
-      --yellow2:     #fef08a;
-      --pink:        #ec4899;
-      --purple:      #c084fc;
+    /* ── mono — pure grayscale, no chroma ── */
+    body[data-theme="mono"] {
+      --bg:          #0d0d0d;
+      --surface:     #161616;
+      --card:        #1d1d1d;
+      --card2:       #232323;
+      --card3:       #2c2c2c;
+      --border:      rgba(255,255,255,.07);
+      --border2:     rgba(255,255,255,.12);
+      --border3:     rgba(255,255,255,.20);
+      --text:        #f0f0f0;
+      --text2:       #c0c0c0;
+      --muted:       #808080;
+      --dim:         #4d4d4d;
+      --accent:      #b8b8b8;
+      --accent2:     #d4d4d4;
+      --accent-rgb:  184,184,184;
+      --accent-glow: rgba(255,255,255,.08);
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1762,7 +1710,11 @@ class DashboardServer {
     /* ── Nav ── */
     .nav {
       position: sticky; top: 0; z-index: 200;
-      background: linear-gradient(180deg, rgba(12,12,22,.96) 0%, rgba(8,8,15,.92) 100%);
+      /* 2026-05-01: theme-tied bg — was hardcoded rgba(12,12,22) blue tint
+         from the old midnight palette, looked off against the new ink theme
+         which is pure #000. var(--bg) → var(--surface) gradient gives just
+         enough elevation to separate nav from content without a colour shift. */
+      background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
       backdrop-filter: blur(18px) saturate(1.3);
       -webkit-backdrop-filter: blur(18px) saturate(1.3);
       border-bottom: 1px solid var(--border);
@@ -1783,12 +1735,33 @@ class DashboardServer {
       white-space: nowrap;
     }
     .nav-logo-icon {
-      font-size: 18px; line-height: 1;
+      font-size: 22px; line-height: 1;
       display: inline-flex; align-items: center; justify-content: center;
-      width: 28px; height: 28px; border-radius: 8px;
-      background: linear-gradient(135deg, rgba(var(--accent-rgb), .22), rgba(var(--accent-rgb), .05));
-      border: 1px solid rgba(var(--accent-rgb), .28);
-      box-shadow: 0 2px 10px rgba(var(--accent-rgb), .18), inset 0 1px 0 rgba(255,255,255,.05);
+      /* Bumped 28→38 (2026-05-01) — at 28px the cat-outline artwork was
+         too small to read in the nav. 38 fits comfortably in the 50px
+         nav bar (50−2×6 padding = ample headroom). */
+      width: 38px; height: 38px; border-radius: 10px;
+      background: linear-gradient(135deg, rgba(var(--accent-rgb), .25), rgba(var(--accent-rgb), .06));
+      border: 1px solid rgba(var(--accent-rgb), .32);
+      box-shadow: 0 2px 12px rgba(var(--accent-rgb), .22), inset 0 1px 0 rgba(255,255,255,.06);
+      overflow: hidden;
+      transition: background .15s, border-color .15s, box-shadow .15s, transform .18s;
+    }
+    .nav-logo:hover .nav-logo-icon {
+      transform: scale(1.04);
+      box-shadow: 0 3px 16px rgba(var(--accent-rgb), .32), inset 0 1px 0 rgba(255,255,255,.08);
+    }
+    /* Logo PNG — fills the badge edge-to-edge. object-fit: contain keeps
+       original aspect ratio. For PNGs with a transparent background the
+       teal-gradient badge shows through as a subtle frame ("подсветка"
+       in the original Catalyst nav design). For PNGs with their own
+       solid background, the artwork covers the whole square.
+       2026-05-01: dropped 3px inset — at 38×38 the artwork was eating
+       only 32×32 visually, looked too small inside the frame. */
+    .nav-logo-img {
+      width: 100%; height: 100%;
+      object-fit: contain;
+      display: block;
     }
     .nav-logo-text {
       background: linear-gradient(180deg, #fff 0%, #cfd4ff 100%);
@@ -1908,14 +1881,20 @@ class DashboardServer {
     /* In dashboard-grid the sidebar is app-shell (overrides above) */
     .sidebar-section {
       display: flex; align-items: center; justify-content: space-between;
-      font-size: 9px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 1.4px; color: var(--accent); padding: 8px 8px 6px;
-      margin-top: 6px;
+      /* 2026-05-01 polish: dropped the "shouty" 9px / letter-spacing 1.4px
+         look — section headers were the loudest thing on the page. The
+         calmer treatment (10.5px, modest spacing, --muted colour) keeps
+         content as the focal point. Tightened vertical padding so the
+         sidebar fits a 720p viewport without a vestigial scrollbar. */
+      font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .8px; color: var(--muted); padding: 8px 8px 3px;
+      margin-top: 0;
     }
-    .sidebar-section:first-child { margin-top: 0; }
+    .sidebar-section:first-child { margin-top: 0; padding-top: 2px; }
     .sidebar-section-link {
-      font-size: 9px; font-weight: 600; letter-spacing: 1px;
-      color: var(--muted); cursor: pointer; padding: 2px 6px; border-radius: 4px;
+      font-size: 10px; font-weight: 600; letter-spacing: .4px;
+      color: var(--dim); cursor: pointer; padding: 2px 6px; border-radius: 4px;
+      text-transform: none;
       transition: all .15s;
     }
     .sidebar-section-link:hover { color: var(--accent2); background: rgba(var(--accent-rgb), .08); }
@@ -2014,7 +1993,7 @@ class DashboardServer {
     }
     .source-item:hover .source-eye { opacity: .75; }
 
-    .sidebar-divider { height: 1px; background: var(--border); margin: 10px 6px; }
+    .sidebar-divider { height: 1px; background: var(--border); margin: 6px 6px; }
 
     /* ── Sidebar filters ── */
     .sidebar-filters { padding: 2px 2px; display: flex; flex-direction: column; gap: 10px; }
@@ -2064,7 +2043,7 @@ class DashboardServer {
     /* ── Sidebar footer (unified bottom nav: Feed / Stats / Settings) ── */
     .sidebar-footer {
       margin-top: auto;
-      padding: 10px 4px 4px;
+      padding: 6px 4px 4px;
       border-top: 1px solid var(--border);
       background: linear-gradient(180deg, transparent 0%, rgba(0,0,0,.15) 100%);
     }
@@ -2608,8 +2587,12 @@ class DashboardServer {
     /* ── Account hero card ── */
     .account-hero {
       display: flex; align-items: center; gap: 18px;
-      background: linear-gradient(135deg, rgba(var(--accent-rgb), .09) 0%, var(--card) 70%);
-      border: 1px solid rgba(var(--accent-rgb), .2) !important;
+      /* 2026-05-01: dropped the bright accent-gradient — was rendering an
+         electric-blue diagonal across the card on the ink theme. Plain
+         --surface matches the rest of the settings-cards. The avatar
+         retains its accent ring as the single colour focal point. */
+      background: var(--surface);
+      border: 1px solid var(--border) !important;
     }
     .account-avatar-big {
       flex-shrink: 0;
@@ -2617,9 +2600,12 @@ class DashboardServer {
       display: flex; align-items: center; justify-content: center;
       font-size: 28px; font-weight: 800; letter-spacing: -1px;
       color: var(--text);
-      background: linear-gradient(135deg, rgba(var(--accent-rgb), .4), rgba(var(--accent-rgb), .12));
-      border: 2px solid rgba(var(--accent-rgb), .5);
-      box-shadow: 0 4px 16px rgba(var(--accent-rgb), .25), inset 0 1px 0 rgba(255,255,255,.1);
+      /* Subtler avatar ring — was a heavy gradient + 2px accent border +
+         coloured glow. On X-style monochrome the avatar should be the focal
+         point but not shouty. */
+      background: var(--card2);
+      border: 1px solid rgba(var(--accent-rgb), .35);
+      box-shadow: 0 2px 10px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.06);
       overflow: hidden;
     }
     .account-avatar-big img {
@@ -2642,7 +2628,10 @@ class DashboardServer {
     .account-hero-chip-v { color: var(--text2); font-family: 'JetBrains Mono', monospace; font-weight: 600; }
     .settings-title { font-size: 17px; font-weight: 800; color: var(--text); letter-spacing: -.3px; }
     .settings-card {
-      background: var(--card); border: 1px solid var(--border);
+      /* 2026-05-01: was --card (#16181c) — too bright on the new ink theme.
+         --surface matches feed-cards/right-section so everything reads as
+         one calm monochrome surface. */
+      background: var(--surface); border: 1px solid var(--border);
       border-radius: var(--radius); padding: 18px 20px; margin-bottom: 12px; box-shadow: var(--shadow);
     }
     .settings-card-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 3px; }
@@ -2737,28 +2726,20 @@ class DashboardServer {
       width: 100%; height: 14px; border-radius: 6px;
       border: 1px solid rgba(255,255,255,.06);
     }
-    /* midnight (default / no attr) */
-    .theme-swatch[data-theme-preview="midnight"]  .theme-swatch-dot-bg     { background: #060811; }
-    .theme-swatch[data-theme-preview="midnight"]  .theme-swatch-dot-accent { background: linear-gradient(90deg,#00e5ff,#5eead4); }
-    .theme-swatch[data-theme-preview="midnight"]  .theme-swatch-dot-card   { background: #141935; }
-    .theme-swatch[data-theme-preview="teal"]      .theme-swatch-dot-bg     { background: #04131a; }
-    .theme-swatch[data-theme-preview="teal"]      .theme-swatch-dot-accent { background: linear-gradient(90deg,#2dd4bf,#5eead4); }
-    .theme-swatch[data-theme-preview="teal"]      .theme-swatch-dot-card   { background: #0f3645; }
-    .theme-swatch[data-theme-preview="abyss"]     .theme-swatch-dot-bg     { background: #000000; }
-    .theme-swatch[data-theme-preview="abyss"]     .theme-swatch-dot-accent { background: linear-gradient(90deg,#9ca3af,#d1d5db); }
-    .theme-swatch[data-theme-preview="abyss"]     .theme-swatch-dot-card   { background: #0f0f17; }
-    .theme-swatch[data-theme-preview="violet"]    .theme-swatch-dot-bg     { background: #0d0520; }
-    .theme-swatch[data-theme-preview="violet"]    .theme-swatch-dot-accent { background: linear-gradient(90deg,#c084fc,#e9d5ff); }
-    .theme-swatch[data-theme-preview="violet"]    .theme-swatch-dot-card   { background: #28114d; }
-    .theme-swatch[data-theme-preview="acid"]      .theme-swatch-dot-bg     { background: #060a04; }
-    .theme-swatch[data-theme-preview="acid"]      .theme-swatch-dot-accent { background: linear-gradient(90deg,#a3e635,#d9f99d); }
-    .theme-swatch[data-theme-preview="acid"]      .theme-swatch-dot-card   { background: #142413; }
-    .theme-swatch[data-theme-preview="sunset"]    .theme-swatch-dot-bg     { background: #140610; }
-    .theme-swatch[data-theme-preview="sunset"]    .theme-swatch-dot-accent { background: linear-gradient(90deg,#fb7185,#fda4af); }
-    .theme-swatch[data-theme-preview="sunset"]    .theme-swatch-dot-card   { background: #3a1528; }
-    .theme-swatch[data-theme-preview="cyberpunk"] .theme-swatch-dot-bg     { background: #0a0418; }
-    .theme-swatch[data-theme-preview="cyberpunk"] .theme-swatch-dot-accent { background: linear-gradient(90deg,#f0abfc,#22d3ee); }
-    .theme-swatch[data-theme-preview="cyberpunk"] .theme-swatch-dot-card   { background: #251048; }
+    /* Theme swatch previews — match the actual theme palettes above. Each
+       row shows bg / accent / card so the user can preview at a glance. */
+    .theme-swatch[data-theme-preview="ink"]   .theme-swatch-dot-bg     { background: #000000; }
+    .theme-swatch[data-theme-preview="ink"]   .theme-swatch-dot-accent { background: #1d9bf0; }
+    .theme-swatch[data-theme-preview="ink"]   .theme-swatch-dot-card   { background: #16181c; }
+    .theme-swatch[data-theme-preview="dim"]   .theme-swatch-dot-bg     { background: #15202b; }
+    .theme-swatch[data-theme-preview="dim"]   .theme-swatch-dot-accent { background: #1d9bf0; }
+    .theme-swatch[data-theme-preview="dim"]   .theme-swatch-dot-card   { background: #1e2c3c; }
+    .theme-swatch[data-theme-preview="slate"] .theme-swatch-dot-bg     { background: #0e0f10; }
+    .theme-swatch[data-theme-preview="slate"] .theme-swatch-dot-accent { background: #ffffff; }
+    .theme-swatch[data-theme-preview="slate"] .theme-swatch-dot-card   { background: #1c1e20; }
+    .theme-swatch[data-theme-preview="mono"]  .theme-swatch-dot-bg     { background: #0d0d0d; }
+    .theme-swatch[data-theme-preview="mono"]  .theme-swatch-dot-accent { background: #b8b8b8; }
+    .theme-swatch[data-theme-preview="mono"]  .theme-swatch-dot-card   { background: #1d1d1d; }
     .stats-view { display: grid; gap: 12px; }
     .stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
     .stats-block { padding: 14px 16px; }
@@ -2780,12 +2761,34 @@ class DashboardServer {
     .stats-top-card:hover { border-color: rgba(var(--accent-rgb), .25); background: rgba(var(--accent-rgb), .05); }
     .stats-top-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 8px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     .stats-top-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--muted); font-size: 10px; }
-    .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 13px 0; border-top: 1px solid var(--border); }
+    .setting-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 20px; padding: 13px 0; border-top: 1px solid var(--border);
+      min-width: 0;
+    }
     .setting-row:first-of-type { border-top: none; }
-    .setting-label { display: flex; flex-direction: column; gap: 3px; flex: 1; }
+    /* Stacked variant — for controls that need full row width (multi-toggle
+       groups, long select dropdowns, etc.). Label sits on top; control
+       fills the row below. */
+    .setting-row-stacked {
+      flex-direction: column; align-items: stretch; gap: 10px;
+    }
+    .setting-row-stacked .setting-control {
+      width: 100%; flex-shrink: 1;
+    }
+    .setting-label {
+      display: flex; flex-direction: column; gap: 3px; flex: 1;
+      min-width: 0;
+    }
     .setting-name  { font-size: 12px; font-weight: 600; color: var(--text); }
-    .setting-hint  { font-size: 10px; color: var(--muted); }
-    .setting-control { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+    .setting-hint  { font-size: 10px; color: var(--muted); line-height: 1.4; }
+    .setting-control {
+      display: flex; align-items: center; gap: 12px;
+      /* Allow the control column to shrink so its inner content doesn't
+         push the row wider than its parent (Account sheet at 560px). */
+      min-width: 0; flex-shrink: 1;
+      max-width: 100%;
+    }
     .setting-control input[type=range] { width: 130px; accent-color: var(--accent); height: 3px; cursor: pointer; }
     .setting-val { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; color: var(--accent2); min-width: 30px; text-align: right; }
     .settings-actions { display: flex; gap: 10px; margin-top: 10px; justify-content: flex-end; }
@@ -2814,19 +2817,32 @@ class DashboardServer {
     .pref-toggle.on .pref-toggle-knob { transform: translateX(20px); }
 
     /* ── Alert-type toggle group (settings card) ── */
-    .atype-toggle-group { display: flex; flex-direction: column; gap: 6px; min-width: 280px; }
+    .atype-toggle-group {
+      display: flex; flex-direction: column; gap: 6px;
+      min-width: 0;        /* allow group to shrink inside narrow rows */
+      max-width: 100%;
+    }
     .atype-toggle {
       display: flex; align-items: center; gap: 10px;
       padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
       background: var(--card2); color: var(--text); cursor: pointer;
       font-size: 12px; text-align: left; line-height: 1.3;
       transition: background .12s, border-color .12s;
+      min-width: 0;        /* lets flex children inside actually shrink */
+      width: 100%;
     }
     .atype-toggle:hover { border-color: var(--accent); background: rgba(255,255,255,.04); }
     .atype-toggle.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
     .atype-toggle:disabled { opacity: 0.6; cursor: wait; }
-    .atype-toggle-icon { font-size: 14px; line-height: 1; }
-    .atype-toggle-label { flex: 1; }
+    .atype-toggle-icon { font-size: 14px; line-height: 1; flex-shrink: 0; }
+    /* Label wraps cleanly on narrow widths instead of overflowing the
+       toggle border. min-width:0 is the canonical fix for flex children
+       that contain potentially-long text. */
+    .atype-toggle-label {
+      flex: 1; min-width: 0;
+      overflow-wrap: break-word;
+      word-break: break-word;
+    }
     .atype-foot { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; font-size: 11px; }
     .atype-saved { color: var(--green2, #2ed573); }
     .atype-err   { color: var(--red2, #ff6b6b); }
@@ -2935,9 +2951,13 @@ class DashboardServer {
     @keyframes sheetPop { from { opacity:0; transform: translateY(12px) scale(.97); } to { opacity:1; transform: translateY(0) scale(1); } }
     .sheet-overlay {
       position: fixed; inset: 0; z-index: 7000;
-      background: rgba(4,6,14,.55);
-      backdrop-filter: blur(14px) saturate(1.1);
-      -webkit-backdrop-filter: blur(14px) saturate(1.1);
+      /* 2026-05-01: was rgba(4,6,14,.55) — leftover blue tint from the old
+         midnight palette + saturate(1.1) which amplified any remaining blue
+         in the page behind the blur. Pure black at higher opacity gives a
+         neutral, theme-agnostic blackout. */
+      background: rgba(0,0,0,.62);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
       animation: sheetIn .22s ease;
       display: flex; align-items: center; justify-content: center;
       padding: 28px 20px;
@@ -2945,7 +2965,7 @@ class DashboardServer {
     }
     .sheet {
       position: relative;
-      width: 100%; max-width: 760px;
+      width: 100%; max-width: 720px;
       max-height: calc(100vh - 56px);
       background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
       border: 1px solid var(--border2);
@@ -2955,6 +2975,9 @@ class DashboardServer {
       display: flex; flex-direction: column;
       overflow: hidden;
     }
+    /* Narrow Analyze sheet — input form + result preview reads better at
+       a tighter width. Same for Account (profile + settings rows). */
+    .sheet.sheet-narrow { max-width: 560px; }
     .sheet-head {
       display: flex; align-items: center; gap: 12px;
       padding: 14px 18px;
@@ -3144,9 +3167,13 @@ class DashboardServer {
       position: static !important;
       height: 100%;
       width: auto;
+      /* overflow-y: auto when content can grow past the viewport (e.g. lots
+         of sources); scrollbar-gutter prevents the scrollbar from causing a
+         layout shift when it does appear. */
       overflow-y: auto;
+      scrollbar-gutter: stable;
       border-right: 1px solid var(--border);
-      padding: 14px 10px 10px;
+      padding: 10px 10px 6px;
     }
     .dashboard-grid > .main-feed {
       height: 100%;
@@ -3205,19 +3232,21 @@ class DashboardServer {
       .feed-list.is-refreshing { opacity: 1; }
     }
     .feed-panel-head {
-      padding: 14px 16px 12px;
+      padding: 12px 14px 10px;
       border-bottom: 1px solid var(--border);
       background: linear-gradient(180deg, rgba(var(--accent-rgb), .03), transparent);
     }
     .feed-panel-top {
-      display: flex; align-items: center; gap: 12px; margin-bottom: 11px;
+      display: flex; align-items: center; gap: 12px; margin-bottom: 0;
     }
-    .feed-panel-icon {
-      width: 32px; height: 32px; border-radius: 9px;
-      background: var(--accent-glow);
-      border: 1px solid rgba(var(--accent-rgb), .28);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 15px; flex-shrink: 0;
+    /* Title column — title + sub-line stack tightly. */
+    .feed-panel-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    /* Square refresh button — visual symmetry with the search input height. */
+    .feed-refresh-btn {
+      width: 32px; height: 32px;
+      padding: 0 !important;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 14px; line-height: 1;
     }
     .feed-panel-title {
       font-size: 14.5px; font-weight: 800; color: var(--text);
@@ -3404,22 +3433,29 @@ class DashboardServer {
       padding: 10px;
     }
     .feed-card {
-      background: var(--card);
+      /* 2026-05-01: was using --card2/--card (#1c-#16) which read as bright
+         gray on the new ink theme. Switched to --surface so cards match
+         the sidebar/feed-panel backdrop — only the border distinguishes
+         them. The gloss-top inset keeps a subtle "glassy" highlight. */
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 12px 14px;
-      transition: all .15s;
+      padding: 11px 13px 9px;
+      transition: border-color .15s, background .15s, transform .15s, box-shadow .15s;
       cursor: pointer;
       position: relative;
+      box-shadow: var(--gloss-top);
     }
     .feed-card:hover {
       border-color: var(--border3);
-      background: var(--card2);
+      /* Hover = soft white-alpha overlay (same trick X uses) — gives a lift
+         without shifting hue. */
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.015));
       transform: translateY(-1px);
-      box-shadow: 0 4px 14px rgba(0,0,0,.2);
+      box-shadow: 0 4px 14px rgba(0,0,0,.35), var(--gloss-top);
     }
     .feed-card-head {
-      display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px;
+      display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px;
     }
     .feed-avatar {
       width: 38px; height: 38px; border-radius: 10px;
@@ -3443,7 +3479,39 @@ class DashboardServer {
     .feed-handle { color: var(--dim); font-size: 11px; }
     .feed-dot { width: 2px; height: 2px; background: var(--dim); border-radius: 50%; flex-shrink: 0; }
     .feed-time { color: var(--dim); font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+    /* Inline meta (platforms / velocity) — sits between time and badges so
+       it reads as part of the factual line, not as an action. Subtle, tab-
+       ular. */
+    .feed-meta-hint {
+      color: var(--dim); font-size: 10.5px;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 1px 6px; border-radius: 4px;
+      background: rgba(255,255,255,.025);
+      border: 1px solid var(--border);
+    }
     .feed-badges { display: flex; gap: 5px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+    /* Normalise badge sizing — manual / alert-type / phase / category all
+       use the same padding + font-size so the row reads as a coherent
+       chip-set instead of a mixed bag. */
+    .feed-badges .badge {
+      font-size: 10px;
+      padding: 2px 7px;
+      line-height: 1.3;
+      letter-spacing: .2px;
+    }
+    /* Fresh indicator — soft green pulse dot on trends < 60min old. */
+    .badge-fresh {
+      background: rgba(46,213,115,.12);
+      color: #2ed573;
+      border: 1px solid rgba(46,213,115,.3);
+      font-weight: 700;
+      animation: freshPulse 2.4s ease-in-out infinite;
+    }
+    @keyframes freshPulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(46,213,115,.3); }
+      50%      { box-shadow: 0 0 0 4px rgba(46,213,115,0); }
+    }
+    .feed-card.is-fresh { border-left: 2px solid rgba(46,213,115,.35); }
 
     .feed-title {
       font-size: 14px; font-weight: 700; color: var(--text);
@@ -3639,7 +3707,9 @@ class DashboardServer {
       margin: 14px 4px;
     }
     .right-section {
-      background: var(--card);
+      /* 2026-05-01: was --card (#16181c) — too bright vs the rest of the
+         monochrome layout. --surface matches feed-panel + sidebar tone. */
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 10px;
       overflow: hidden;
@@ -3808,7 +3878,10 @@ class DashboardServer {
     .statusbar {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 300;
       height: 28px;
-      background: linear-gradient(180deg, rgba(10,10,18,.94) 0%, rgba(6,6,12,.98) 100%);
+      /* 2026-05-01: theme-tied bg — sister to the nav fix above. Mirrored
+         gradient (bg→surface, top→bottom) so the bar reads as a footer
+         rising slightly from the dark content above it. */
+      background: linear-gradient(180deg, var(--bg) 0%, var(--surface) 100%);
       border-top: 1px solid var(--border);
       backdrop-filter: blur(14px) saturate(1.15);
       -webkit-backdrop-filter: blur(14px) saturate(1.15);
@@ -3884,6 +3957,14 @@ const h = React.createElement;
 // Server-injected — single source of truth lives in src/analysis/lifespan.js.
 const LIFESPAN_VALUES = ${JSON.stringify(LIFESPAN_VALUES)};
 
+// Cache-bust token for /assets/logo.png. Mtime of the file at server boot
+// (or startup time as fallback). When the file changes (Docker rebuild
+// resets the layer mtime), this number changes → <img src> changes →
+// browser drops the cached version. Avoids the "I redeployed but the old
+// logo is still showing" trap that long Cache-Control would otherwise
+// cause.
+const LOGO_VERSION = ${JSON.stringify(this._logoVersion)};
+
 // ── Auth token ────────────────────────────────────────────────────────────
 // Login is Telegram-bot-only. The bot issues a 6-digit code bound to a session;
 // verifying the code returns a 64-hex bearer token that is attached to every
@@ -3928,31 +4009,34 @@ function onLangChange(fn) { langListeners.add(fn); return () => langListeners.de
 try { document.documentElement.setAttribute('lang', CURRENT_LANG); } catch (e) {}
 
 // ── THEME ────────────────────────────────────────────────────────────────
-// Six dark themes, no light mode. Applied via <body data-theme="...">.
-// "midnight" is the default and uses no data-theme attribute (the :root block).
+// 4 monochrome dark themes inspired by X (Twitter). Applied via
+// <body data-theme="...">. "ink" is the default and uses no data-theme
+// attribute (it's the :root block).
+//
+// Old themes (midnight/teal/abyss/violet/acid/sunset/cyberpunk) were
+// retired 2026-05-01 in favour of a single-accent monochrome palette.
+// Old saved values fall through detectTheme()'s validity check and reset
+// to the new default — no migration needed.
 const THEME_KEY = 'ts_theme';
-const SUPPORTED_THEMES = ['midnight', 'teal', 'abyss', 'violet', 'acid', 'sunset', 'cyberpunk'];
+const SUPPORTED_THEMES = ['ink', 'dim', 'slate', 'mono'];
 const THEME_META = {
-  midnight:  { icon: '🌌', labelEn: 'Midnight',  labelRu: 'Полночь' },
-  teal:      { icon: '🌊', labelEn: 'Teal',      labelRu: 'Бирюза' },
-  abyss:     { icon: '🕳️', labelEn: 'Abyss',     labelRu: 'Бездна' },
-  violet:    { icon: '🔮', labelEn: 'Violet',    labelRu: 'Фиолет' },
-  acid:      { icon: '☢️', labelEn: 'Acid',      labelRu: 'Кислота' },
-  sunset:    { icon: '🌅', labelEn: 'Sunset',    labelRu: 'Закат' },
-  cyberpunk: { icon: '🌆', labelEn: 'Cyberpunk', labelRu: 'Киберпанк' },
+  ink:   { icon: '⬛', labelEn: 'Ink',   labelRu: 'Чернила' },
+  dim:   { icon: '🌑', labelEn: 'Dim',   labelRu: 'Приглушённая' },
+  slate: { icon: '◾', labelEn: 'Slate', labelRu: 'Графит' },
+  mono:  { icon: '◽', labelEn: 'Mono',  labelRu: 'Моно' },
 };
 function detectTheme() {
   try {
     const saved = localStorage.getItem(THEME_KEY);
     if (saved && SUPPORTED_THEMES.indexOf(saved) >= 0) return saved;
   } catch (e) {}
-  return 'midnight';
+  return 'ink';
 }
 let CURRENT_THEME = detectTheme();
 const themeListeners = new Set();
 function applyThemeAttr(theme) {
   try {
-    if (theme && theme !== 'midnight') document.body.setAttribute('data-theme', theme);
+    if (theme && theme !== 'ink') document.body.setAttribute('data-theme', theme);
     else document.body.removeAttribute('data-theme');
   } catch (e) {}
 }
@@ -4051,6 +4135,8 @@ const I18N = {
     'feed.copy_title': 'Copy title',
     'feed.category_tip': 'Category',
     'feed.manual_tip': 'Manually submitted via admin panel',
+    'feed.fresh_tip':  'First seen within the last hour',
+    'badge.fresh':     'NEW',
     'feedback.like': 'Smash that like',
     'feedback.unlike': 'Undo like',
     'feedback.dislike': 'Dislike',
@@ -4068,14 +4154,17 @@ const I18N = {
     // Feed panel
     'feed.panel.title': 'Narrative Feed',
     'feed.panel.count_signals': '{n} signals',
-    'feed.panel.sub': 'Live narrative tracker · {active}/{total} sources · {h}h window',
+    // Tighter sub-line (was "Live narrative tracker · 3/4 sources · 24h window").
+    // The tracker label is redundant when the user already knows what they're
+    // looking at; the sources/window facts are the actual signal.
+    'feed.panel.sub': '{active}/{total} sources · last {h}h',
     'feed.search_placeholder': 'Search narratives…',
     'feed.refresh_tip': 'Refresh (R)',
     'feed.refreshing': 'Refreshing…',
     'feed.loading': 'Loading narratives…',
     'feed.empty.no_match': 'No matches for "{q}"',
-    'feed.empty.no_data': 'No narratives found — loosen the filters',
-    'feed.empty.hint': 'Hint: widen the time window or clear filters',
+    'feed.empty.no_data': 'No narratives match these filters',
+    'feed.empty.hint': 'Try a wider time window or clear filters',
     'feed.filter.all': 'All',
 
     // Pagination
@@ -4097,9 +4186,11 @@ const I18N = {
     'badge.alert_type.post':  '🚀 POST',
     'account.alert_types':       'Alert types',
     'account.alert_types_desc':  'Choose which kinds of alerts to receive (subscription, applies to Telegram + this dashboard).',
-    'account.alert_types_event': '📰 Events — concrete trigger (someone did something specific)',
-    'account.alert_types_trend': '📈 Trends — narrative bubbling across platforms / many posts',
-    'account.alert_types_post':  '🚀 Posts — a single viral post',
+    // Shortened 2026-05-01 — long forms overflowed the toggle container in
+    // AlertTypesRow. Hover/title attribute keeps the longer description.
+    'account.alert_types_event': '📰 Events — concrete trigger',
+    'account.alert_types_trend': '📈 Trends — multi-platform narrative',
+    'account.alert_types_post':  '🚀 Posts — single viral post',
     'account.alert_types_save':  'Save',
     'account.alert_types_saved': '✓ Saved',
     'account.alert_types_all_off_hint': 'All off = receive all (we never silently mute you).',
@@ -4241,8 +4332,13 @@ const I18N = {
     'settings.plan_desc': 'Weights your likes/dislikes and unlocks premium features.',
     'account.subscription': 'Subscription',
     'account.subscription_desc': 'Your plan is active until this date.',
-    'account.threshold': 'Alert sensitivity',
-    'account.threshold_desc': 'Minimum alertScore for the bot to notify you. Higher = stricter (fewer, stronger alerts). Applies on top of the admin floor.',
+    // Renamed 2026-05-01 to make scope explicit: this slider gates Telegram
+    // pushes only, not the dashboard feed. Earlier wording suggested it
+    // filtered everything, which it doesn't — the feed still shows all
+    // Stage-1-scored trends regardless. Sidebar's Adoption filter is the
+    // dashboard-side equivalent.
+    'account.threshold': 'Telegram alert threshold',
+    'account.threshold_desc': 'Minimum alertScore for the bot to push you a Telegram alert. Higher = fewer, stronger alerts. Applies on top of the admin floor. Does NOT filter the dashboard feed — use the sidebar Adoption filter for that.',
     'settings.logout': 'Log out',
     'settings.logout_desc': "Unlink this browser. You'll need a fresh bot code to sign back in.",
     'settings.logout_confirm': "Log out? You'll need to verify a fresh bot code to sign back in.",
@@ -4366,6 +4462,8 @@ const I18N = {
     'feed.copy_title': 'Скопировать заголовок',
     'feed.category_tip': 'Категория',
     'feed.manual_tip': 'Ручная отправка через админку',
+    'feed.fresh_tip':  'Появился в последний час',
+    'badge.fresh':     'NEW',
     'feedback.like': 'Лайк',
     'feedback.unlike': 'Убрать лайк',
     'feedback.dislike': 'Дизлайк',
@@ -4383,14 +4481,15 @@ const I18N = {
     // Feed panel
     'feed.panel.title': 'Фид нарративов',
     'feed.panel.count_signals': '{n} сигналов',
-    'feed.panel.sub': 'Живой трекер нарративов · {active}/{total} источников · окно {h}ч',
+    // Терсий sub-line (было «Живой трекер нарративов · 3/4 источников · окно 24ч»).
+    'feed.panel.sub': '{active}/{total} источников · за {h}ч',
     'feed.search_placeholder': 'Поиск нарративов…',
     'feed.refresh_tip': 'Обновить (R)',
     'feed.refreshing': 'Обновляю…',
     'feed.loading': 'Загружаю нарративы…',
     'feed.empty.no_match': 'Нет совпадений для «{q}»',
-    'feed.empty.no_data': 'Нарративы не найдены — попробуй другие фильтры',
-    'feed.empty.hint': 'Подсказка: увеличь окно или сбрось фильтры',
+    'feed.empty.no_data': 'Под текущие фильтры ничего нет',
+    'feed.empty.hint': 'Расширь окно или сбрось фильтры',
     'feed.filter.all': 'Все',
 
     // Pagination
@@ -4412,8 +4511,10 @@ const I18N = {
     'badge.alert_type.post':  '🚀 ПОСТ',
     'account.alert_types':       'Типы алертов',
     'account.alert_types_desc':  'Выберите, какие алерты получать (подписка, применяется к Telegram и дашборду).',
-    'account.alert_types_event': '📰 События — конкретный триггер (кто-то что-то сделал/сказал)',
-    'account.alert_types_trend': '📈 Тренды — нарратив набирает обороты на разных платформах',
+    // Сокращено 2026-05-01 — длинные формулировки вылезали за границы тогглов
+    // в AlertTypesRow.
+    'account.alert_types_event': '📰 События — конкретный триггер',
+    'account.alert_types_trend': '📈 Тренды — на нескольких платформах',
     'account.alert_types_post':  '🚀 Посты — один вирусный пост',
     'account.alert_types_save':  'Сохранить',
     'account.alert_types_saved': '✓ Сохранено',
@@ -4556,8 +4657,12 @@ const I18N = {
     'settings.plan_desc': 'Влияет на вес твоих лайков/дизлайков и доступ к премиум-функциям.',
     'account.subscription': 'Подписка',
     'account.subscription_desc': 'Тариф активен до этой даты.',
-    'account.threshold': 'Чувствительность алертов',
-    'account.threshold_desc': 'Минимальный alertScore, при котором бот пришлёт алерт. Выше = строже (меньше, но сильнее). Действует поверх глобального floor админа.',
+    // Переименовано 2026-05-01 — слайдер управляет ТОЛЬКО TG-алертами,
+    // на дашбод-фид не влияет. Старое имя «Чувствительность алертов»
+    // создавало впечатление общего фильтра. Для фильтрации фида в
+    // дашбоде — слайдер Adoption в сайдбаре.
+    'account.threshold': 'Порог Telegram-алертов',
+    'account.threshold_desc': 'Минимальный alertScore, при котором бот пришлёт алерт в Telegram. Выше = строже (меньше, но сильнее). Действует поверх глобального floor админа. На фид в дашбоде НЕ влияет — для этого есть фильтр Adoption в сайдбаре.',
     'settings.logout': 'Выйти',
     'settings.logout_desc': 'Отвязать этот браузер. Для повторного входа потребуется новый код из бота.',
     'settings.logout_confirm': 'Выйти из аккаунта? Нужно будет снова подтвердить код в Telegram.',
@@ -5181,7 +5286,15 @@ function FeedCard({ trend, onOpen }) {
   const vel = fmtVelocity(velocity);
   if (vel) metaParts.push(vel);
 
-  return h('div', { className: 'feed-card', onClick: handleClick },
+  // "Fresh" indicator — trends seen within the last 60 minutes get a tiny
+  // pulse dot. Helps the eye lock onto what's actually new during a refresh.
+  const ageMs = (() => {
+    const ts = Date.parse(trend.firstSeen || '');
+    return isNaN(ts) ? Infinity : (Date.now() - ts);
+  })();
+  const isFresh = ageMs < 60 * 60 * 1000;
+
+  return h('div', { className: 'feed-card' + (isFresh ? ' is-fresh' : ''), onClick: handleClick },
     h('div', { className: 'feed-card-head' },
       h('div', { className: 'feed-avatar ' + avatarCls }, srcIco),
       h('div', { className: 'feed-meta' },
@@ -5190,7 +5303,14 @@ function FeedCard({ trend, onOpen }) {
           h('span', { className: 'feed-handle' }, handle),
           h('span', { className: 'feed-dot' }),
           h('span', { className: 'feed-time' }, fmtTime(trend.firstSeen)),
+          // Inline meta-hint (platforms / velocity) — replaced the fake-button
+          // in the actions row. Lives next to time so all "factual" bits sit
+          // in one place. Hidden when neither signal is interesting.
+          metaParts.length
+            ? h('span', { className: 'feed-meta-hint' }, metaParts.join(' · '))
+            : null,
           h('div', { className: 'feed-badges' },
+            isFresh ? h('span', { className: 'badge badge-fresh', title: t('feed.fresh_tip') }, '● ' + t('badge.fresh')) : null,
             trend.manualSubmitted ? h('span', { className: 'badge badge-manual', title: t('feed.manual_tip') }, '🧪 MANUAL') : null,
             // Alert-type chip — first slot so the user instantly sees signal
             // shape. NULL alertType (legacy rows) renders nothing.
@@ -5237,7 +5357,9 @@ function FeedCard({ trend, onOpen }) {
       )
     ),
 
-    // Actions row
+    // Actions row — left side = primary actions; the meta hints (platforms,
+    // velocity) used to be a fake button on the right; they now sit in the
+    // upper meta line as a proper chip so this row stays purely actionable.
     h('div', { className: 'feed-actions' },
       h('button', {
         className: 'feed-action-btn primary',
@@ -5253,10 +5375,7 @@ function FeedCard({ trend, onOpen }) {
         href: trend.tgMessageUrl, target: '_blank', rel: 'noopener',
         onClick: e => e.stopPropagation()
       }, '📨 TG') : null,
-      h(FeedbackBar, { trend }),
-      metaParts.length
-        ? h('span', { className: 'feed-action-btn details-hint', style: { cursor: 'default' } }, metaParts.join(' · '))
-        : null
+      h(FeedbackBar, { trend })
     )
   );
 }
@@ -6181,7 +6300,9 @@ try { applyPrefsToDOM(loadPrefs()); } catch (e) {}
 
 // Modal sheet — centered card with blurred backdrop. Used by Settings,
 // Account and Stats views. Close via Esc, backdrop click, or the ✕ button.
-function Sheet({ title, icon, onClose, children }) {
+// Sheet — centered modal with blurred backdrop. The "narrow" flag tightens
+// max-width for forms (Analyze, Account) so the content doesn't sprawl.
+function Sheet({ title, icon, onClose, children, narrow = false }) {
   useEffect(() => {
     const fn = (e) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', fn);
@@ -6197,7 +6318,7 @@ function Sheet({ title, icon, onClose, children }) {
     className: 'sheet-overlay',
     onMouseDown: (e) => { if (e.target === e.currentTarget) onClose(); },
   },
-    h('div', { className: 'sheet', role: 'dialog', 'aria-modal': 'true' },
+    h('div', { className: 'sheet' + (narrow ? ' sheet-narrow' : ''), role: 'dialog', 'aria-modal': 'true' },
       h('div', { className: 'sheet-head' },
         icon ? h('span', { className: 'sheet-title-ico' }, icon) : null,
         h('span', { className: 'sheet-title' }, title),
@@ -6224,8 +6345,12 @@ const Toggle = ({ on, onChange }) =>
     'aria-checked': on,
   }, h('span', { className: 'pref-toggle-knob' }));
 
-const Row = ({ icon, title, desc, control }) =>
-  h('div', { className: 'setting-row' },
+// Row primitive — label + control side-by-side by default. Pass
+// stacked:true for controls that need full row width (e.g. multi-toggle
+// groups like AlertTypesRow). Stacked rows put the label/desc on top and
+// the control below at full width.
+const Row = ({ icon, title, desc, control, stacked = false }) =>
+  h('div', { className: 'setting-row' + (stacked ? ' setting-row-stacked' : '') },
     h('div', { className: 'setting-label' },
       h('span', { className: 'setting-name' }, icon ? (icon + ' ') : '', title),
       desc ? h('span', { className: 'setting-hint' }, desc) : null
@@ -6449,7 +6574,8 @@ function AlertSensitivityRow({ initial }) {
   };
 
   return h(Row, {
-    icon: '🎯',
+    // ✈ paper-plane evokes Telegram, hints that this knob is TG-scoped.
+    icon: '✈️',
     title: t('account.threshold'),
     desc: t('account.threshold_desc'),
     control: h('div', { className: 'slider-row', style: { gap: 10 } },
@@ -6533,6 +6659,10 @@ function AlertTypesRow({ initial }) {
     icon: '🔔',
     title: t('account.alert_types'),
     desc: t('account.alert_types_desc'),
+    // Stacked layout — three full-width toggles read better as a vertical
+    // list under the label than crammed next to it. Same pattern X uses
+    // for "Notification preferences".
+    stacked: true,
     control: h('div', { className: 'atype-toggle-group' },
       h(Box, { k: 'event', label: t('account.alert_types_event') }),
       h(Box, { k: 'trend', label: t('account.alert_types_trend') }),
@@ -6887,8 +7017,15 @@ function BottomNav({ view, setView, me }) {
     { id: 'stats',   icon: '📊', label: t('nav.stats') },
   ];
   if (canAnalyze) tabs.push({ id: 'analyze', icon: '🧪', label: t('nav.analyze') });
+  // Inline grid template — repeat(N, 1fr) so 2-tab and 3-tab layouts both
+  // distribute width evenly. Without this the 3rd tab ("Analyze" for pro/
+  // admin) wraps to a second row instead of joining the others.
   return h('div', { className: 'sidebar-footer' },
-    h('div', { className: 'sb-foot-nav', role: 'tablist' },
+    h('div', {
+      className: 'sb-foot-nav',
+      role: 'tablist',
+      style: { gridTemplateColumns: 'repeat(' + tabs.length + ', 1fr)' },
+    },
       tabs.map(tab => h('button', {
         key: tab.id,
         type: 'button',
@@ -7227,10 +7364,32 @@ function App() {
     // ── Nav ──
     h('nav', { className: 'nav' },
       h('div', { className: 'nav-logo' },
-        h('span', { className: 'nav-logo-icon' }, '🐱'),
+        // Brand logo. PNG comes from /assets/logo.png (baked into Docker
+        // image). LOGO_VERSION (server-injected) busts the cache on every
+        // rebuild, so replacing the file + redeploy actually shows the new
+        // image — without it, Cache-Control:immutable kept the old one for
+        // a day. On 404 / load error we swap in the 🐱 emoji so the nav
+        // never looks broken — see _handleBrandLogo for the server side.
+        h('span', { className: 'nav-logo-icon' },
+          h('img', {
+            src: '/assets/logo.png?v=' + LOGO_VERSION,
+            alt: 'Catalyst',
+            className: 'nav-logo-img',
+            onError: (e) => {
+              const span = e.target.parentNode;
+              if (span) {
+                span.removeChild(e.target);
+                span.textContent = '\u{1F431}'; // 🐱
+              }
+            },
+          })
+        ),
         h('span', { className: 'nav-logo-text' }, t('app.title'))
       ),
-      h('span', { className: 'nav-subtitle' }, t('app.subtitle')),
+      // Decorative center subtitle removed in 2026-05-01 polish — it added
+      // noise without information. Centered content can come back if we ship
+      // a global status badge (e.g. "scanning…", "stale 2m"); for now the
+      // status pill in the bottom bar carries that signal.
       h('div', { className: 'nav-right' },
         h('a', {
           className: 'nav-icon-btn',
@@ -7308,29 +7467,10 @@ function App() {
               );
             }),
 
-            // Manual-only toggle — reuses .source-item styling so it lives
-            // visually next to the source list. Click toggles the filter.
-            h('div', {
-              'data-src': 'manual',
-              className: 'source-item ' + (manualOnly ? 'on' : 'off'),
-              onClick: () => {
-                setManualOnly(prev => {
-                  const next = !prev;
-                  try { localStorage.setItem('ts_manual_only', next ? '1' : '0'); } catch (e) {}
-                  addToast(next ? t('toast.manual_only_on') : t('toast.manual_only_off'), 'info');
-                  return next;
-                });
-              },
-              title: manualOnly ? t('tooltip.manual_off') : t('tooltip.manual_on')
-            },
-              h('span', { className: 'source-icon' }, '🧪'),
-              h('span', { className: 'source-name' }, t('sidebar.manual_only')),
-              h('span', { className: 'source-eye' }, manualOnly ? '✓' : '')
-            ),
-
-            h('div', { className: 'sidebar-divider' }),
-
             // ── Phase filter chips (moved from feed header) ──
+            // Manual-only filter moved here as a sibling row so the source
+            // list stays focused on actual data sources. The toggle still
+            // affects the visible feed (see visibleTrends below).
             h('div', { className: 'sidebar-section' },
               h('span', null, t('sidebar.phase')),
               phase
@@ -7359,18 +7499,20 @@ function App() {
               )
             ),
 
-            h('div', { className: 'sidebar-divider' }),
-
             // ── Alert type filter chips (event / trend / post) ──
             // Pure client-side filter — does NOT change subscription. The
             // user's subscription lives in /api/user/alert-types and is
             // edited from SettingsPanel.
             h('div', { className: 'sidebar-section' },
               h('span', null, t('sidebar.alert_type')),
-              alertTypeFilter
+              (alertTypeFilter || manualOnly)
                 ? h('span', { className: 'sidebar-section-link', onClick: () => {
                     setAlertTypeFilter('');
                     try { localStorage.setItem('ts_alert_type_filter', ''); } catch (e) {}
+                    if (manualOnly) {
+                      setManualOnly(false);
+                      try { localStorage.setItem('ts_manual_only', '0'); } catch (e) {}
+                    }
                   }, title: t('tooltip.reset') }, t('sidebar.reset'))
                 : null
             ),
@@ -7400,10 +7542,26 @@ function App() {
                   h('span', { className: 'phase-chip-dot' }, emoji),
                   h('span', { className: 'phase-chip-label' }, t(i18nKey))
                 );
-              })
+              }),
+              // Manual-only toggle styled as a chip — sits inside the same
+              // grid as alert-type filters because it's the same axis: "what
+              // kind of trend do I want to see right now". Span = full row.
+              h('button', {
+                type: 'button',
+                className: 'phase-chip atype-chip-manual' + (manualOnly ? ' active' : ''),
+                style: { gridColumn: '1 / -1' },
+                onClick: () => {
+                  const next = !manualOnly;
+                  setManualOnly(next);
+                  try { localStorage.setItem('ts_manual_only', next ? '1' : '0'); } catch (e) {}
+                  addToast(next ? t('toast.manual_only_on') : t('toast.manual_only_off'), 'info');
+                },
+                title: manualOnly ? t('tooltip.manual_off') : t('tooltip.manual_on')
+              },
+                h('span', { className: 'phase-chip-dot' }, '🧪'),
+                h('span', { className: 'phase-chip-label' }, t('sidebar.manual_only'))
+              )
             ),
-
-            h('div', { className: 'sidebar-divider' }),
 
             h('div', { className: 'sidebar-section' },
               h('span', null, t('sidebar.filters')),
@@ -7498,10 +7656,12 @@ function App() {
             h('div', { className: 'feed-panel' + (refreshPulse && trends.length > 0 ? ' is-refreshing' : '') },
 
               // ── Feed panel header ──
+              // 2026-05-01 polish: dropped the decorative 🔥 icon-block on
+              // the left — it ate horizontal space without adding info.
+              // Title carries the same energy via its 800-weight text.
               h('div', { className: 'feed-panel-head' },
                 h('div', { className: 'feed-panel-top' },
-                  h('div', { className: 'feed-panel-icon' }, '🔥'),
-                  h('div', null,
+                  h('div', { className: 'feed-panel-titles' },
                     h('div', { className: 'feed-panel-title' },
                       t('feed.panel.title'),
                       h('span', { className: 'feed-panel-count' },
@@ -7529,10 +7689,9 @@ function App() {
                       })
                     ),
                     h('button', {
-                      className: 'btn btn-ghost' + (refreshPulse ? ' is-spinning' : ''),
+                      className: 'btn btn-ghost feed-refresh-btn' + (refreshPulse ? ' is-spinning' : ''),
                       onClick: () => { if (!loading) { refreshAll(); addToast(t('toast.refreshing'), 'info'); } },
                       disabled: loading,
-                      style: { fontSize: 11, padding: '6px 10px' },
                       title: t('feed.refresh_tip')
                     }, h('span', { className: 'btn-refresh-ico' }, '↻'))
                   )
@@ -7610,6 +7769,7 @@ function App() {
     view === 'account' ? h(Sheet, {
       title: t('nav.account'),
       icon: '👤',
+      narrow: true,
       onClose: () => setView('trends'),
     },
       h(AccountPanel, {
@@ -7634,6 +7794,7 @@ function App() {
     view === 'analyze' ? h(Sheet, {
       title: t('analyze.title'),
       icon: '🧪',
+      narrow: true,
       onClose: () => setView('trends'),
     },
       h(AnalyzePanel, {

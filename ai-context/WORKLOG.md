@@ -4,6 +4,168 @@ Append-only журнал значимых изменений. Мелкий debug
 
 ---
 
+## 2026-05-01 (post-theme polish: bars / surfaces / Account / TG-threshold rename)
+
+**Цель**: после rewrite темы остались разрозненные «осколки» midnight-палитры (синие тинты в overlay'ях/барах) и слишком яркие серые поверхности. Плюс нужно было привести в порядок Account-панель (overflow тогглов, кричащий accent-gradient на hero) и переименовать слайдер «Чувствительность алертов» — он управляет только TG-пушами, не фидом.
+
+**Изменения** (все в `src/dashboard/server.js`):
+
+### Bars + overlays — привязка к theme tokens
+
+- **`.nav` (top bar)**: было хардкод `linear-gradient(rgba(12,12,22,.96) → rgba(8,8,15,.92))` (синеватый midnight-tint), стало `linear-gradient(var(--surface) → var(--bg))` — на ink это `#0a0a0a → #000000`, незаметная elevation, тема-агностично
+- **`.statusbar` (bottom bar)**: тот же фикс, mirrored gradient `var(--bg) → var(--surface)` (снизу чуть приподнимается)
+- **`.sheet-overlay` (modal backdrop)**: было `background: rgba(4,6,14,.55)` + `backdrop-filter: blur(14px) saturate(1.1)` — синий тинт + saturate boost'ил остаточную синь из контента под блюром. Стало `rgba(0,0,0,.62)` + только `blur(14px)`. Нейтральный blackout на любой теме.
+
+### Surfaces — выравнивание яркости
+
+Юзер указал что центральные карточки фида и блоки правой колонки выглядят ярко-серыми относительно тёмного сайдбара. Корень — массовое использование `var(--card)` (#16181c) для surface'ов:
+
+- **`.feed-card`**: было `linear-gradient(var(--card2) → var(--card))` (#1c1f24 → #16181c, заметно серое). Стало `var(--surface)` (#0a0a0a) + `box-shadow: var(--gloss-top)` — карточки матчат сайдбар, только 1px border их выделяет
+- **`.feed-card:hover`**: `linear-gradient(rgba(255,255,255,.04), rgba(255,255,255,.015))` — soft white-alpha overlay (X-приём), даёт лифт без сдвига оттенка. Раньше было `linear-gradient(--card3 → --card2)` — тоже серое
+- **`.right-section`**: `var(--card)` → `var(--surface)`. Right-panel секции теперь матчат feed-panel + сайдбар
+- **`.settings-card`**: `var(--card)` → `var(--surface)`. Карточки в Account/Settings sheets теперь не выделяются ярко-серым
+
+### AccountPanel — общая чистка
+
+Юзер прислал скрин: тоггл-боксы алерт-типов выезжали за границу карточки, текст обрезался. Корень — `Row` primitive рендерил label + control в горизонтальную flex с `flex-shrink: 0` на control'е, контент длиннее ширины не ужимался.
+
+- **`Row` primitive получил `stacked` prop**: side-by-side по дефолту (как было); `stacked: true` → `flex-direction: column`, control во всю ширину снизу label'а. Применён в AlertTypesRow
+- **CSS overflow-страховка глобально**:
+  - `.setting-row`, `.setting-control`, `.setting-label` — везде `min-width: 0` (canonical fix для flex с длинным текстом)
+  - `.setting-control`: `flex-shrink: 0 → 1` + `max-width: 100%`
+  - `.atype-toggle-group`/`.atype-toggle`/`.atype-toggle-label`: `min-width: 0` + `width: 100%` + `overflow-wrap: break-word`
+- **Тексты тогглов сокращены**:
+  - «Событие — конкретный триггер (кто-то что-то сделал/сказал)» → «Событие — конкретный триггер»
+  - «Тренды — нарратив набирает обороты на разных платформах» → «Тренды — на нескольких платформах»
+  - EN аналогично
+- **`.account-hero`**: убран `background: linear-gradient(135deg, rgba(--accent-rgb, .09), --card 70%)` (электрически-синий диагональ от accent) → plain `var(--surface)`. Аватар остаётся единственным цветным focal point карточки
+- **`.account-avatar-big`**: убран жирный `2px solid rgba(--accent-rgb, .5)` border + цветной accent-glow → 1px subtle ring + нейтральный `box-shadow: 0 2px 10px rgba(0,0,0,.4)`. Глянцевый, но не кричащий
+
+### TG-threshold rename (Variant A)
+
+Юзер заметил что слайдер «Чувствительность алертов» ничего не делает в дашбоде — он управляет только TG-пушами через alert-loop в `src/index.js`. Дашбод-фид показывает все Stage-1 трейнды независимо. Старое имя создавало впечатление общего фильтра.
+
+- **Title**: «Чувствительность алертов» → «Порог Telegram-алертов» (RU). EN: «Alert sensitivity» → «Telegram alert threshold»
+- **Desc**: явно добавлено «На фид в дашбоде НЕ влияет — для этого есть фильтр Adoption в сайдбаре»
+- **Icon**: 🎯 → ✈️ (paper plane намекает на Telegram-scope)
+- **Логика не тронута** — сервер-сайд `_handleUserThresholdPost` пишет в `users.alert_threshold` как было; гейт в alert-loop читает оттуда
+
+**Trap stuck twice**:
+1. Backtick в JSDoc: `// stacked:true for...` — сломал outer literal с `Unexpected identifier 'stacked'`. Поймано `node --check`, заменил на `stacked:true` без backticks
+2. Backtick в комменте про cache-bust в logo-handler секции — поймано в прошлой итерации
+
+**Проверка**: `check-dashboard-spa.cjs` green после каждого подхода. Финальный размер 166247 chars.
+
+**Деплой**: `.\deploy.ps1` + Ctrl+F5. Старые темы в localStorage автоматически вылетят в дефолтный ink.
+
+---
+
+## 2026-05-01 (theme system rewrite — X-style monochrome)
+
+**Цель**: 7 ярких тем (midnight/teal/abyss/violet/acid/sunset/cyberpunk) с разноцветными акцентами заменить на 4 минималистичные в стиле X (Twitter): один акцент-цвет, монохромная палитра, глянцевые поверхности.
+
+**Старые темы выпилены** (`midnight/teal/abyss/violet/acid/sunset/cyberpunk`). Юзеры с сохранённой старой темой получают дефолт `ink` через validity-check в `detectTheme` — миграция не нужна.
+
+**Новые темы** (4 шт, все в `:root` + `body[data-theme="..."]` блоки):
+
+| Theme   | bg        | accent    | use case                                |
+|---------|-----------|-----------|------------------------------------------|
+| `ink`   | `#000000` | `#1d9bf0` | дефолт. X true-black + X-blue             |
+| `dim`   | `#15202b` | `#1d9bf0` | X dim-mode (синевато-графитовый)          |
+| `slate` | `#0e0f10` | `#ffffff` | Apple-style нейтральный графит, белый акцент |
+| `mono`  | `#0d0d0d` | `#b8b8b8` | чистый grayscale, без хроматики           |
+
+**Дизайн-принципы**:
+- Один accent-цвет на тему, экономно (никаких rainbow-палитр)
+- Borders translucent white at low alpha (`rgba(239,243,244,.08-.22)`) вместо tint'а от accent
+- Семантические state-цвета (green/red/orange/yellow) **константны** во всех темах — OK/error не должны менять hue от темы
+- **Glossy effects**: добавлены два token'а в `:root`:
+  - `--gloss-top: inset 0 1px 0 rgba(255,255,255,.04)` — лёгкий top-edge highlight (свет на верхней грани)
+  - `--gloss-edge: inset 0 0 0 1px rgba(255,255,255,.02)` — общий edge-glow
+- `.feed-card` теперь рендерится с `linear-gradient(180deg, var(--card2), var(--card))` background + `box-shadow: var(--gloss-top)` — карточка читается как глянцевая, не плоская
+
+**Файлы изменены**: `src/dashboard/server.js`:
+- `:root` block переписан (lines ~1531-1576) — палитра X-ink + новые tokens
+- 6 старых `body[data-theme="..."]` блоков удалены (~1578-1770) → заменены на 3 новых (`dim`/`slate`/`mono`, ink в :root)
+- `.theme-swatch[data-theme-preview="..."]` блоки переписаны под новые имена (24 строки → 12)
+- `SUPPORTED_THEMES` + `THEME_META` + `detectTheme` дефолт обновлены
+- `.feed-card` background теперь gradient + gloss-top
+
+**Проверка**:
+- `node --check` green
+- `check-dashboard-spa.cjs` green (164763 chars, было ~170K — палитра компактнее благодаря удалению 4 темных блоков)
+
+**Деплой**: `.\deploy.ps1` + Ctrl+F5. Юзеры со старыми темами в localStorage автоматически переключатся на дефолтный `ink` при следующей загрузке.
+
+---
+
+## 2026-05-01 (logo cache-bust + transparent-bg fix)
+
+**Цель**: после rebuild Docker'а дашборд показывал старый логотип (browser cache из-за `Cache-Control: immutable, max-age=86400`); плюс прозрачный PNG отображался на teal-градиентной подложке `.nav-logo-icon`, что выглядело как «чёрный фон сам добавляется».
+
+**Фиксы** (`src/dashboard/server.js`):
+- **Cache-bust через query string**: в constructor компилируется `this._logoVersion = mtimeMs(assets/logo.png)` (fallback = `this.started` если файла нет). Server-injected как `LOGO_VERSION` константа в SPA. `<img src='/assets/logo.png?v=' + LOGO_VERSION>` — URL меняется каждый rebuild (Docker `COPY` сбрасывает mtime у layer'а), браузер делает свежий запрос. Тот же приём webpack'а с content-hash bundles
+- **`.nav-logo-icon.has-img`** класс: добавляется на `<img onLoad>`, убирает teal-градиент / border / box-shadow → прозрачный PNG показывается без подложки. Emoji-fallback по-прежнему получает стилизованный badge
+- **`.nav-logo-img`**: убран `padding: 2px` — логотип теперь заполняет 28×28 целиком (для PNG с собственным фоном это критично — иначе выглядел "обрезанным" внутри badge)
+
+**Проверка**: `check-dashboard-spa.cjs` green (165101 chars). Ловушка SPA-литерала не стрельнула благодаря отсутствию backticks в новых комментариях.
+
+**Деплой**: после `.\deploy.ps1` юзеру **всё ещё нужен hard-refresh** (Ctrl+F5) **первый раз** — старый закэшированный URL `/assets/logo.png` без `?v=` сидит в browser cache. После первого обновления версионированные URL уже всегда фрешевые.
+
+---
+
+## 2026-05-01 (brand logo route — replace nav 🐱 emoji)
+
+**Цель**: вместо emoji `🐱` в навбаре дашборда — кастомная картинка.
+
+**Архитектура**: статика, бекаемая в Docker-образ. `Dockerfile` уже делает `COPY --chown=node:node . .` (line 44), так что новая папка `assets/` автоматически попадает в `/app/assets/` внутри контейнера. Никаких volume-маунтов или upload-роутов.
+
+**Изменения**:
+- **Новая папка** `assets/` в корне репо + `assets/README.md` с инструкцией
+- **`src/dashboard/server.js`**:
+  - Public route `GET /assets/logo.png` (до auth-чека). `_handleBrandLogo`: stat → stream PNG с `Cache-Control: max-age=86400, immutable`. На отсутствие файла → 404 (SPA onError fallback на emoji)
+  - Nav logo span теперь рендерит `<img src="/assets/logo.png" onError="...emoji fallback">` вместо `🐱` напрямую
+  - CSS `.nav-logo-img`: `width:100%; height:100%; object-fit:contain; padding:2px` чтобы вписывалось в 28×28 round-square badge
+
+**От пользователя**: сохранить PNG как `assets/logo.png` в корне репо, потом `.\deploy.ps1`. Docker rebuild запекает файл в образ. Hard-refresh дашборда (Ctrl+F5) чтобы обойти browser cache.
+
+**Fallback**: если файл отсутствует — endpoint возвращает 404 и SPA автоматически показывает 🐱 emoji через onError handler. Nav никогда не выглядит сломанным.
+
+**Проверка**: `check-dashboard-spa.cjs` green (164124 chars, +591 от прошлой версии).
+
+---
+
+## 2026-05-01 (dashboard UI/UX polish pass)
+
+**Цель**: пройтись по всему дашбоду, убрать визуальный шум, оптимизировать плотность, поправить недочёты.
+
+**Изменения** (все в `src/dashboard/server.js`):
+
+- **Nav bar**: удалена декоративная центральная подпись `app.subtitle` — добавляла шум без информации. Освободившееся место можно потом отдать под global status badge
+- **BottomNav grid**: было хардкод `repeat(2, 1fr)` — для pro/admin с 3-й вкладкой «Analyze» 3-й tab падал на новую строку. Теперь inline `gridTemplateColumns: repeat(${tabs.length}, 1fr)`
+- **Sidebar section headers**: были громкими (9px / letter-spacing 1.4px / `--accent` цвет). Стали 10.5px / spacing .8px / `--muted` — content становится фокусом, а не хедеры
+- **Sidebar reorg**: filter «Manual only» переехал из source-list (не source-же он) в alert-type chip-секцию как полноширинный chip. Снят лишний `sidebar-divider` после source list
+- **Sidebar reset link**: на alert-type секции reset теперь сбрасывает И тип-фильтр И manual-only одной кнопкой
+- **Feed card head**: добавлен `feed-meta-hint` chip (1p · 12/h) рядом со временем — раньше был fake-button «details-hint» в actions row, теперь это нормальный inline-факт
+- **Feed card badges**: нормализованы padding (2 7px) + font-size (10px) — раньше manual/atype/phase/category выглядели как разнокалиберный набор
+- **Fresh indicator** (новое): тренды моложе 60 мин получают `🟢 NEW` chip + лёгкую pulse-анимацию + 2px зелёный левый бордер на карточке. i18n `feed.fresh_tip` + `badge.fresh` (RU + EN)
+- **Feed panel head**: убрана декоративная 32×32 коробка с emoji 🔥 слева — заголовок и сам несёт визуальный вес через 800-weight. Square refresh button (32×32) — выровнен по высоте с search-инпутом
+- **Feed panel sub**: «Live narrative tracker · 3/4 sources · 24h window» → «3/4 sources · last 24h» (RU аналогично). Tracker-label был словарный шум
+- **Empty-state copy**: «No narratives found — loosen the filters» → «No narratives match these filters»; «Hint: widen the time window or clear filters» → «Try a wider time window or clear filters» (RU аналогично)
+- **Sheet sizing**: max-width 760 → 720, добавлен `sheet-narrow` (560) для Analyze + Account — формы и профиль читаются компактнее, не растягиваются на всю ширину
+- **Feed card padding**: 12 14 → 11 13 9 (меньше нижнего отступа), gap внутри head 8 → 6 — карточка плотнее без потери воздуха
+
+**Trap encountered**: backtick в comment внутри SPA template literal (\`narrow\` flag) сломал outer literal с `Unexpected identifier 'narrow'`. Поймано `node --check`, исправлено заменой backticks на quotes. **Урок**: в SPA-комментариях ВСЕГДА используем "quotes" вместо backticks, как описано в SESSION_CONTEXT § «Ловушка server.js»
+
+**Проверка**:
+- `node --check src/dashboard/server.js` — green
+- `scripts/check-dashboard-spa.cjs` — green (163533 chars, было 161042 — +2.5K от новых стилей и копии)
+- `scripts/check-admin-spa.cjs` — green (без изменений)
+
+**Файлы изменены**: только `src/dashboard/server.js`. i18n-ключи добавлены inline (не в `i18n/{en,ru}.js` модулях — дашбод имеет свой словарь внутри SPA, см. ~строки 4090/4405).
+
+---
+
 ## 2026-05-01 (alert types: event/trend/post + per-user subscription)
 
 **Цель**: разделить алерты по форме сигнала (а не по теме) — Событие / Тренд / Пост, чтобы юзер мог подписаться только на нужный тип.

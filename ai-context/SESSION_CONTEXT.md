@@ -254,7 +254,7 @@ collect → cheapDedup → PreStage → Cluster (multi-signal) → Stage 1 → S
 
 ## Dashboard v3.2 UX (2026-04-20)
 
-- **Темизация**: 7 dark-тем через `body[data-theme="..."]` (Midnight / Teal / Abyss / Violet / Acid / Sunset / Cyberpunk). Ключ localStorage: `ts_theme`. Все акценты используют CSS var `--accent-rgb` для `rgba(var(--accent-rgb), α)` паттерна — нового hardcoded rgba быть не должно
+- **Темизация** (переписано 2026-05-01 в стиле X/Twitter): 4 минималистичных monochrome-темы через `body[data-theme="..."]` — `ink` (default, X true-black + X-blue), `dim` (X dim-mode), `slate` (Apple-style графит, белый акцент), `mono` (чистый grayscale). Ключ localStorage: `ts_theme`. Все акценты используют CSS var `--accent-rgb` для `rgba(var(--accent-rgb), α)` паттерна — нового hardcoded rgba быть не должно. См. § «Theme system — X-style monochrome» ниже
 - **Layout**: CSS Grid с draggable column dividers (`.col-resizer` между sidebar/main/rail); prefs в `ts_prefs_v1.colLeft/.colRight`; limits 180–540 / 240–630px; double-click = reset
 - **Навигация**:
   - Top-right: Account button (аватарка + `@username`, открывает Account sheet) + ⚙️ Settings gear
@@ -396,6 +396,79 @@ Per-user category boost для дашборд-ранжирования был в
   - Badge **🧪 MANUAL** в FeedCard (feed-badges row, первая позиция) и в TrendModal head; CSS `.badge-manual` (фиолетовый `#b48cff`); i18n `feed.manual_tip`
   - Sidebar toggle **«Только ручные»** — `manualOnly` state (localStorage `ts_manual_only`), фильтрация в `visibleTrends`; i18n `sidebar.manual_only`, `tooltip.manual_on/off`, `toast.manual_only_on/off`
 - **AdminServer wiring**: конструктор принимает `extras = {}` 7-м аргументом, сохраняет `this.scorer` и `this.telegram`. `src/index.js` передаёт `{ scorer, telegram }` при инстансе
+
+### Theme system — X-style monochrome (2026-05-01)
+
+**Полный rewrite** старой системы 7 ярких тем (Midnight/Teal/Abyss/Violet/Acid/Sunset/Cyberpunk). Новый дизайн — минимализм в стиле X (Twitter): один акцент-цвет на тему, монохромные поверхности, глянцевые subtle-эффекты вместо насыщенных тинтов.
+
+| Theme   | bg        | accent    | use case                                          |
+|---------|-----------|-----------|---------------------------------------------------|
+| `ink`   | `#000000` | `#1d9bf0` | **Default**. X true-black + X-blue                |
+| `dim`   | `#15202b` | `#1d9bf0` | X dim-mode (синевато-графитовый, мягче чёрного)   |
+| `slate` | `#0e0f10` | `#ffffff` | Apple-style нейтральный графит, белый акцент      |
+| `mono`  | `#0d0d0d` | `#b8b8b8` | Чистый grayscale, без хроматики в акценте          |
+
+**Дизайн-принципы**:
+- Один accent-цвет на тему, экономно
+- Borders translucent white at low alpha (`rgba(239,243,244,.08-.22)`) — никогда tint от accent
+- Семантические state-цвета (`--green/--red/--orange/--yellow`) **константны** во всех темах — OK/error не меняют hue от темы
+- **Glossy tokens** в `:root`:
+  - `--gloss-top: inset 0 1px 0 rgba(255,255,255,.04)` — light catching the top edge
+  - `--gloss-edge: inset 0 0 0 1px rgba(255,255,255,.02)` — subtle edge-glow
+
+**Surfaces — везде `var(--surface)`** (не `var(--card)`):
+- `.feed-card`, `.right-section`, `.settings-card` все используют `--surface` (#0a0a0a на ink) — карточки матчат сайдбар, разделяются только 1px бордером. Раньше использовали `--card` (#16181c) — выглядело ярко-серым на новой палитре
+- `.feed-card:hover` — soft white-alpha overlay `linear-gradient(rgba(255,255,255,.04), rgba(255,255,255,.015))` (X-приём, лифт без сдвига оттенка)
+
+**Bars (top + bottom) привязаны к theme tokens**:
+- `.nav`: `linear-gradient(var(--surface) → var(--bg))` — раньше был хардкод `rgba(12,12,22,.96)` (синий midnight-tint)
+- `.statusbar`: mirrored `var(--bg) → var(--surface)`
+- `.sheet-overlay` (modal backdrop): `rgba(0,0,0,.62)` neutral black + `blur(14px)` без `saturate(1.1)` (раньше: `rgba(4,6,14,.55)` синий тинт + saturate boost усиливал любую синь под блюром)
+
+**JS**:
+- `SUPPORTED_THEMES = ['ink','dim','slate','mono']`, `THEME_META` мапит ключ → {icon, labelEn, labelRu}
+- `detectTheme()` дефолтит на `ink`. Юзеры со старой темой (midnight/etc.) автоматически переключаются на дефолт через validity-check — миграция localStorage не нужна
+- `applyThemeAttr(theme)`: `theme === 'ink' || !theme` → убираем `data-theme` атрибут (default = :root); иначе ставим
+
+**Файлы**: только `src/dashboard/server.js`. Палитра в `:root` + 3 `body[data-theme="..."]` блоках. Theme-swatch CSS обновлён под новые ключи.
+
+### Account panel + Row primitive — stacked layout (2026-05-01)
+
+`Row` primitive (для `.setting-row`) теперь поддерживает `stacked: true` prop — для контролов которые требуют полной ширины row (multi-toggle groups типа AlertTypesRow).
+
+- `Row({ icon, title, desc, control, stacked = false })` рендерит `.setting-row` (side-by-side) или `.setting-row-stacked` (column, control во всю ширину)
+- AlertTypesRow использует `stacked: true` — три тоггла-чекбокса для event/trend/post растягиваются на всю карточку, текст не вылезает
+- **Overflow guards globally**:
+  - `.setting-row`, `.setting-control`, `.setting-label`, `.atype-toggle*`: `min-width: 0` везде (canonical fix для flex-children с длинным текстом)
+  - `.setting-control`: `flex-shrink: 0 → 1` + `max-width: 100%`
+  - `.atype-toggle-label`: `overflow-wrap: break-word` + `word-break: break-word`
+- **`.account-hero`**: убран загруженный accent-gradient `rgba(--accent-rgb, .09)` → plain `var(--surface)`. Аватар = единственный coloured focal point
+- **`.account-avatar-big`**: 2px accent-border + цветной glow → 1px subtle ring + neutral shadow
+
+### TG-threshold slider — scope rename (2026-05-01, Variant A)
+
+Юзер заметил что слайдер «Чувствительность алертов» в дашбоде ничего не делает: он управляет только TG-пушами через alert-loop в `src/index.js`. Дашбод-фид показывает все Stage-1-scored трейнды независимо от него. Старое имя создавало впечатление общего фильтра.
+
+- Title: `account.threshold` `Чувствительность алертов` → `Порог Telegram-алертов` (RU); `Alert sensitivity` → `Telegram alert threshold` (EN)
+- Desc: явно добавлено **«На фид в дашбоде НЕ влияет — для этого есть фильтр Adoption в сайдбаре»**
+- Icon: 🎯 → ✈️ (paper-plane намекает на TG)
+- Серверная логика **не тронута** — `_handleUserThresholdPost` пишет в `users.alert_threshold`, alert-loop читает оттуда
+
+### Dashboard UI/UX polish (2026-05-01)
+
+Сняли визуальный шум и плотностные перекосы в дашборде. Все изменения в `src/dashboard/server.js`. Ключевое:
+
+- **Nav**: убрана декоративная центральная подпись (`app.subtitle` уже не рендерится). Высота 50px без изменений
+- **Sidebar section headers**: тише (10.5px / `--muted` вместо 9px / `--accent`). Content > headers
+- **Sidebar reorg**: «Manual only» chip переехал из source-list в alert-type chip-секцию (full-width row). Source-list теперь чисто про data-sources
+- **BottomNav**: inline `repeat(${tabs.length}, 1fr)` чтобы 3 tab'а (с Analyze для pro/admin) распределялись равномерно — раньше был hardcoded `repeat(2, 1fr)` и 3-й уходил на следующую строку
+- **Feed card**: nightly polish — `feed-meta-hint` chip (1p · 12/h) у времени вместо fake-button в actions, badges нормализованы (10px / 2 7px), card padding 11 13 9 вместо 12 14
+- **Fresh indicator** (новое): тренды < 60min получают `🟢 NEW` chip + pulse + 2px зелёный левый бордер. i18n `feed.fresh_tip` + `badge.fresh`
+- **Feed panel head**: убрана декоративная коробка-emoji слева, square refresh-button (32×32). Sub-line терсий: `3/4 sources · last 24h`
+- **Sheet**: max-width 760 → 720; новый `sheet-narrow` (560) для Analyze + Account
+- **Empty-state copy**: терсие («No narratives match these filters» / «Try a wider time window»)
+
+**Trap гарантирован**: при правках добавил backtick в comment (\`narrow\` flag) — `node --check` сразу поймал `Unexpected identifier`. Backticks-in-comments в SPA-литерале — НИКОГДА. Используем "quotes". См. § «Ловушка server.js»
 
 ### Alert types — event/trend/post (2026-05-01)
 
