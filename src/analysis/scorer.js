@@ -178,6 +178,15 @@ export function computeAlertScore(trend, w = DEFAULT_ALERT_WEIGHTS) {
   const emergence = Number(trend.emergenceScore ?? trend.clusterMetrics?.emergenceScore) || 0;
   const twitter   = Number(trend.metrics?.twitter?.viralityScore) || 0;
   const junk      = Number(trend.junkPenalty ?? trend.clusterMetrics?.junkPenalty) || 0;
+  // Junk reasons — list of triggered rules from junk-filter.js
+  // (politics / kpop/fandom / celeb-noise / no-meme-shape / text-only /
+  // safe-override(divN)). Surfaced in the admin Decisions panel so it's
+  // obvious WHY junk=N, not just THAT junk=N.
+  const junkReasons = Array.isArray(trend.junkReasons) && trend.junkReasons.length
+    ? trend.junkReasons
+    : Array.isArray(trend.clusterMetrics?.junkReasons)
+      ? trend.clusterMetrics.junkReasons
+      : [];
 
   // feedbackBoost: 0-100, 50 = neutral. Caller (index.js) pre-computes it from
   // live feedback_votes and attaches as trend._feedbackBoost. Defaults to 50
@@ -206,15 +215,41 @@ export function computeAlertScore(trend, w = DEFAULT_ALERT_WEIGHTS) {
   const alertScore = Math.max(0, Math.min(100, Math.round(raw)));
   const hardJunk = junk >= w.hardJunkStop;
 
+  // Optional raw feedback votes — pre-computed by recomputeAlertScores in
+  // alert-dispatcher.js. Lets the admin Decisions panel show "8 likes / 2
+  // dislikes → boost 70" instead of just the boost number. Falls back to
+  // null when caller didn't attach (e.g. scoring stage with no votes yet).
+  const feedbackStats = (trend._feedbackStats && typeof trend._feedbackStats === 'object')
+    ? { likes: trend._feedbackStats.likes | 0, dislikes: trend._feedbackStats.dislikes | 0 }
+    : null;
+
   return {
     alertScore,
     hardJunk,
     breakdown: {
       meme, viral, emergence, twitter, feedback, junk,
+      junkReasons,
       ageHours: Math.round(ageHours * 10) / 10,
       staleDecay: Math.round(staleDecay),
       positive: Math.round(positive),
       penalty: Math.round(penalty),
+      // Snapshot of weights used at decision time. Lets the admin Decisions
+      // panel show the exact arithmetic ("92 x 0.45 = 41.4") even after the
+      // active preset's weights are edited later. Adds ~80 bytes per
+      // decision; ring buffer is capped at 500 → ~40KB total, fine.
+      weights: {
+        weightMemePotential: w.weightMemePotential,
+        weightVirality:      w.weightVirality,
+        weightEmergence:     w.weightEmergence,
+        weightTwitter:       w.weightTwitter,
+        weightFeedback:      w.weightFeedback,
+        weightJunk:          w.weightJunk,
+        staleDecayPerHour:    w.staleDecayPerHour,
+        staleDecayGraceHours: w.staleDecayGraceHours,
+        staleDecayCap:        w.staleDecayCap,
+        hardJunkStop:         w.hardJunkStop,
+      },
+      feedbackStats,
     },
   };
 }

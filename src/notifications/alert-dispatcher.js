@@ -51,16 +51,19 @@ export function recomputeAlertScores(trends, alertWeights, db) {
   const nowMs = Date.now();
   for (const t of trends) {
     let feedbackBoost = 50;
+    let feedbackStats = null;
     if (t._dbId && typeof db.getFeedbackStats === 'function') {
       try {
         const fb = db.getFeedbackStats(t._dbId);
         feedbackBoost = feedbackBoostFromStats(fb?.likes, fb?.dislikes);
+        feedbackStats = { likes: fb?.likes | 0, dislikes: fb?.dislikes | 0 };
       } catch { /* keep neutral */ }
     }
     const firstSeen = t.firstSeenAt || t.first_seen_at || null;
     const ageHours = firstSeen ? Math.max(0, (nowMs - new Date(firstSeen).getTime()) / 3_600_000) : 0;
 
     t._feedbackBoost = feedbackBoost;
+    t._feedbackStats = feedbackStats;
     t._ageHours = ageHours;
 
     const probe = computeAlertScore(t, alertWeights);
@@ -159,6 +162,15 @@ export async function dispatchAlerts({ trends, deps, source = 'scan' }) {
         alertType:  trend.alertType || null,
         alertScore: trend.alertScore ?? null,
         threshold:  effectiveAlertThreshold,
+        // Floor decomposition — the admin Decisions panel shows which side
+        // (user-pers slider vs admin global) actually set the bar. Useful to
+        // answer "почему именно 60 — может, я где-то слайдер сдвинул".
+        userFloor:   userThreshold,
+        globalFloor: globalAlertThreshold,
+        // Active preset that owned the weights table — same for all decisions
+        // in one cycle, but storing per-row keeps history accurate when admin
+        // flips the active preset between cycles.
+        preset: presetCfg?.preset || null,
         breakdown:  trend.alertBreakdown || null,
         url:        trend.url || null,
         userChatId: String(user.telegram_chat_id || ''),
