@@ -1635,7 +1635,53 @@ tr:hover td{background:rgba(255,255,255,.02)}
 .dec-gate-chip{font-size:11px;padding:2px 8px;border-radius:10px;font-family:'ui-monospace',monospace}
 .dec-gate-chip.passed{color:var(--green);background:rgba(var(--green-rgb),.10);border:1px solid rgba(var(--green-rgb),.40)}
 .dec-gate-chip.failed{color:var(--red);background:rgba(var(--red-rgb),.10);border:1px solid rgba(var(--red-rgb),.40);cursor:help}
-.dec-breakdown{color:var(--muted);font-size:11px;font-family:'ui-monospace',monospace;padding:6px 8px;background:rgba(255,255,255,.02);border-radius:4px;border:1px dashed var(--border)}
+.dec-breakdown{color:var(--muted);font-size:11px;font-family:'ui-monospace',monospace;padding:6px 8px;background:rgba(255,255,255,.02);border-radius:4px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px}
+.dec-breakdown-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dec-expand-btn{background:transparent;border:1px solid var(--border);color:var(--text2);font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;white-space:nowrap}
+.dec-expand-btn:hover{border-color:var(--accent);color:var(--text)}
+
+/* Expanded math panel — full breakdown of every signal that fed alertScore */
+.dec-math{margin-top:8px;background:linear-gradient(180deg,rgba(140,140,255,.04),rgba(255,255,255,.01));border:1px solid rgba(140,140,255,.18);border-radius:8px;padding:14px}
+.dec-math-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:900px){.dec-math-grid{grid-template-columns:1fr}}
+.dec-math-section{background:rgba(0,0,0,.18);border-radius:6px;padding:10px 12px;border:1px solid rgba(255,255,255,.04)}
+.dec-math-section h4{margin:0 0 8px 0;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--text2);display:flex;align-items:center;gap:6px}
+.dec-math-section h4 .badge{font-size:10px;font-weight:600;padding:2px 6px;border-radius:3px;background:rgba(255,255,255,.05);color:var(--muted);letter-spacing:0;text-transform:none}
+.dec-math-table{width:100%;border-collapse:collapse;font-size:12px;font-family:'ui-monospace',monospace}
+.dec-math-table td{padding:4px 6px;border-bottom:1px solid rgba(255,255,255,.03)}
+.dec-math-table tr:last-child td{border-bottom:none}
+.dec-math-table .label{color:var(--text2);width:30%}
+.dec-math-table .calc{color:var(--muted);text-align:right;font-size:11px}
+.dec-math-table .contrib{text-align:right;font-weight:700;width:18%}
+.dec-math-table .contrib.pos{color:var(--green)}
+.dec-math-table .contrib.neg{color:var(--red)}
+.dec-math-table .contrib.zero{color:var(--text3)}
+.dec-math-table tr.muted td{opacity:.45}
+.dec-math-table tr.total td{border-top:2px solid rgba(255,255,255,.10);font-weight:700}
+.dec-math-table tr.total .label{color:var(--text)}
+.dec-math-table tr.total .contrib{font-size:14px}
+.dec-math-equation{margin-top:10px;padding:10px 12px;background:rgba(0,0,0,.30);border-radius:6px;font-family:'ui-monospace',monospace;font-size:13px;text-align:center;color:var(--text2);line-height:1.7}
+.dec-math-equation .pos-num{color:var(--green);font-weight:700}
+.dec-math-equation .neg-num{color:var(--red);font-weight:700}
+.dec-math-equation .final{color:var(--text);font-weight:800;font-size:18px;margin-left:6px}
+.dec-math-equation .final.pass{color:var(--green)}
+.dec-math-equation .final.fail{color:var(--red)}
+.dec-math-floor{margin-top:8px;font-size:11px;color:var(--muted);text-align:center}
+.dec-math-floor b{color:var(--text2);font-family:'ui-monospace',monospace}
+.dec-math-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:11px;color:var(--muted)}
+.dec-math-meta .pill{padding:3px 8px;border-radius:4px;background:rgba(255,255,255,.04);border:1px solid var(--border);font-family:'ui-monospace',monospace}
+.dec-math-meta .pill b{color:var(--text);font-weight:700}
+.dec-math-meta .pill.warn{color:#ff8a93;border-color:rgba(255,91,106,.30);background:rgba(255,91,106,.06)}
+.dec-math-meta .pill.ok{color:var(--green);border-color:rgba(var(--green-rgb),.30);background:rgba(var(--green-rgb),.06)}
+.dec-math-fb{display:flex;gap:6px;font-family:'ui-monospace',monospace;font-size:11px;align-items:center}
+.dec-math-fb .like{color:var(--green)}
+.dec-math-fb .dislike{color:var(--red)}
+.dec-math-fb .arrow{color:var(--muted)}
+.dec-math-fb .boost{font-weight:700;padding:1px 6px;border-radius:3px;background:rgba(255,255,255,.06);color:var(--text)}
+.dec-math-reasons{margin-top:8px;padding-top:8px;border-top:1px dashed rgba(255,255,255,.06);font-size:11px;display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.dec-math-reasons .lbl{color:var(--muted);font-family:'ui-monospace',monospace;margin-right:4px}
+.dec-math-reasons .tag{font-family:'ui-monospace',monospace;color:#ff8a93;background:rgba(255,91,106,.08);border:1px solid rgba(255,91,106,.25);padding:1px 7px;border-radius:3px;font-size:11px}
+.dec-math-reasons .tag.safe{color:#7fcfff;background:rgba(120,180,255,.08);border-color:rgba(120,180,255,.25)}
 
 /* Maintenance card — full-width DB-housekeeping section under Stats */
 .maintenance-card{margin-top:16px;border-color:rgba(248,113,113,.18);background:linear-gradient(180deg,rgba(248,113,113,.04),rgba(255,255,255,.01))}
@@ -3295,6 +3341,14 @@ function DecisionsPage() {
   const [reason, setReason] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
+  // Per-card expand state for the detailed math panel. Keyed by ts+trendId.
+  // Survives polling refresh because we update by key, not array index.
+  const [expanded, setExpanded] = useState(() => new Set());
+  const toggleExpand = (key) => setExpanded(prev => {
+    const n = new Set(prev);
+    if (n.has(key)) n.delete(key); else n.add(key);
+    return n;
+  });
 
   const load = () => {
     setLoading(true);
@@ -3354,6 +3408,208 @@ function DecisionsPage() {
     return parts.join(' · ');
   };
 
+  // Round to 1 decimal — used everywhere in the math panel for display
+  const fmt1 = (n) => {
+    const x = Number(n);
+    if (!isFinite(x)) return '—';
+    return (Math.round(x * 10) / 10).toString();
+  };
+
+  // Tooltip text for each junk-filter rule. Synced with rule names in
+  // src/analysis/junk-filter.js. safe-override(divN) means a meme-shape
+  // signal divided the raw penalty by N (rescue path).
+  const junkReasonHint = (r) => {
+    const s = String(r || '');
+    if (s.startsWith('safe-override')) {
+      const m = s.match(/divisor[÷:]?(\d+)|÷(\d+)/);
+      const n = m ? (m[1] || m[2]) : '?';
+      return 'Сработал meme-сигнал → весь junk поделён на ÷' + n + ' (rescue)';
+    }
+    const HINTS = {
+      'politics':      'Политика/война (RE_POLITICS) — junk-filter politicsPenalty',
+      'kpop/fandom':   'K-pop / стан-культура (RE_KPOP) — kpopPenalty',
+      'celeb-noise':   'Рутинный celeb-шум: интервью, red carpet (RE_CELEB_NOISE) — celebNoisePenalty',
+      'no-meme-shape': 'Нет mem-сигнала: ни животного, ни абсурда, ни мема, ни heartwarming — noMemeShapePenalty',
+      'text-only':     'Кластер без картинок/видео — noContentPenalty (не применяется к google_trends)',
+    };
+    return HINTS[s] || s;
+  };
+
+  // Detailed math panel — full arithmetic for one decision.
+  // Shows every component (raw value × weight = contribution), the equation,
+  // threshold breakdown, feedback details, hard-junk reference, and stale knobs.
+  // Only rendered when the user clicks the expand button on a decision card.
+  const MathPanel = (d) => {
+    const b = d.breakdown;
+    if (!b) return null;
+    // Weights snapshot was added 2026-05-07. Older decisions in the buffer
+    // (pre-deploy) won't have it — fall back to "—" for the calc column.
+    const w = b.weights || {};
+    const hasWeights = b.weights != null;
+
+    const score = Number(d.alertScore) || 0;
+    const userFloor = Number(d.userFloor || 0);
+    const adminFloor = Number(d.globalFloor || 0);
+    const floor = Number(d.threshold || 0);
+    const passed = score >= floor;
+
+    const posRows = [
+      { key: 'meme',     val: b.meme,      weight: w.weightMemePotential, label: 'meme' },
+      { key: 'viral',    val: b.viral,     weight: w.weightVirality,      label: 'viral' },
+      { key: 'emerge',   val: b.emergence, weight: w.weightEmergence,     label: 'emerg' },
+      { key: 'twitter',  val: b.twitter,   weight: w.weightTwitter,       label: 'twitter' },
+      { key: 'feedback', val: b.feedback,  weight: w.weightFeedback,      label: 'feedback' },
+    ];
+
+    const junkPenaltyVal = (Number(b.junk) || 0) * (Number(w.weightJunk) || 0);
+    const stalePenaltyVal = Number(b.staleDecay) || 0;
+    const hardJunkStop = Number(w.hardJunkStop) || 70;
+    const hardJunkHit = (Number(b.junk) || 0) >= hardJunkStop;
+
+    return h('div', { className: 'dec-math' },
+      h('div', { className: 'dec-math-grid' },
+        // Left column — positive contributions
+        h('div', { className: 'dec-math-section' },
+          h('h4', null, '+ Положительные сигналы',
+            h('span', { className: 'badge' }, 'Σ +' + fmt1(b.positive))
+          ),
+          h('table', { className: 'dec-math-table' },
+            h('tbody', null,
+              ...posRows.map(r => {
+                const rawVal = Number(r.val) || 0;
+                const wVal = Number(r.weight) || 0;
+                const contrib = rawVal * wVal;
+                const isZero = !contrib;
+                return h('tr', { key: r.key, className: isZero ? 'muted' : '' },
+                  h('td', { className: 'label' }, r.label),
+                  h('td', { className: 'calc' },
+                    hasWeights ? (fmt1(rawVal) + ' x ' + fmt1(wVal)) : fmt1(rawVal)
+                  ),
+                  h('td', { className: 'contrib ' + (isZero ? 'zero' : 'pos') },
+                    isZero ? '0' : ('+' + fmt1(contrib)))
+                );
+              }),
+              h('tr', { className: 'total' },
+                h('td', { className: 'label' }, 'Σ positive'),
+                h('td', { className: 'calc' }, ''),
+                h('td', { className: 'contrib pos' }, '+' + fmt1(b.positive))
+              )
+            )
+          )
+        ),
+        // Right column — penalty
+        h('div', { className: 'dec-math-section' },
+          h('h4', null, '- Штрафы',
+            h('span', { className: 'badge' }, 'Σ -' + fmt1(b.penalty))
+          ),
+          h('table', { className: 'dec-math-table' },
+            h('tbody', null,
+              h('tr', { className: !junkPenaltyVal ? 'muted' : '' },
+                h('td', { className: 'label' }, 'junk'),
+                h('td', { className: 'calc' },
+                  hasWeights ? (fmt1(b.junk) + ' x ' + fmt1(w.weightJunk)) : fmt1(b.junk)
+                ),
+                h('td', { className: 'contrib ' + (!junkPenaltyVal ? 'zero' : 'neg') },
+                  !junkPenaltyVal ? '0' : ('-' + fmt1(junkPenaltyVal)))
+              ),
+              h('tr', { className: !stalePenaltyVal ? 'muted' : '' },
+                h('td', { className: 'label' }, 'stale'),
+                h('td', { className: 'calc' },
+                  fmt1(b.ageHours) + 'h, grace ' +
+                  (w.staleDecayGraceHours != null ? w.staleDecayGraceHours : 24) + 'h'
+                ),
+                h('td', { className: 'contrib ' + (!stalePenaltyVal ? 'zero' : 'neg') },
+                  !stalePenaltyVal ? '0' : ('-' + fmt1(stalePenaltyVal)))
+              ),
+              h('tr', { className: 'total' },
+                h('td', { className: 'label' }, 'Σ penalty'),
+                h('td', { className: 'calc' }, ''),
+                h('td', { className: 'contrib neg' }, '-' + fmt1(b.penalty))
+              )
+            )
+          ),
+          // Junk reasons — what specifically triggered the junk score.
+          // Set by junk-filter.js: politics, kpop/fandom, celeb-noise,
+          // no-meme-shape, text-only. safe-override(divN) means a meme
+          // signal divided the raw penalty.
+          Array.isArray(b.junkReasons) && b.junkReasons.length > 0
+            ? h('div', { className: 'dec-math-reasons' },
+                h('span', { className: 'lbl' }, 'junk триггеры:'),
+                ...b.junkReasons.map((r, ri) => h('span', {
+                  key: ri,
+                  className: 'tag' + (String(r).startsWith('safe-override') ? ' safe' : ''),
+                  title: junkReasonHint(r),
+                }, r))
+              )
+            : null
+        )
+      ),
+      // Equation
+      h('div', { className: 'dec-math-equation' },
+        h('span', { className: 'pos-num' }, '+' + fmt1(b.positive)),
+        ' - ',
+        h('span', { className: 'neg-num' }, fmt1(b.penalty)),
+        ' = ',
+        h('span', { className: 'final ' + (passed ? 'pass' : 'fail') }, score),
+        h('span', {
+          style: { color: 'var(--muted)', fontSize: 13, marginLeft: 8 }
+        }, (passed ? ' >= ' : ' < ') + floor + ' (' + (passed ? '✓ pass' : '✗ fail') + ')')
+      ),
+      // Threshold decomposition
+      h('div', { className: 'dec-math-floor' },
+        'Порог ',
+        h('b', null, floor),
+        ' = max(user ', h('b', null, userFloor || 0),
+        ', admin ', h('b', null, adminFloor || 0), ')'
+      ),
+      // Meta pills — feedback votes, hard-junk reference, stale cap, trigger
+      h('div', { className: 'dec-math-meta' },
+        // Feedback details
+        b.feedbackStats
+          ? h('span', { className: 'pill' },
+              h('span', { className: 'dec-math-fb' },
+                h('span', { className: 'like' }, '👍 ' + (b.feedbackStats.likes | 0)),
+                ' / ',
+                h('span', { className: 'dislike' }, '👎 ' + (b.feedbackStats.dislikes | 0)),
+                h('span', { className: 'arrow' }, ' -> '),
+                h('span', { className: 'boost' }, 'boost ' + b.feedback)
+              )
+            )
+          : h('span', { className: 'pill' },
+              h('span', { className: 'dec-math-fb' },
+                h('span', { className: 'arrow' }, 'feedback boost '),
+                h('span', { className: 'boost' }, b.feedback != null ? b.feedback : 50),
+                h('span', { className: 'arrow' },
+                  ' (' + (b.feedback === 50 || b.feedback == null ? 'нейтрал' : 'votes неизвестны') + ')')
+              )
+            ),
+        // Hard-junk gate reference
+        h('span', { className: 'pill ' + (hardJunkHit ? 'warn' : 'ok') },
+          'hard-junk ', h('b', null, (b.junk | 0) + ' / ' + hardJunkStop), ' ',
+          (hardJunkHit ? '⚠ убил бы' : '✓ ниже порога')
+        ),
+        // Stale cap reference
+        h('span', { className: 'pill' },
+          'stale ',
+          h('b', null, fmt1(b.staleDecay) + ' / ' + (w.staleDecayCap != null ? w.staleDecayCap : 30)),
+          ' (',
+          (w.staleDecayPerHour != null ? w.staleDecayPerHour : 2),
+          '/h после ',
+          (w.staleDecayGraceHours != null ? w.staleDecayGraceHours : 24),
+          'h)'
+        ),
+        // Trigger source (scan vs refresh vs manual)
+        d.triggerSource ? h('span', { className: 'pill' },
+          'trigger ', h('b', null, d.triggerSource)
+        ) : null,
+        // Older decisions warning
+        !hasWeights ? h('span', { className: 'pill warn' },
+          '⚠ старая запись — веса не сохранены, calc неполный'
+        ) : null
+      )
+    );
+  };
+
   return h('div', null,
     h('div', { className: 'dec-page-head' },
       h('h2', null, '🔔 Решения алерт-гейта'),
@@ -3407,6 +3663,9 @@ function DecisionsPage() {
           items.map((d, i) => {
             const lbl = DECISION_LABELS[d.reason] || { color: 'var(--text2)', text: d.reason };
             const isSent = d.decision === 'sent';
+            // Stable key for expand state — same trend at same ts is the same row
+            const expKey = (d.ts || '') + ':' + (d.trendId || i);
+            const isOpen = expanded.has(expKey);
 
             // Fallback for old decisions without gates[] — synthesize from reason
             const gates = Array.isArray(d.gates) && d.gates.length
@@ -3432,7 +3691,7 @@ function DecisionsPage() {
                 h('div', { className: 'dec-title' }, titleNode),
                 h('span', { className: 'dec-verdict ' + (isSent ? 'sent' : 'skipped') }, lbl.text)
               ),
-              // Row 2: meta (source, category, score, user)
+              // Row 2: meta (source, category, score, user, preset)
               h('div', { className: 'dec-meta-row' },
                 d.source    && h('span', null, '📡 ', h('b', null, d.source)),
                 // Alert-type chip — coloured per type for at-a-glance distribution
@@ -3442,6 +3701,7 @@ function DecisionsPage() {
                 d.alertScore != null && h('span', null,
                   'score: ', h('b', null, d.alertScore), ' / ', d.threshold
                 ),
+                d.preset && h('span', null, '🎯 ', h('b', null, d.preset)),
                 d.userChatId && h('span', null, '👤 @', d.userChatId)
               ),
               // Row 2b: engagement — raw views/likes/retweets/upvotes from
@@ -3467,8 +3727,17 @@ function DecisionsPage() {
                   className: 'dec-gate-chip ' + (g.passed ? 'passed' : 'failed'),
                 }, (g.passed ? '✓ ' : '✗ ') + (GATE_LABELS[g.name] || g.name)))
               ),
-              // Row 4: breakdown (monospace, subtle)
-              d.breakdown && h('div', { className: 'dec-breakdown' }, fmtBreakdown(d.breakdown))
+              // Row 4: breakdown one-liner + expand toggle
+              d.breakdown && h('div', { className: 'dec-breakdown' },
+                h('span', { className: 'dec-breakdown-text' }, fmtBreakdown(d.breakdown)),
+                h('button', {
+                  className: 'dec-expand-btn',
+                  onClick: () => toggleExpand(expKey),
+                  title: isOpen ? 'Свернуть детали' : 'Полная математика scoring'
+                }, isOpen ? '▴ свернуть' : '▾ детали')
+              ),
+              // Row 5: full math panel (when expanded)
+              d.breakdown && isOpen && MathPanel(d)
             );
           })
         )
