@@ -2578,12 +2578,16 @@ class DashboardServer {
       /* ── pulse (default) — X true-black + green primary ── */
       /* Was ink (X-blue) before 2026-05-19 redesign — old palette moved to   */
       /* body[data-theme="ink"] below for users who prefer it.                 */
+      /* 2026-05-20 Round 3 polish — surface/card scale crunched downward.    */
+      /* Previous values read as "matte grey" against pure-black bg; new      */
+      /* scale keeps depth ordering but pulls each level closer to #000 so    */
+      /* the dashboard reads as "abyss black", not "dark grey".               */
       --bg:          #000000;
-      --surface:     #0a0a0a;
-      --surface2:    #16181c;
-      --card:        #16181c;
-      --card2:       #1c1f24;
-      --card3:       #232730;
+      --surface:     #050505;
+      --surface2:    #0a0b0e;
+      --card:        #0a0b0e;
+      --card2:       #101114;
+      --card3:       #16181c;
       --border:      rgba(239,243,244,.08);
       --border2:     rgba(239,243,244,.14);
       --border3:     rgba(239,243,244,.22);
@@ -2648,11 +2652,11 @@ class DashboardServer {
     /* ── ink — preserved X-blue palette for users who liked the old default ── */
     body[data-theme="ink"] {
       --bg:          #000000;
-      --surface:     #0a0a0a;
-      --surface2:    #16181c;
-      --card:        #16181c;
-      --card2:       #1c1f24;
-      --card3:       #232730;
+      --surface:     #050505;
+      --surface2:    #0a0b0e;
+      --card:        #0a0b0e;
+      --card2:       #101114;
+      --card3:       #16181c;
       --border:      rgba(239,243,244,.08);
       --border2:     rgba(239,243,244,.14);
       --border3:     rgba(239,243,244,.22);
@@ -2784,11 +2788,9 @@ class DashboardServer {
     /* ── Nav ── */
     .nav {
       position: sticky; top: 0; z-index: 200;
-      /* 2026-05-01: theme-tied bg — was hardcoded rgba(12,12,22) blue tint
-         from the old midnight palette, looked off against the new ink theme
-         which is pure #000. var(--bg) → var(--surface) gradient gives just
-         enough elevation to separate nav from content without a colour shift. */
-      background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
+      /* 2026-05-20 Round 3: flat surface — no vertical gradient.
+         border-bottom + box-shadow handle separation from content. */
+      background: var(--surface);
       backdrop-filter: blur(18px) saturate(1.3);
       -webkit-backdrop-filter: blur(18px) saturate(1.3);
       border-bottom: 1px solid var(--border);
@@ -2799,7 +2801,7 @@ class DashboardServer {
     }
     .nav::after {
       content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
-      background: linear-gradient(90deg, transparent 0%, rgba(var(--accent-rgb), .22) 20%, rgba(var(--accent-rgb), .22) 80%, transparent 100%);
+      background: rgba(var(--accent-rgb), .22);
       pointer-events: none;
     }
     .nav-logo {
@@ -2815,7 +2817,7 @@ class DashboardServer {
          too small to read in the nav. 38 fits comfortably in the 50px
          nav bar (50−2×6 padding = ample headroom). */
       width: 38px; height: 38px; border-radius: var(--r1);
-      background: linear-gradient(135deg, rgba(var(--accent-rgb), .25), rgba(var(--accent-rgb), .06));
+      background: rgba(var(--accent-rgb), .12);
       border: 1px solid rgba(var(--accent-rgb), .32);
       box-shadow: 0 2px 12px rgba(var(--accent-rgb), .22), inset 0 1px 0 rgba(255,255,255,.06);
       overflow: hidden;
@@ -2838,9 +2840,7 @@ class DashboardServer {
       display: block;
     }
     .nav-logo-text {
-      background: linear-gradient(180deg, #fff 0%, #cfd4ff 100%);
-      -webkit-background-clip: text; background-clip: text;
-      -webkit-text-fill-color: transparent;
+      color: #fff;
     }
     /* Top-right nav buttons (account + settings shortcut) */
     .nav-icon-btn {
@@ -2881,7 +2881,7 @@ class DashboardServer {
     .nav-account-avatar {
       display: inline-flex; align-items: center; justify-content: center;
       width: 22px; height: 22px; border-radius: 50%;
-      background: linear-gradient(135deg, rgba(var(--accent-rgb), .35), rgba(var(--accent-rgb), .12));
+      background: rgba(var(--accent-rgb), .18);
       border: 1px solid rgba(var(--accent-rgb), .35);
       color: var(--text); font-size: 11px; font-weight: 800;
       letter-spacing: 0; margin: -2px 0;
@@ -2895,7 +2895,7 @@ class DashboardServer {
     }
     .nav-sep {
       width: 1px; height: 18px;
-      background: linear-gradient(180deg, transparent, var(--border2), transparent);
+      background: var(--border2);
     }
     .nav-subtitle {
       /* Absolutely centered across the whole nav bar, independent of logo/button widths */
@@ -2915,7 +2915,7 @@ class DashboardServer {
     .nav-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
     .status-pill {
       display: flex; align-items: center; gap: 7px;
-      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.015));
+      background: rgba(255,255,255,.025);
       border: 1px solid var(--border2);
       border-radius: var(--r1); padding: 4px 11px 4px 9px;
       font-size: 10px; color: var(--text2); font-weight: 700;
@@ -2945,7 +2945,7 @@ class DashboardServer {
     /* ── Sidebar ── */
     .sidebar {
       width: 240px; min-width: 240px;
-      background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
+      background: var(--surface);
       border-right: 1px solid var(--border);
       padding: 14px 10px 10px;
       display: flex; flex-direction: column; gap: 2px;
@@ -3167,7 +3167,7 @@ class DashboardServer {
       margin-top: auto;
       padding: 6px 4px 4px;
       border-top: 1px solid var(--border);
-      background: linear-gradient(180deg, transparent 0%, rgba(0,0,0,.15) 100%);
+      background: transparent;
     }
     .sb-foot-nav {
       display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px;
@@ -3198,7 +3198,7 @@ class DashboardServer {
     .sb-foot-btn.active::before {
       content: '';
       position: absolute; top: 0; left: 20%; right: 20%; height: 2px;
-      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      background: var(--accent);
       border-radius: 0 0 2px 2px;
     }
     .sb-foot-btn.active .sb-foot-ico { filter: saturate(1.2) drop-shadow(0 0 4px var(--accent-glow)); }
@@ -3289,7 +3289,7 @@ class DashboardServer {
     .stat-card:hover { border-color: rgba(var(--accent-rgb), .28); transform: translateY(-1px); }
     .stat-card::after {
       content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-      background: linear-gradient(90deg, var(--accent), transparent);
+      background: var(--accent);
       opacity: 0; transition: opacity .25s;
     }
     .stat-card:hover::after { opacity: 1; }
@@ -3613,9 +3613,8 @@ class DashboardServer {
       display: flex; align-items: center; gap: 10px;
       padding: 6px 9px;
       border-radius: var(--r1);
-      background: linear-gradient(135deg, rgba(255,107,107,0.08), rgba(255,184,0,0.05));
-      border: 1px solid rgba(255,107,107,0.18);
-      box-shadow: 0 0 12px -8px rgba(255,107,107,0.25);
+      background: var(--surface2);
+      border: 1px solid var(--border);
     }
     .meme-hero-left { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex-shrink: 0; }
     .meme-hero-label {
@@ -3833,7 +3832,7 @@ class DashboardServer {
       gap: 14px; padding: 36px 20px;
       border: 1px solid var(--border);
       border-radius: var(--r3);
-      background: linear-gradient(180deg, rgba(var(--accent-rgb), .05), rgba(var(--accent-rgb), .01));
+      background: rgba(var(--accent-rgb), .03);
     }
     .analyze-loader-spinner {
       width: 36px; height: 36px;
@@ -3890,7 +3889,7 @@ class DashboardServer {
       transform: scale(1.2);
     }
     .analyze-result {
-      background: linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,.005));
+      background: rgba(255,255,255,.015);
       border: 1px solid var(--border);
       border-radius: var(--r3);
       padding: 0;
@@ -3899,7 +3898,7 @@ class DashboardServer {
     .analyze-hero {
       display: flex; align-items: flex-start; gap: 14px;
       padding: 16px;
-      background: linear-gradient(135deg, rgba(var(--accent-rgb), .08), rgba(var(--accent-rgb), .02));
+      background: rgba(var(--accent-rgb), .05);
       border-bottom: 1px solid var(--border);
     }
     .analyze-thumb {
@@ -3930,19 +3929,16 @@ class DashboardServer {
       display: flex; flex-direction: column; gap: 3px;
     }
     .analyze-verdict.high {
-      background: linear-gradient(135deg, rgba(var(--accent-rgb), .10), rgba(var(--accent-rgb), .02));
+      background: rgba(var(--accent-rgb), .06);
       border-left: 4px solid var(--accent);
-      box-shadow: 0 0 16px rgba(var(--accent-rgb), .18);
     }
     .analyze-verdict.mid {
       background: rgba(255,255,255,.03);
       border-left: 4px solid rgba(255,255,255,.35);
-      box-shadow: 0 0 12px rgba(255,255,255,.04);
     }
     .analyze-verdict.low {
-      background: linear-gradient(135deg, rgba(var(--warn-rgb), .06), rgba(var(--warn-rgb), .01));
+      background: rgba(var(--warn-rgb), .04);
       border-left: 4px solid var(--warn);
-      box-shadow: 0 0 12px rgba(var(--warn-rgb), .10);
     }
     .analyze-verdict-title { font-size: 15px; font-weight: 800; color: var(--text); }
     .analyze-verdict-sub   { font-size: 12px; color: var(--dim); line-height: 1.5; }
@@ -4083,12 +4079,12 @@ class DashboardServer {
     .range-slider:focus { outline: none; }
     .range-slider::-webkit-slider-runnable-track {
       height: 4px; border-radius: 2px;
-      background: linear-gradient(90deg, var(--accent) 0%, var(--accent2) 100%);
+      background: var(--accent);
       opacity: .85;
     }
     .range-slider::-moz-range-track {
       height: 4px; border-radius: 2px;
-      background: linear-gradient(90deg, var(--accent) 0%, var(--accent2) 100%);
+      background: var(--accent);
       opacity: .85;
     }
     .range-slider::-webkit-slider-thumb {
@@ -4230,7 +4226,7 @@ class DashboardServer {
       padding: 4px 10px; border-radius: 999px; letter-spacing: .2px;
       animation: fadeIn .2s ease;
     }
-    .settings-info { border-style: dashed; background: linear-gradient(180deg, rgba(var(--accent-rgb), .05), transparent); }
+    .settings-info { border-style: dashed; background: rgba(var(--accent-rgb), .03); }
 
     /* ── Preference toggle switch ── */
     .pref-toggle {
@@ -4456,7 +4452,7 @@ class DashboardServer {
       position: relative;
       width: 100%; max-width: 720px;
       max-height: calc(100vh - 56px);
-      background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
+      background: var(--surface);
       border: 1px solid var(--border2);
       border-radius: var(--r3);
       box-shadow: 0 24px 80px rgba(0,0,0,.7), 0 0 0 1px rgba(var(--accent-rgb), .08);
@@ -4471,7 +4467,7 @@ class DashboardServer {
       display: flex; align-items: center; gap: 12px;
       padding: 14px 18px;
       border-bottom: 1px solid var(--border);
-      background: linear-gradient(180deg, rgba(var(--accent-rgb), .05), transparent);
+      background: rgba(var(--accent-rgb), .03);
       flex-shrink: 0;
     }
     .sheet-title {
@@ -4891,7 +4887,7 @@ class DashboardServer {
       margin-top: 10px;
       padding: 10px 14px 10px 12px;
       border-left: 3px solid var(--accent);
-      background: linear-gradient(90deg, rgba(var(--accent-rgb), .06), rgba(255,255,255,.01) 60%);
+      background: rgba(var(--accent-rgb), .04);
       border-radius: var(--r1);
       display: flex; align-items: flex-start; gap: 6px;
       font-size: 13px; line-height: 1.5;
@@ -4958,7 +4954,7 @@ class DashboardServer {
     }
     .alert-math-panel {
       margin-top: 10px; padding: 12px;
-      background: linear-gradient(180deg, rgba(var(--accent-rgb), .04), rgba(255,255,255,.01));
+      background: rgba(var(--accent-rgb), .03);
       border: 1px solid rgba(var(--accent-rgb), .18);
       border-radius: var(--r1);
     }
@@ -5313,9 +5309,9 @@ class DashboardServer {
       border-radius: 3px;
       transition: width .4s ease;
     }
-    .conf-low  { background: linear-gradient(90deg, rgba(239,68,68,.7),  rgba(239,68,68,1));  }
-    .conf-mid  { background: linear-gradient(90deg, rgba(255,176,32,.7), rgba(255,176,32,1)); }
-    .conf-high { background: linear-gradient(90deg, rgba(34,197,94,.7),  rgba(34,197,94,1));  }
+    .conf-low  { background: rgb(239,68,68);  }
+    .conf-mid  { background: rgb(255,176,32); }
+    .conf-high { background: rgb(34,197,94);  }
     .catalyst-confidence-val {
       font-family: 'JetBrains Mono', ui-monospace, monospace;
       font-variant-numeric: tabular-nums;
@@ -5440,14 +5436,10 @@ class DashboardServer {
       content: '';
       position: absolute; top: 0; left: 0; right: 0;
       height: 2px;
-      background: linear-gradient(90deg,
-        rgba(var(--accent-rgb), 0) 0%,
-        rgba(var(--accent-rgb), .85) 50%,
-        rgba(var(--accent-rgb), .25) 100%);
+      background: var(--accent);
       transform-origin: left center;
       animation: feedProgress 650ms cubic-bezier(.4, 0, .2, 1) forwards;
       z-index: 3; pointer-events: none;
-      box-shadow: 0 0 8px rgba(var(--accent-rgb), .35);
     }
     @keyframes feedProgress {
       0%   { transform: scaleX(0);   opacity: 1; }
@@ -5463,7 +5455,7 @@ class DashboardServer {
     .feed-panel-head {
       padding: 12px 14px 10px;
       border-bottom: 1px solid var(--border);
-      background: linear-gradient(180deg, rgba(var(--accent-rgb), .03), transparent);
+      background: rgba(var(--accent-rgb), .02);
     }
     .feed-panel-top {
       display: flex; align-items: center; gap: 12px; margin-bottom: 0;
@@ -5679,7 +5671,7 @@ class DashboardServer {
       border-color: var(--border3);
       /* Hover = soft white-alpha overlay (same trick X uses) — gives a lift
          without shifting hue. */
-      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.015));
+      background: rgba(255,255,255,.025);
       transform: translateY(-1px);
       box-shadow: 0 4px 14px rgba(0,0,0,.35), var(--gloss-top);
     }
@@ -6059,7 +6051,7 @@ class DashboardServer {
       margin-bottom: 8px;
     }
     .feed-desc.pump {
-      background: linear-gradient(90deg, rgba(var(--orange-rgb), .06), transparent);
+      background: rgba(var(--orange-rgb), .04);
       border-left: 2px solid var(--orange);
       padding: 6px 10px; border-radius: 4px;
       color: var(--orange); font-weight: 500;
@@ -6101,7 +6093,7 @@ class DashboardServer {
       height: 140px; width: 100%;
       display: flex; align-items: center; justify-content: center;
       font-size: 36px; opacity: .35;
-      background: linear-gradient(135deg, var(--card2), var(--card3));
+      background: var(--card2);
     }
 
     /* Multi-image gallery (2+ photos) — horizontal carousel with arrows.
@@ -6223,11 +6215,7 @@ class DashboardServer {
       content: ''; position: absolute;
       left: 0; top: 4px; bottom: 4px;
       width: 1px;
-      background: linear-gradient(to bottom,
-        rgba(255,255,255,0) 0%,
-        rgba(255,255,255,.12) 30%,
-        rgba(255,255,255,.12) 70%,
-        rgba(255,255,255,0) 100%);
+      background: rgba(255,255,255,.10);
     }
     .feed-score-top {
       display: flex; justify-content: space-between; align-items: center;
@@ -6258,11 +6246,11 @@ class DashboardServer {
       border-color: var(--border3); transform: translateY(-1px);
     }
     .feed-action-btn.primary {
-      background: linear-gradient(135deg, rgba(var(--accent-rgb), .15), rgba(var(--accent-rgb), .05));
+      background: rgba(var(--accent-rgb), .10);
       border-color: rgba(var(--accent-rgb), .3); color: var(--accent2);
     }
     .feed-action-btn.primary:hover {
-      background: linear-gradient(135deg, rgba(var(--accent-rgb), .25), rgba(var(--accent-rgb), .1));
+      background: rgba(var(--accent-rgb), .18);
       border-color: var(--accent);
     }
     .feed-action-btn.tg { color: #3b9dff; border-color: rgba(59,157,255,.25); }
@@ -6524,7 +6512,7 @@ class DashboardServer {
       flex: 1; height: 4px; background: rgba(255,255,255,.05);
       border-radius: 2px; overflow: hidden;
     }
-    .cat-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 2px; }
+    .cat-bar { height: 100%; background: var(--accent); border-radius: 2px; }
     .cat-name { font-size: 11px; color: var(--text2); min-width: 74px; display: flex; gap: 5px; align-items: center; }
     .cat-count { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--dim); min-width: 20px; text-align: right; }
 
@@ -7719,11 +7707,11 @@ function memeClass(v) {
   if (v >= 40) return 'ok';
   return 'cold';
 }
-function memeColor(v) {
-  if (v >= 80) return 'linear-gradient(90deg, #ff7675, #d63031)';
-  if (v >= 60) return 'linear-gradient(90deg, #e17055, #fab1a0)';
-  if (v >= 40) return 'linear-gradient(90deg, #fdcb6e, #ffeaa7)';
-  return '#333348';
+// 2026-05-20: dead in dashboard (shadowed by const memeColor = barColor(meme)
+// in TrendCard at line ~8706). Kept for any external import — collapsed to
+// solid --accent to match the unified scoring palette (no more светофор).
+function memeColor(_v) {
+  return 'var(--accent)';
 }
 // Bar color for emergence/adoption/meme scores. Unified on --accent —
 // score LEVEL is communicated via bar-fill LENGTH, not color (no more
@@ -7731,6 +7719,62 @@ function memeColor(v) {
 function barColor(_v) {
   return 'var(--accent)';
 }
+
+// ── Icons ────────────────────────────────────────────────────────────────────
+// 2026-05-20 (R4): central inline-SVG icon registry. makeIcon() captures
+// viewBox + stroke/fill style at definition time. ICONS holds factories
+// (one per icon name). icon(name, opts) is the use-site shim — returns
+// h('svg', {...}, ...children) or null if name not found.
+//
+// Style conventions:
+//   Lucide   → viewBox '0 0 24 24', stroke=true, currentColor stroke 2px
+//   Phosphor → viewBox '0 0 256 256', stroke=false, currentColor fill
+//   Brand    → viewBox '0 0 24 24', stroke=false (drawn as filled glyphs)
+//
+// opts: { size?: number=14, color?: string, style?: object, ...rest }
+function makeIcon(viewBox, stroke, ...children) {
+  return (props) => {
+    const p = props || {};
+    const size = p.size != null ? p.size : 14;
+    const styleExt = p.style || {};
+    const rest = {};
+    for (const k of Object.keys(p)) {
+      if (k !== 'size' && k !== 'style' && k !== 'color') rest[k] = p[k];
+    }
+    return h('svg', {
+      width: size, height: size, viewBox,
+      ...(stroke
+        ? { fill: 'none', stroke: 'currentColor', strokeWidth: 2,
+            strokeLinecap: 'round', strokeLinejoin: 'round' }
+        : { fill: 'currentColor' }),
+      style: {
+        display: 'inline-block', verticalAlign: 'middle', flexShrink: 0,
+        ...(p.color ? { color: p.color } : {}),
+        ...styleExt
+      },
+      'aria-hidden': p['aria-label'] ? undefined : 'true',
+      ...rest
+    }, ...children);
+  };
+}
+
+const ICONS = {
+  // — smoke-test entries; populated incrementally by R4 Tasks 2-7 —
+  search: makeIcon('0 0 24 24', true,
+    h('circle', { cx: 11, cy: 11, r: 8 }),
+    h('line', { x1: 21, y1: 21, x2: 16.65, y2: 16.65 })
+  ),
+  x: makeIcon('0 0 24 24', true,
+    h('line', { x1: 18, y1: 6, x2: 6, y2: 18 }),
+    h('line', { x1: 6, y1: 6, x2: 18, y2: 18 })
+  ),
+};
+
+function icon(name, opts) {
+  const factory = ICONS[name];
+  return factory ? factory(opts) : null;
+}
+
 function fmtVelocity(v) {
   if (!v || v === 0) return null;
   const unit = CURRENT_LANG === 'ru' ? '/ч' : '/h';
@@ -11314,31 +11358,10 @@ function LoginScreen({ onLoggedIn }) {
       background: 'var(--bg, #000)'
     }
   },
-    // Ambient X-blue radial blobs — single accent hue at varying intensities,
-    // monochrome by Ink design philosophy. Pure CSS, zero JS repaint.
-    h('div', {
-      'aria-hidden': 'true',
-      style: {
-        position: 'absolute', inset: 0, pointerEvents: 'none',
-        background:
-          'radial-gradient(40% 35% at 20% 18%, rgba(var(--accent-rgb), 0.10) 0%, transparent 70%),' +
-          'radial-gradient(35% 30% at 80% 85%, rgba(var(--accent-rgb), 0.05) 0%, transparent 70%)',
-        filter: 'blur(40px)',
-      }
-    }),
-    // Subtle grid overlay (translucent white, faded toward edges)
-    h('div', {
-      'aria-hidden': 'true',
-      style: {
-        position: 'absolute', inset: 0, pointerEvents: 'none', opacity: 0.35,
-        backgroundImage:
-          'linear-gradient(rgba(239,243,244,0.03) 1px, transparent 1px),' +
-          'linear-gradient(90deg, rgba(239,243,244,0.03) 1px, transparent 1px)',
-        backgroundSize: '48px 48px',
-        maskImage: 'radial-gradient(70% 70% at 50% 50%, #000 0%, transparent 100%)',
-        WebkitMaskImage: 'radial-gradient(70% 70% at 50% 50%, #000 0%, transparent 100%)',
-      }
-    }),
+    // 2026-05-20 — ambient radial blobs + grid overlay removed for the
+    // flat redesign pass (Round 3 "no gradients"). The card now sits on
+    // a plain --bg with no decorative backdrop. Keep the relative wrapper
+    // so existing zIndex/position assumptions still hold.
 
     // ── Card ────────────────────────────────────────────────────────────
     h('div', {
@@ -11391,9 +11414,7 @@ function LoginScreen({ onLoggedIn }) {
           style: {
             margin: '18px 0 0', fontSize: 22, fontWeight: 600,
             letterSpacing: '-0.02em', lineHeight: 1.1,
-            background: 'linear-gradient(180deg, var(--text, #e7e9ea) 0%, var(--text2, #c4c8cc) 100%)',
-            WebkitBackgroundClip: 'text', backgroundClip: 'text',
-            WebkitTextFillColor: 'transparent', color: 'transparent',
+            color: 'var(--text, #e7e9ea)',
           }
         }, 'Catalyst'),
         h('div', {
@@ -11534,7 +11555,7 @@ function LoginScreen({ onLoggedIn }) {
             fontSize: 15, fontWeight: 700,
             color: '#fff',
             background: code.length === 6
-              ? 'linear-gradient(180deg, var(--accent, #1d9bf0) 0%, #146da8 100%)'
+              ? 'var(--accent, #1d9bf0)'
               : 'rgba(239,243,244,0.06)',
             border: '1px solid ' + (code.length === 6 ? 'rgba(var(--accent-rgb), 0.40)' : 'var(--border, rgba(239,243,244,0.08))'),
             borderRadius: 12,
