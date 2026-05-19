@@ -6621,8 +6621,10 @@ function onGrokLangChange(fn) { grokLangListeners.add(fn); return () => grokLang
 try { document.documentElement.setAttribute('lang', CURRENT_LANG); } catch (e) {}
 
 // ── THEME ────────────────────────────────────────────────────────────────
-// 2 dark themes. Applied via <body data-theme="...">. "ink" is the default
-// and uses no data-theme attribute (it's the :root block).
+// 3 dark themes. Applied via <body data-theme="...">. "pulse" is the default
+// (green primary) and uses no data-theme attribute (it's the :root block).
+// "ink" is the legacy X-blue default (pre-2026-05-19 redesign); "tide" is a
+// navy + cyan/aqua alternative.
 //
 // Old themes (dim/slate/mono — and even older midnight/teal/abyss/violet
 // /acid/sunset/cyberpunk) were retired. Old saved values fall through
