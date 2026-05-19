@@ -7907,6 +7907,60 @@ const ICONS = {
     h('path', { d: 'm3 8 4-4 4 4' }),
     h('path', { d: 'M7 4v16' })
   ),
+  // — Feed-card metrics (R4 Task 4) —
+  heart: makeIcon('0 0 24 24', true,
+    h('path', { d: 'M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z' })
+  ),
+  'message-circle': makeIcon('0 0 24 24', true,
+    h('path', { d: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z' })
+  ),
+  'repeat-2': makeIcon('0 0 24 24', true,
+    h('path', { d: 'm2 9 3-3 3 3' }),
+    h('path', { d: 'M13 18H7a2 2 0 0 1-2-2V6' }),
+    h('path', { d: 'm22 15-3 3-3-3' }),
+    h('path', { d: 'M11 6h6a2 2 0 0 1 2 2v10' })
+  ),
+  eye: makeIcon('0 0 24 24', true,
+    h('path', { d: 'M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z' }),
+    h('circle', { cx: 12, cy: 12, r: 3 })
+  ),
+  'eye-off': makeIcon('0 0 24 24', true,
+    h('path', { d: 'M9.88 9.88a3 3 0 1 0 4.24 4.24' }),
+    h('path', { d: 'M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68' }),
+    h('path', { d: 'M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61' }),
+    h('line', { x1: 2, y1: 2, x2: 22, y2: 22 })
+  ),
+  'arrow-up': makeIcon('0 0 24 24', true,
+    h('line', { x1: 12, y1: 19, x2: 12, y2: 5 }),
+    h('polyline', { points: '5 12 12 5 19 12' })
+  ),
+  award: makeIcon('0 0 24 24', true,
+    h('circle', { cx: 12, cy: 8, r: 6 }),
+    h('polyline', { points: '8.21 13.89 7 22 12 19 17 22 15.79 13.88' })
+  ),
+  // — Feed-card actions (R4 Task 4) —
+  'external-link': makeIcon('0 0 24 24', true,
+    h('path', { d: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6' }),
+    h('polyline', { points: '15 3 21 3 21 9' }),
+    h('line', { x1: 10, y1: 14, x2: 21, y2: 3 })
+  ),
+  send: makeIcon('0 0 24 24', true,
+    h('path', { d: 'M22 2 11 13' }),
+    h('polygon', { points: '22 2 15 22 11 13 2 9 22 2' })
+  ),
+  link: makeIcon('0 0 24 24', true,
+    h('path', { d: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71' }),
+    h('path', { d: 'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71' })
+  ),
+  pencil: makeIcon('0 0 24 24', true,
+    h('path', { d: 'M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z' })
+  ),
+  // — Manual chip (R4 Task 4, also reused in Task 5) —
+  'flask-conical': makeIcon('0 0 24 24', true,
+    h('path', { d: 'M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2' }),
+    h('path', { d: 'M8.5 2h7' }),
+    h('path', { d: 'M7 16h10' })
+  ),
 };
 
 function icon(name, opts) {
@@ -8296,9 +8350,9 @@ function TweetHoverPreview({ state, onMouseEnter, onMouseLeave }) {
         h('img', { src: photo.url, alt: '', loading: 'lazy' })
       ),
       h('div', { className: 'tw-prev-meta', key: 'meta' },
-        m.upvotes != null && h('span', null, '⬆ ', fmtNum(m.upvotes)),
-        m.comments != null && h('span', null, '💬 ', fmtNum(m.comments)),
-        m.awards   ? h('span', null, '🏅 ', fmtNum(m.awards)) : null,
+        m.upvotes != null && h('span', null, icon('arrow-up', { size: 11 }), ' ', fmtNum(m.upvotes)),
+        m.comments != null && h('span', null, icon('message-circle', { size: 11 }), ' ', fmtNum(m.comments)),
+        m.awards   ? h('span', null, icon('award', { size: 11 }), ' ', fmtNum(m.awards)) : null,
         typeof m.ratio === 'number' && h('span', null, Math.round(m.ratio * 100) + '% ↑'),
         date && h('span', { className: 'tw-prev-date' }, date)
       ),
@@ -8357,10 +8411,10 @@ function TweetHoverPreview({ state, onMouseEnter, onMouseLeave }) {
         video && h('div', { className: 'tw-prev-play' }, '▶')
       ),
       h('div', { className: 'tw-prev-meta', key: 'meta' },
-        m.views    != null && h('span', null, '👁 ', fmtNum(m.views)),
-        m.likes    != null && h('span', null, '❤️ ', fmtNum(m.likes)),
-        m.retweets != null && h('span', null, '🔁 ', fmtNum(m.retweets)),
-        m.replies  != null && h('span', null, '💬 ', fmtNum(m.replies)),
+        m.views    != null && h('span', null, icon('eye', { size: 11 }), ' ', fmtNum(m.views)),
+        m.likes    != null && h('span', null, icon('heart', { size: 11 }), ' ', fmtNum(m.likes)),
+        m.retweets != null && h('span', null, icon('repeat-2', { size: 11 }), ' ', fmtNum(m.retweets)),
+        m.replies  != null && h('span', null, icon('message-circle', { size: 11 }), ' ', fmtNum(m.replies)),
         date && h('span', { className: 'tw-prev-date' }, date)
       ),
     ];
@@ -8939,7 +8993,7 @@ function FeedCard({ trend, onOpen, onHide, onFavToggle, canFavorite }) {
       title: t('feed.hide_btn_tip'),
       'aria-label': t('feed.hide_btn_tip'),
       onClick: (e) => { e.stopPropagation(); onHide(trend); }
-    }, '✕') : null,
+    }, icon('x', { size: 12 })) : null,
     h('div', { className: 'feed-card-head' },
       h('div', { className: 'feed-avatar ' + avatarCls },
         h(SourceMark, { src: trend.source, fallback: '·', size: 20 })
@@ -8955,7 +9009,7 @@ function FeedCard({ trend, onOpen, onHide, onFavToggle, canFavorite }) {
             title: trend.isFavorite ? t('fav.remove_tooltip') : t('fav.add_tooltip'),
             'aria-label': trend.isFavorite ? t('fav.remove_tooltip') : t('fav.add_tooltip'),
             onClick: (e) => { e.stopPropagation(); onFavToggle(trend, e.currentTarget); }
-          }, trend.isFavorite ? '★' : '☆') : null,
+          }, icon('star', { size: 13, style: trend.isFavorite ? { fill: 'currentColor' } : {} })) : null,
           h('span', { className: 'feed-user' }, srcLbl),
           // Handle (e.g. @twitter_x) removed from feed card 2026-05-16 — was
           // synthetic per-source, not the real author handle, and added noise
@@ -8970,7 +9024,7 @@ function FeedCard({ trend, onOpen, onHide, onFavToggle, canFavorite }) {
             : null,
           h('div', { className: 'feed-badges' },
             isFresh ? h('span', { className: 'badge badge-fresh', title: t('feed.fresh_tip') }, '● ' + t('badge.fresh')) : null,
-            trend.manualSubmitted ? h('span', { className: 'badge badge-manual', title: t('feed.manual_tip') }, '🧪 MANUAL') : null,
+            trend.manualSubmitted ? h('span', { className: 'badge badge-manual', title: t('feed.manual_tip') }, icon('flask-conical', { size: 10 }), ' MANUAL') : null,
             // Alert-type chip — first slot so the user instantly sees signal
             // shape. NULL alertType (legacy rows) renders nothing.
             trend.alertType
@@ -9048,12 +9102,12 @@ function FeedCard({ trend, onOpen, onHide, onFavToggle, canFavorite }) {
         // others have no tag → no preview popup.
         'data-tweet-id':  _twPreviewId,
         'data-reddit-id': _redditPreviewId,
-      }, '↗ ' + linkLabel) : null,
+      }, icon('external-link', { size: 11 }), ' ', linkLabel) : null,
       trend.tgMessageUrl ? h('a', {
         className: 'feed-action-btn tg',
         href: trend.tgMessageUrl, target: '_blank', rel: 'noopener',
         onClick: e => e.stopPropagation()
-      }, '📨 TG') : null,
+      }, icon('send', { size: 11 }), ' TG') : null,
       h(FeedbackBar, { trend })
     )
   );
@@ -9728,7 +9782,7 @@ function TrendModal({ trend, onClose, me = null, onFavToggle = null, onFavNote =
           ? h('span', { className: 'badge badge-atype badge-atype-' + trend.alertType }, t('badge.alert_type.' + trend.alertType))
           : null,
         h('span', { className: 'badge ' + catCls }, icon(catIco, { size: 11 }), ' ', (trend.category || 'other')),
-        trend.manualSubmitted ? h('span', { className: 'badge badge-manual', title: t('feed.manual_tip') }, '🧪 MANUAL') : null,
+        trend.manualSubmitted ? h('span', { className: 'badge badge-manual', title: t('feed.manual_tip') }, icon('flask-conical', { size: 10 }), ' MANUAL') : null,
         trend.narrativePhase ? h(PhaseBadge, { phase: trend.narrativePhase }) : null,
         h('div', { className: 'source-chip' }, icon(srcIco, { size: 12 }), ' ', srcLbl),
         h('span', { className: 'time-cell', style: { fontSize: 11 } }, fmtTime(trend.lastSeen || trend.firstSeen)),
