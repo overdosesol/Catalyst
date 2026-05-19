@@ -2575,7 +2575,9 @@ class DashboardServer {
        Component colours should use var(--accent), var(--accent-rgb), etc.
        so they re-tint on theme change. */
     :root {
-      /* ── ink (default) — X true-black ── */
+      /* ── pulse (default) — X true-black + green primary ── */
+      /* Was ink (X-blue) before 2026-05-19 redesign — old palette moved to   */
+      /* body[data-theme="ink"] below for users who prefer it.                 */
       --bg:          #000000;
       --surface:     #0a0a0a;
       --card:        #16181c;
@@ -2589,11 +2591,21 @@ class DashboardServer {
       --muted:       #71767b;
       --dim:         #4d5258;
 
-      /* Accent — X blue. Single hue, no rainbow. */
-      --accent:      #1d9bf0;
-      --accent2:     #4cb1ff;
-      --accent-rgb:  29,155,240;
-      --accent-glow: rgba(29,155,240,.16);
+      /* PRIMARY — green (was #1d9bf0) */
+      --accent:      #4ade80;
+      --accent2:     #86efac;
+      --accent-rgb:  74,222,128;
+      --accent-glow: rgba(74,222,128,.16);
+
+      /* SECONDARY — X-blue (was primary, now used for manual/links/external) */
+      --secondary:       #1d9bf0;
+      --secondary-rgb:   29,155,240;
+      --secondary-glow:  rgba(29,155,240,.16);
+
+      /* TERTIARY — amber for saturated/decay/warning */
+      --warn:        #f59e0b;
+      --warn-rgb:    245,158,11;
+      --warn-glow:   rgba(245,158,11,.12);
 
       /* Semantic state palette — kept constant across themes so OK/error
          signals don't shift hue per theme. Tuned to match X's own
@@ -2622,6 +2634,65 @@ class DashboardServer {
       /* Glass effect tokens — used by .feed-card, .sheet, .session-bar
          to get a "glossy surface" look. Subtle inset highlight reads as
          light catching the top edge of a panel. */
+      --glass:       rgba(255,255,255,.03);
+      --glass2:      rgba(255,255,255,.055);
+      --gloss-top:   inset 0 1px 0 rgba(255,255,255,.04);
+      --gloss-edge:  inset 0 0 0 1px rgba(255,255,255,.02);
+    }
+
+    /* ── ink — preserved X-blue palette for users who liked the old default ── */
+    body[data-theme="ink"] {
+      --bg:          #000000;
+      --surface:     #0a0a0a;
+      --card:        #16181c;
+      --card2:       #1c1f24;
+      --card3:       #232730;
+      --border:      rgba(239,243,244,.08);
+      --border2:     rgba(239,243,244,.14);
+      --border3:     rgba(239,243,244,.22);
+      --text:        #e7e9ea;
+      --text2:       #c4c8cc;
+      --muted:       #71767b;
+      --dim:         #4d5258;
+
+      /* PRIMARY back to X-blue (this theme = "ink") */
+      --accent:      #1d9bf0;
+      --accent2:     #4cb1ff;
+      --accent-rgb:  29,155,240;
+      --accent-glow: rgba(29,155,240,.16);
+
+      /* SECONDARY — green demoted */
+      --secondary:       #4ade80;
+      --secondary-rgb:   74,222,128;
+      --secondary-glow:  rgba(74,222,128,.16);
+
+      /* TERTIARY shared across themes */
+      --warn:        #f59e0b;
+      --warn-rgb:    245,158,11;
+      --warn-glow:   rgba(245,158,11,.12);
+
+      /* Semantic state palette (same as root) */
+      --green:       #00ba7c;
+      --green2:      #4ed6a4;
+      --green-rgb:   0,186,124;
+      --red:         #f4212e;
+      --red2:        #ff6b6b;
+      --red-rgb:     244,33,46;
+      --orange:      #ffa726;
+      --orange2:     #ffcc80;
+      --orange-rgb:  255,167,38;
+      --yellow:      #ffd400;
+      --yellow2:     #ffe566;
+      --blue:        #1d9bf0;
+      --pink:        #f91880;
+      --teal:        #00ba7c;
+      --purple:      #8b5cf6;
+
+      --radius:      10px;
+      --radius-sm:   8px;
+      --radius-xs:   6px;
+      --shadow:      0 4px 20px rgba(0,0,0,.6);
+      --shadow-lg:   0 8px 40px rgba(0,0,0,.75);
       --glass:       rgba(255,255,255,.03);
       --glass2:      rgba(255,255,255,.055);
       --gloss-top:   inset 0 1px 0 rgba(255,255,255,.04);
