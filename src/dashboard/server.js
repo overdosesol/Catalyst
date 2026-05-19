@@ -3686,9 +3686,9 @@ class DashboardServer {
     .badge-manual    { background: rgba(var(--secondary-rgb),.10); color: var(--secondary); border: 1px solid rgba(var(--secondary-rgb),.30); }
     /* Alert-type chips — orthogonal to category. event = warm red-orange,
        trend = green (movement), post = blue (single signal). */
-    .badge-atype-event { background: rgba(255,107,107,.12); color: #ff8a65; border: 1px solid rgba(255,107,107,.3); font-weight: 600; }
-    .badge-atype-trend { background: rgba(46,213,115,.12); color: #2ed573; border: 1px solid rgba(46,213,115,.3); font-weight: 600; }
-    .badge-atype-post  { background: rgba(116,185,255,.12); color: #74b9ff; border: 1px solid rgba(116,185,255,.3); font-weight: 600; }
+    .badge-atype-event { background: var(--surface2); color: var(--text); border: 1px solid var(--border); font-weight: 600; }
+    .badge-atype-trend { background: var(--surface2); color: var(--text); border: 1px solid var(--border); font-weight: 600; }
+    .badge-atype-post  { background: var(--surface2); color: var(--text); border: 1px solid var(--border); font-weight: 600; }
     /* Catalyst-found indicator: accent-tinted (matches the modal's Catalyst
        section). Subtle pulse so the eye picks it up while scanning the feed. */
     .badge-catalyst {
@@ -3699,9 +3699,9 @@ class DashboardServer {
       box-shadow: var(--gloss-top);
     }
     /* Sidebar chip variants — paint phase-chip same colours when filtering. */
-    .phase-chip.atype-chip-event.active { border-color: rgba(255,107,107,.5); background: rgba(255,107,107,.10); color: #ff8a65; }
-    .phase-chip.atype-chip-trend.active { border-color: rgba(46,213,115,.5);  background: rgba(46,213,115,.10);  color: #2ed573; }
-    .phase-chip.atype-chip-post.active  { border-color: rgba(116,185,255,.5); background: rgba(116,185,255,.10); color: #74b9ff; }
+    .phase-chip.atype-chip-event.active { background: rgba(255,255,255,0.06); color: var(--text); border-color: var(--border3); }
+    .phase-chip.atype-chip-trend.active { background: rgba(255,255,255,0.06); color: var(--text); border-color: var(--border3); }
+    .phase-chip.atype-chip-post.active  { background: rgba(255,255,255,0.06); color: var(--text); border-color: var(--border3); }
     .phase-chip.atype-chip-manual.active { border-color: rgba(var(--secondary-rgb),.30); background: rgba(var(--secondary-rgb),.10); color: var(--secondary); }
 
     /* ── Source chip ── */
@@ -11389,7 +11389,7 @@ function LoginScreen({ onLoggedIn }) {
         ),
         h('h1', {
           style: {
-            margin: '18px 0 0', fontSize: 30, fontWeight: 800,
+            margin: '18px 0 0', fontSize: 22, fontWeight: 600,
             letterSpacing: '-0.02em', lineHeight: 1.1,
             background: 'linear-gradient(180deg, var(--text, #e7e9ea) 0%, var(--text2, #c4c8cc) 100%)',
             WebkitBackgroundClip: 'text', backgroundClip: 'text',
