@@ -10154,23 +10154,43 @@ function TrendModal({ trend, onClose, me = null, onFavToggle = null, onFavNote =
 }
 
 // ── Toast system ───────────────────────────────────────────────────────────────
-// Skips the auto type-icon (✅/❌/ℹ️) when the message already starts with an
-// emoji or symbol — most user-facing toasts include a contextual lead char
-// (🔒 ⛔ ✓ ✕ 📊 ⚠), and stacking ℹ️ in front looked like a double-icon bug.
-// Detection: if first char is a letter/digit/whitespace → plain text → show
-// auto-icon. Anything else → assume the user-supplied char carries the
-// signal and don't add another.
-function Toasts({ toasts }) {
+// SVG-based icons per type (feather-style, 14x14 inside .toast-icon). Close
+// button (.toast-close) dismisses immediately via onDismiss prop from parent;
+// otherwise auto-dismiss kicks in after 3s.
+function Toasts({ toasts, onDismiss }) {
+  const ICON_SVG = {
+    info: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' },
+      h('polyline', { points: '23 4 23 10 17 10' }),
+      h('path', { d: 'M20.49 15a9 9 0 1 1-2.12-9.36L23 10' })
+    ),
+    success: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 3, strokeLinecap: 'round', strokeLinejoin: 'round' },
+      h('polyline', { points: '20 6 9 17 4 12' })
+    ),
+    warn: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' },
+      h('path', { d: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' }),
+      h('line', { x1: 12, y1: 9, x2: 12, y2: 13 }),
+      h('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 })
+    ),
+    error: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' },
+      h('circle', { cx: 12, cy: 12, r: 10 }),
+      h('line', { x1: 15, y1: 9, x2: 9, y2: 15 }),
+      h('line', { x1: 9, y1: 9, x2: 15, y2: 15 })
+    ),
+  };
+  const CLOSE_SVG = h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.5, strokeLinecap: 'round', strokeLinejoin: 'round' },
+    h('line', { x1: 18, y1: 6, x2: 6, y2: 18 }),
+    h('line', { x1: 6, y1: 6, x2: 18, y2: 18 })
+  );
   return h('div', { className: 'toasts-wrap' },
-    toasts.map(t => {
-      const msg = t.msg || '';
-      const showAutoIcon = /^[\p{L}\p{N}\s]/u.test(msg);
-      const autoIcon = t.type === 'success' ? '✓' : t.type === 'error' ? '✕' : 'ℹ';
-      return h('div', { key: t.id, className: 'toast ' + (t.type || 'info') },
-        showAutoIcon ? h('span', { className: 'toast-icon' }, autoIcon) : null,
-        h('span', { className: 'toast-msg' }, msg)
-      );
-    })
+    toasts.map(toast => h('div', { key: toast.id, className: 'toast ' + (toast.type || 'info') },
+      h('span', { className: 'toast-icon' }, ICON_SVG[toast.type] || ICON_SVG.info),
+      h('span', { className: 'toast-msg' }, toast.msg),
+      h('button', {
+        className: 'toast-close',
+        'aria-label': 'dismiss',
+        onClick: () => onDismiss && onDismiss(toast.id),
+      }, CLOSE_SVG)
+    ))
   );
 }
 
@@ -11905,12 +11925,15 @@ function App() {
     el.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
-  // addToast helper — auto-dismiss after 3s
+  // addToast helper — auto-dismiss after 3s; close button uses dismissToast.
+  const dismissToast = useCallback((id) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
   const addToast = useCallback((msg, type = 'info') => {
     const id = ++toastId.current;
     setToasts(prev => [...prev, { id, msg, type }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
-  }, []);
+    setTimeout(() => dismissToast(id), 3000);
+  }, [dismissToast]);
 
   // ── Per-trend hide / undo ─────────────────────────────────────────────────
   // Click ✕ on a card → optimistic remove via localHidden + POST /hide. The
@@ -12391,7 +12414,7 @@ function App() {
 
   return h('div', null,
     // Toast notifications (fixed top-right)
-    h(Toasts, { toasts }),
+    h(Toasts, { toasts, onDismiss: dismissToast }),
 
     // Tweet hover-preview portal — renders into document.body via a portal in
     // the component itself, so it sits above modal/lightbox like a tooltip.
