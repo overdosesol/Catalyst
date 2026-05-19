@@ -6291,7 +6291,7 @@ class DashboardServer {
          monochrome layout. --surface matches feed-panel + sidebar tone. */
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: var(--r3);
       overflow: hidden;
     }
     .right-section-head {
@@ -6308,7 +6308,7 @@ class DashboardServer {
       margin-left: auto;
       font-family: 'JetBrains Mono', monospace; font-size: 9.5px;
       color: var(--muted); background: rgba(255,255,255,.03);
-      border: 1px solid var(--border); border-radius: 5px;
+      border: 1px solid var(--border); border-radius: var(--r1);
       padding: 2px 7px; font-weight: 700; letter-spacing: 0;
       text-transform: none;
     }
@@ -6318,7 +6318,7 @@ class DashboardServer {
     .top-item {
       display: flex; align-items: center; gap: 9px;
       padding: 7px 8px;
-      border-radius: 8px;
+      border-radius: var(--r3);
       cursor: pointer;
       transition: all .15s;
       border: 1px solid transparent;
@@ -6329,7 +6329,7 @@ class DashboardServer {
       transform: translateX(1px);
     }
     .top-item-rank {
-      width: 22px; height: 22px; border-radius: 6px;
+      width: 22px; height: 22px; border-radius: var(--r1);
       display: flex; align-items: center; justify-content: center;
       font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 800;
       background: rgba(255,255,255,.04); color: var(--muted);
@@ -6354,7 +6354,7 @@ class DashboardServer {
       font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700;
       color: var(--accent2); flex-shrink: 0;
       padding: 2px 7px; background: var(--accent-glow);
-      border-radius: 5px; border: 1px solid rgba(var(--accent-rgb), .22);
+      border-radius: var(--r1); border: 1px solid rgba(var(--accent-rgb), .22);
       min-width: 28px; text-align: center;
     }
 
@@ -6362,7 +6362,7 @@ class DashboardServer {
     .pulse-row {
       display: flex; align-items: center; gap: 10px;
       padding: 8px 9px;
-      border-radius: 8px;
+      border-radius: var(--r3);
       cursor: pointer;
       transition: all .15s;
       border: 1px solid transparent;
@@ -6376,7 +6376,7 @@ class DashboardServer {
     .pulse-row.off .pulse-icon { filter: grayscale(1); }
     .pulse-row.off .pulse-count { opacity: .5; }
     .pulse-icon {
-      width: 26px; height: 26px; border-radius: 7px;
+      width: 26px; height: 26px; border-radius: var(--r1);
       display: inline-flex; align-items: center; justify-content: center;
       font-size: 13.5px; font-weight: 800; flex-shrink: 0;
       font-family: 'Inter', sans-serif; line-height: 1;
@@ -6397,7 +6397,7 @@ class DashboardServer {
     .pulse-count {
       font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 600;
       color: var(--text2); background: rgba(255,255,255,.04);
-      padding: 2px 7px; border-radius: 5px; min-width: 26px; text-align: center;
+      padding: 2px 7px; border-radius: var(--r1); min-width: 26px; text-align: center;
       border: 1px solid var(--border);
     }
     .pulse-count.hot { color: var(--accent2); background: var(--accent-glow); border-color: rgba(var(--accent-rgb), .22); }
@@ -6410,7 +6410,7 @@ class DashboardServer {
     .activity-cell {
       background: rgba(255,255,255,.025);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--r3);
       padding: 9px 10px;
       display: flex; flex-direction: column; gap: 4px;
       transition: all .15s;
@@ -6516,7 +6516,7 @@ class DashboardServer {
     /* ── Category mini-legend in right panel ── */
     .cat-row {
       display: flex; align-items: center; gap: 7px;
-      padding: 4px 6px; border-radius: 6px;
+      padding: 4px 6px; border-radius: var(--r1);
       transition: all .12s;
     }
     .cat-row:hover { background: var(--card2); }
