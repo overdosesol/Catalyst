@@ -3701,11 +3701,18 @@ class DashboardServer {
     }
 
     /* ── Phase badge ── */
+    /* 2026-05-20 R4 follow-up — phase-badge no longer carries phase color
+       on background/border. Color sits only on the inner .phase-dot (set
+       inline from PHASE_META[p].color via phaseDot helper). Chip looks
+       identical to .badge-atype-* — no chip stands out. */
     .phase-badge {
-      display: inline-flex; align-items: center; gap: 3px;
-      padding: 2px 6px; border-radius: 4px;
-      font-size: 9px; font-weight: 800; letter-spacing: .6px;
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 8px; border-radius: var(--r1);
+      font-size: 10px; font-weight: 600; letter-spacing: .2px;
       white-space: nowrap; flex-shrink: 0;
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
     }
 
     /* ── Badges ── */
@@ -7734,13 +7741,15 @@ const PHASE_META = {
 };
 function phaseHint(p) { const m = PHASE_META[p]; return m ? t(m.hintKey) : ''; }
 // 2026-05-20 R4 — phaseDot() returns a CSS-coloured circle <span> replacing
-// the legacy emoji glyphs 🔵🟡🟢🔴. Color is inlined from PHASE_META.color;
-// STRONG gets a soft glow (.phase-dot.glow) so the active phase reads first.
+// the legacy emoji glyphs. Color is inlined from PHASE_META.color. Follow-up
+// (same day): glow modifier removed so STRONG dot looks like other phase
+// dots — chip itself no longer carries phase background, so the dot alone
+// is enough signal.
 function phaseDot(p) {
   const m = PHASE_META[p];
   if (!m) return null;
   return h('span', {
-    className: 'phase-dot' + (p === 'strong' ? ' glow' : ''),
+    className: 'phase-dot',
     style: { color: m.color }
   });
 }
@@ -8331,9 +8340,10 @@ function PhaseBadge({ phase }) {
   useLang();
   if (!phase) return null;
   const m = PHASE_META[phase] || PHASE_META.early;
+  // 2026-05-20 R4 follow-up — chip stays neutral (matches .badge-atype-*).
+  // Phase signal lives only on the inner colored dot, not on bg/border.
   return h('span', {
-    className: 'phase-badge',
-    style: { background: m.bg, color: m.color, border: '1px solid ' + m.color },
+    className: 'phase-badge phase-badge-' + phase,
     title: phaseHint(phase)
   }, phaseDot(phase), ' ', m.label);
 }
