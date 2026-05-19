@@ -3009,6 +3009,36 @@ class DashboardServer {
       background: currentColor;
     }
     .phase-dot.glow { box-shadow: 0 0 5px currentColor; }
+    /* 2026-05-20 R4 — market stage indicators. LIVE pulses (active stream),
+       OVERHEATED static dot, TOKENIZING mini-spinner (active transformation). */
+    .market-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      display: inline-block; flex-shrink: 0;
+      background: currentColor;
+    }
+    .market-dot.pulse { animation: market-pulse 2.4s ease-in-out infinite; }
+    @keyframes market-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%      { opacity: .55; transform: scale(.85); }
+    }
+    .market-spinner {
+      width: 9px; height: 9px;
+      border: 1.5px solid rgba(255,255,255,.15);
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: market-spin .9s linear infinite;
+      flex-shrink: 0; display: inline-block;
+    }
+    @keyframes market-spin { to { transform: rotate(360deg); } }
+    /* Sentiment chip — pure text + semantic color (no glyph). */
+    .sentiment-chip {
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: var(--r1);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; font-weight: 700; letter-spacing: .4px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid currentColor;
+    }
     .phase-chip-label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
     .phase-chip-count {
       margin-left: auto; font-family: 'JetBrains Mono', monospace;
@@ -6790,9 +6820,9 @@ const I18N = {
     'phase.saturated.hint': 'Narrative cooked — ngmi if you enter now',
 
     // Sentiment
-    'sentiment.positive': '😊 Bullish AF',
-    'sentiment.negative': '😠 Bearish',
-    'sentiment.neutral': '😐 Mid',
+    'sentiment.positive': 'POSITIVE',
+    'sentiment.negative': 'NEGATIVE',
+    'sentiment.neutral': 'NEUTRAL',
 
     // Bars / scores
     'bar.emergence': '🌊 Emergence',
@@ -7222,9 +7252,9 @@ const I18N = {
     'phase.saturated.hint': 'Нарратив переварен — поздно',
 
     // Sentiment
-    'sentiment.positive': '😊 Позитив',
-    'sentiment.negative': '😠 Негатив',
-    'sentiment.neutral': '😐 Нейтраль',
+    'sentiment.positive': 'POSITIVE',
+    'sentiment.negative': 'NEGATIVE',
+    'sentiment.neutral': 'NEUTRAL',
 
     // Bars / scores
     'bar.emergence': '🌊 Emergence',
@@ -8096,6 +8126,52 @@ const ICONS = {
     h('path', { d: 'M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1' }),
     h('path', { d: 'M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1' })
   ),
+  // — Analyze panel + modal icons (R4 Task 6) —
+  'alert-triangle': makeIcon('0 0 24 24', true,
+    h('path', { d: 'M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' }),
+    h('line', { x1: 12, y1: 9, x2: 12, y2: 13 }),
+    h('line', { x1: 12, y1: 17, x2: 12.01, y2: 17 })
+  ),
+  ban: makeIcon('0 0 24 24', true,
+    h('circle', { cx: 12, cy: 12, r: 10 }),
+    h('line', { x1: 4.93, y1: 4.93, x2: 19.07, y2: 19.07 })
+  ),
+  'x-circle': makeIcon('0 0 24 24', true,
+    h('circle', { cx: 12, cy: 12, r: 10 }),
+    h('line', { x1: 15, y1: 9, x2: 9, y2: 15 }),
+    h('line', { x1: 9, y1: 9, x2: 15, y2: 15 })
+  ),
+  'line-chart': makeIcon('0 0 24 24', true,
+    h('path', { d: 'M3 3v18h18' }),
+    h('path', { d: 'm19 9-5 5-4-4-3 3' })
+  ),
+  'thumbs-up': makeIcon('0 0 24 24', true,
+    h('path', { d: 'M7 10v12' }),
+    h('path', { d: 'M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H7a3 3 0 0 1-3-3V10.5a2.5 2.5 0 0 1 .74-1.77L13.5 1l.99.99c.32.32.41.83.21 1.25L13 5.88V6' })
+  ),
+  'thumbs-down': makeIcon('0 0 24 24', true,
+    h('path', { d: 'M17 14V2' }),
+    h('path', { d: 'M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H17a3 3 0 0 1 3 3v8.5a2.5 2.5 0 0 1-.74 1.77L10.5 23l-.99-.99c-.32-.32-.41-.83-.21-1.25L11 18.12V18' })
+  ),
+  'clipboard-check': makeIcon('0 0 24 24', true,
+    h('rect', { x: 8, y: 2, width: 8, height: 4, rx: 1, ry: 1 }),
+    h('path', { d: 'M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2' }),
+    h('path', { d: 'm9 14 2 2 4-4' })
+  ),
+  inbox: makeIcon('0 0 24 24', true,
+    h('polyline', { points: '22 12 16 12 14 15 10 15 8 12 2 12' }),
+    h('path', { d: 'M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z' })
+  ),
+  'search-x': makeIcon('0 0 24 24', true,
+    h('path', { d: 'm13.5 8.5-5 5' }),
+    h('path', { d: 'm8.5 8.5 5 5' }),
+    h('circle', { cx: 11, cy: 11, r: 8 }),
+    h('path', { d: 'm21 21-4.3-4.3' })
+  ),
+  'book-open': makeIcon('0 0 24 24', true,
+    h('path', { d: 'M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z' }),
+    h('path', { d: 'M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z' })
+  ),
 };
 
 function icon(name, opts) {
@@ -8260,11 +8336,14 @@ function PhaseBadge({ phase }) {
   }, phaseDot(phase), ' ', m.label);
 }
 
-// [MARKET_STAGE] badge — remove component + call in TrendCard to disable UI
+// [MARKET_STAGE] badge — remove component + call in TrendCard to disable UI.
+// 2026-05-20 R4 — emoji glyphs (cycle/green/red) → CSS-coloured dot/spinner.
+// Rendering picks dot vs spinner from the "kind" field (dot for stable
+// states, spinner for active tokenizing transformation). No backticks here.
 const MARKET_STAGE_UI = {
-  tokenizing: { icon: '🔄', label: 'TOKENIZING', color: '#F59E0B', bg: 'rgba(245,158,11,0.12)', hintKey: 'market.tokenizing.hint' },
-  live:       { icon: '🟢', label: 'LIVE',       color: '#10B981', bg: 'rgba(16,185,129,0.12)', hintKey: 'market.live.hint' },
-  overheated: { icon: '🔴', label: 'OVERHEATED', color: '#EF4444', bg: 'rgba(239,68,68,0.12)',  hintKey: 'market.overheated.hint' },
+  tokenizing: { kind: 'spinner', label: 'TOKENIZING', color: '#F59E0B', bg: 'rgba(245,158,11,0.12)', hintKey: 'market.tokenizing.hint' },
+  live:       { kind: 'pulse',   label: 'LIVE',       color: '#10B981', bg: 'rgba(16,185,129,0.12)', hintKey: 'market.live.hint' },
+  overheated: { kind: 'dot',     label: 'OVERHEATED', color: '#EF4444', bg: 'rgba(239,68,68,0.12)',  hintKey: 'market.overheated.hint' },
 };
 function marketStageHint(stage) { const m = MARKET_STAGE_UI[stage]; return m ? t(m.hintKey) : ''; }
 function MarketStageBadge({ stage }) {
@@ -8272,11 +8351,15 @@ function MarketStageBadge({ stage }) {
   if (!stage || stage === 'none') return null;
   const m = MARKET_STAGE_UI[stage];
   if (!m) return null;
+  // 2026-05-20 R4 — render dot/spinner from m.kind. Color via parent currentColor.
+  const indicator = m.kind === 'spinner'
+    ? h('span', { className: 'market-spinner' })
+    : h('span', { className: 'market-dot' + (m.kind === 'pulse' ? ' pulse' : '') });
   return h('span', {
     className: 'phase-badge',
-    style: { background: m.bg, color: m.color, border: '1px solid ' + m.color },
+    style: { background: m.bg, color: m.color, border: '1px solid ' + m.color, gap: 4 },
     title: marketStageHint(stage)
-  }, m.icon + ' ' + m.label);
+  }, indicator, ' ', m.label);
 }
 
 // ── ImageThumb (legacy — still used in modal-equivalent contexts) ────────────
@@ -8984,7 +9067,7 @@ function FeedbackBar({ trend, variant }) {
         disabled: busy,
         title: userVote === 1 ? t('feedback.unlike') : t('feedback.like')
       },
-        h('span', { className: 'fb-ico' }, '👍'),
+        h('span', { className: 'fb-ico' }, icon('thumbs-up', { size: 12 })),
         h('span', { className: 'fb-count' }, likes)
       ),
       h('button', {
@@ -8993,13 +9076,13 @@ function FeedbackBar({ trend, variant }) {
         disabled: busy,
         title: userVote === -1 ? t('feedback.undislike') : t('feedback.dislike')
       },
-        h('span', { className: 'fb-ico' }, '👎'),
+        h('span', { className: 'fb-ico' }, icon('thumbs-down', { size: 12 })),
         h('span', { className: 'fb-count' }, dislikes)
       )
     ),
     showReasonEditor && h('div', { className: 'fb-reason' },
       h('div', { className: 'fb-reason-label' },
-        h('span', null, '✏️ ' + t('feedback.reason.label'))
+        h('span', null, icon('pencil', { size: 11 }), ' ', t('feedback.reason.label'))
       ),
       h('textarea', {
         className: 'fb-reason-textarea',
@@ -10752,16 +10835,17 @@ function AnalyzePanel({ onBack, onOpenTrend }) {
   // the previous "Viral potential / Trending / Reach growth" trio).
   // Story always rendered now — bar going to 0 reads as "no signal yet"
   // which is the honest answer when Stage 2 hasn't run.
+  // 2026-05-20 R4 — icon-name keys (emerge: waves, adopt: flame, story: book-open).
   const scoreSpecs = tr ? [
-    { k: 'emerge', v: tr.emergenceScore || 0, icon: '🌊' },
-    { k: 'adopt',  v: tr.adoptionScore  || 0, icon: '🔥' },
-    { k: 'story',  v: tr.storyScore     || 0, icon: '📖' },
+    { k: 'emerge', v: tr.emergenceScore || 0, icon: 'waves' },
+    { k: 'adopt',  v: tr.adoptionScore  || 0, icon: 'flame' },
+    { k: 'story',  v: tr.storyScore     || 0, icon: 'book-open' },
   ] : [];
 
   return h('div', { className: 'analyze-panel' },
     h('div', { className: 'settings-header' },
       h('button', { className: 'btn btn-ghost', onClick: onBack }, t('app.back')),
-      h('span', { className: 'settings-title' }, '🧪 ' + t('analyze.title'))
+      h('span', { className: 'settings-title' }, icon('flask-conical', { size: 14 }), ' ', t('analyze.title'))
     ),
     h('div', { className: 'analyze-intro' }, t('analyze.intro')),
 
@@ -10848,7 +10932,7 @@ function AnalyzePanel({ onBack, onOpenTrend }) {
         scoreSpecs.map(s => {
           const lvl = bucketOf(s.v);
           return h('div', { key: s.k, className: 'analyze-score ' + lvl },
-            h('div', { className: 'analyze-score-label' }, s.icon + ' ' + t('analyze.score_' + s.k)),
+            h('div', { className: 'analyze-score-label' }, icon(s.icon, { size: 12 }), ' ', t('analyze.score_' + s.k)),
             h('div', { className: 'analyze-score-value' }, (s.v || 0) + '/100'),
             h('div', { className: 'analyze-score-bar' },
               h('div', { className: 'analyze-score-bar-fill', style: { width: (s.v || 0) + '%' } })
