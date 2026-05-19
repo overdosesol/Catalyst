@@ -2844,8 +2844,8 @@ class DashboardServer {
     }
     /* Top-right nav buttons (account + settings shortcut) */
     .nav-icon-btn {
-      display: inline-flex; align-items: center; gap: 7px;
-      padding: 5px 10px 5px 6px;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 8px 4px 5px;
       background: rgba(255,255,255,.025);
       border: 1px solid var(--border2);
       border-radius: var(--r1);
@@ -2981,7 +2981,7 @@ class DashboardServer {
     }
     .sidebar-phase > button:first-child { grid-column: 1 / -1; }
     .phase-chip {
-      display: inline-flex; align-items: center; gap: 7px;
+      display: inline-flex; align-items: center; gap: 6px;
       padding: 7px 9px;
       font-size: 10.5px; font-weight: 700; letter-spacing: .4px;
       color: var(--muted);
@@ -3023,7 +3023,7 @@ class DashboardServer {
     /* ── Source items (brand-colored, feed-like rows) ── */
     .source-item {
       display: flex; align-items: center; gap: 10px;
-      padding: 9px 10px; border-radius: var(--r1);
+      padding: 6px 8px; border-radius: var(--r1);
       border: 1px solid transparent;
       cursor: pointer; transition: all .18s ease;
       font-size: 12.5px; font-weight: 600;
@@ -3118,7 +3118,7 @@ class DashboardServer {
     .sidebar-divider { height: 1px; background: var(--border); margin: 6px 6px; }
 
     /* ── Sidebar filters ── */
-    .sidebar-filters { padding: 2px 2px; display: flex; flex-direction: column; gap: 10px; }
+    .sidebar-filters { padding: 2px 2px; display: flex; flex-direction: column; gap: 8px; }
     .filter-group { display: flex; flex-direction: column; gap: 5px; }
     .filter-label {
       font-size: 9px; font-weight: 700; letter-spacing: 1.2px;
@@ -3170,7 +3170,7 @@ class DashboardServer {
       background: linear-gradient(180deg, transparent 0%, rgba(0,0,0,.15) 100%);
     }
     .sb-foot-nav {
-      display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px;
+      display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px;
       padding: 4px; border-radius: var(--r1);
       background: rgba(0,0,0,.18);
       border: 1px solid var(--border);
@@ -3248,7 +3248,7 @@ class DashboardServer {
     .session-chip .chip-val { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--text2); font-size: 11px; }
 
     /* ── Old hero stubs (kept for compat) ── */
-    .dashboard-hero { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+    .dashboard-hero { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
     .hero-panel { border-radius: var(--radius); border: 1px solid var(--border); overflow: hidden; }
     .hero-main { background: var(--card); padding: 18px 20px; }
     .hero-side { background: var(--surface); padding: 14px 16px; }
@@ -3260,7 +3260,7 @@ class DashboardServer {
     .hero-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green2); box-shadow: 0 0 6px rgba(var(--green-rgb), .5); }
     .hero-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .hero-side-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-    .hero-mini-card { border-radius: var(--r1); border: 1px solid var(--border); background: rgba(255,255,255,.025); padding: 10px; }
+    .hero-mini-card { border-radius: var(--r1); border: 1px solid var(--border); background: rgba(255,255,255,.025); padding: 8px; }
     .hero-mini-label { font-size: 9px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--dim); margin-bottom: 5px; }
     .hero-mini-value { font-size: 15px; font-weight: 800; color: var(--text); letter-spacing: -.4px; margin-bottom: 2px; font-family: 'JetBrains Mono', monospace; }
     .hero-mini-sub { font-size: 10px; color: var(--muted); }
@@ -3274,10 +3274,10 @@ class DashboardServer {
     .section-shell + .section-shell { margin-top: 10px; }
 
     /* ── Stats grid ── */
-    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 14px; }
     .stat-card {
       background: var(--card); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 14px 16px;
+      border-radius: var(--radius); padding: 12px 14px;
       position: relative; overflow: hidden;
       transition: border-color .2s, transform .18s;
       animation: fadeIn .35s ease backwards;
@@ -3324,7 +3324,7 @@ class DashboardServer {
     .control-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px; }
     .control-btn {
       display: flex; flex-direction: column; align-items: center; gap: 5px;
-      padding: 11px 8px;
+      padding: 9px 7px;
       background: rgba(255,255,255,.025); border: 1px solid var(--border2);
       border-radius: var(--r1); cursor: pointer; transition: all .15s ease;
       font-size: 11px; font-weight: 600; color: var(--muted);
@@ -3344,7 +3344,7 @@ class DashboardServer {
     .control-status.idle { background: var(--dim); box-shadow: none; }
 
     /* ── Source Controls ── */
-    .source-controls { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .source-controls { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
     .source-control-btn {
       display: flex; align-items: center; justify-content: space-between;
       padding: 7px 11px; background: rgba(255,255,255,.02);
@@ -3577,7 +3577,7 @@ class DashboardServer {
     .card-desc.pump { color: var(--orange); font-weight: 500; }
 
     /* ── Card stats row ── */
-    .card-stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .card-stats { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .card-stat { display: flex; flex-direction: column; gap: 2px; }
     .card-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: .7px; color: var(--dim); font-weight: 600; }
 
@@ -3789,7 +3789,7 @@ class DashboardServer {
 
     /* ── Settings panel ── */
     .settings-panel { padding: 20px 24px; max-width: 680px; animation: fadeIn .25s ease; }
-    .settings-header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+    .settings-header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
 
     /* ── Analyze panel (pro/admin manual URL → trend) ── */
     .analyze-panel { padding: 20px 24px; max-width: 720px; animation: fadeIn .25s ease; }
@@ -3798,9 +3798,9 @@ class DashboardServer {
       background: rgba(var(--accent-rgb), .04);
       border: 1px solid rgba(var(--accent-rgb), .18);
       border-radius: var(--r3);
-      padding: 14px 16px;
-      margin-bottom: 16px;
-      display: flex; flex-direction: column; gap: 10px;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+      display: flex; flex-direction: column; gap: 8px;
     }
     .analyze-label { font-size: 11px; font-weight: 700; color: var(--dim); text-transform: uppercase; letter-spacing: .6px; }
     .analyze-input {
@@ -3808,14 +3808,14 @@ class DashboardServer {
       background: var(--bg2);
       border: 1px solid var(--border);
       border-radius: var(--r1);
-      padding: 10px 12px;
+      padding: 8px 10px;
       color: var(--text);
       font-size: 13px;
       font-family: inherit;
       outline: none;
     }
     .analyze-input:focus { border-color: rgba(var(--accent-rgb), .55); }
-    .analyze-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .analyze-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .analyze-hint { font-size: 11px; color: var(--dim); }
     .analyze-error { font-size: 12px; color: var(--red); }
     .analyze-empty {
@@ -4067,13 +4067,13 @@ class DashboardServer {
          --surface matches feed-cards/right-section so everything reads as
          one calm monochrome surface. */
       background: var(--surface); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 18px 20px; margin-bottom: 12px; box-shadow: var(--shadow);
+      border-radius: var(--radius); padding: 16px 18px; margin-bottom: 12px; box-shadow: var(--shadow);
     }
     .settings-card-title { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 3px; }
     .settings-card-desc  { font-size: 11px; color: var(--muted); margin-bottom: 16px; }
 
     /* ── Range slider (column width, etc.) ── */
-    .slider-wrap { display: flex; align-items: center; gap: 10px; min-width: 220px; }
+    .slider-wrap { display: flex; align-items: center; gap: 8px; min-width: 220px; }
     .range-slider {
       flex: 1; height: 22px; padding: 0;
       -webkit-appearance: none; appearance: none;
@@ -4172,9 +4172,9 @@ class DashboardServer {
     .theme-swatch[data-theme-preview="tide"]  .theme-swatch-dot-bg     { background: #0a1622; }
     .theme-swatch[data-theme-preview="tide"]  .theme-swatch-dot-accent { background: #4dd4e0; }
     .theme-swatch[data-theme-preview="tide"]  .theme-swatch-dot-card   { background: #14202e; }
-    .stats-view { display: grid; gap: 12px; }
-    .stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-    .stats-block { padding: 14px 16px; }
+    .stats-view { display: grid; gap: 10px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .stats-block { padding: 12px 14px; }
     .stats-block-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
     .stats-block-title { font-size: 9px; font-weight: 700; letter-spacing: 1.4px; text-transform: uppercase; color: var(--accent2); }
     .stats-block-sub { color: var(--dim); font-size: 10px; }
@@ -5659,7 +5659,7 @@ class DashboardServer {
     /* ── Feed list / cards ── */
     .feed-list {
       display: flex; flex-direction: column; gap: 8px;
-      padding: 10px;
+      padding: 8px;
     }
     .feed-card {
       /* 2026-05-01: was using --card2/--card (#1c-#16) which read as bright
@@ -5669,7 +5669,7 @@ class DashboardServer {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--r3);
-      padding: 11px 13px 9px;
+      padding: 10px 12px 8px;
       transition: border-color .15s, background .15s, transform .15s, box-shadow .15s;
       cursor: pointer;
       position: relative;
@@ -5684,7 +5684,7 @@ class DashboardServer {
       box-shadow: 0 4px 14px rgba(0,0,0,.35), var(--gloss-top);
     }
     .feed-card-head {
-      display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px;
+      display: flex; align-items: flex-start; gap: 8px; margin-bottom: 5px;
     }
     .feed-avatar {
       width: 38px; height: 38px; border-radius: var(--r3);
@@ -6247,7 +6247,7 @@ class DashboardServer {
     }
     .feed-action-btn {
       display: inline-flex; align-items: center; gap: 5px;
-      padding: 5px 10px; border-radius: var(--r2);
+      padding: 4px 8px; border-radius: var(--r2);
       background: rgba(255,255,255,.03); border: 1px solid var(--border2);
       color: var(--muted); font-size: 11px; font-weight: 600;
       cursor: pointer; text-decoration: none;
@@ -6296,7 +6296,7 @@ class DashboardServer {
     }
     .right-section-head {
       display: flex; align-items: center; gap: 8px;
-      padding: 10px 12px 9px;
+      padding: 8px 10px 8px;
       border-bottom: 1px solid var(--border);
     }
     .right-section-title {
@@ -6317,7 +6317,7 @@ class DashboardServer {
     /* ── Top item (Top Narratives) ── */
     .top-item {
       display: flex; align-items: center; gap: 9px;
-      padding: 7px 8px;
+      padding: 6px 7px;
       border-radius: var(--r3);
       cursor: pointer;
       transition: all .15s;
@@ -6360,8 +6360,8 @@ class DashboardServer {
 
     /* ── Pulse rows (Source Pulse) — mirrors .source-item ── */
     .pulse-row {
-      display: flex; align-items: center; gap: 10px;
-      padding: 8px 9px;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px;
       border-radius: var(--r3);
       cursor: pointer;
       transition: all .15s;
