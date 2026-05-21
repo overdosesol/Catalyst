@@ -23,7 +23,11 @@ Write-Host "[1/4] Building archive..." -ForegroundColor Yellow
 if (Test-Path $TEMP_DIR) { Remove-Item $TEMP_DIR -Recurse -Force }
 New-Item -ItemType Directory -Path $TEMP_DIR | Out-Null
 
-$EXCLUDE = @("node_modules", "data", "logs", ".git", ".env", ".claude", "posts", "ai-context")
+# EvilCatPack: source PNG frames for sprite-sheet building (R6/R7 cat-mascot).
+# We build assets/cats/*.png from these locally via scripts/build-cat-poses.py,
+# but the raw frames themselves are not used in production — keep them off the
+# deploy archive (~1.1 MB) so the upload stays small.
+$EXCLUDE = @("node_modules", "data", "logs", ".git", ".env", ".claude", "posts", "ai-context", "EvilCatPack")
 
 foreach ($item in Get-ChildItem -Path $LOCAL_DIR) {
     if ($EXCLUDE -notcontains $item.Name) {
@@ -42,7 +46,9 @@ Write-Host "   Archive OK" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "[2/4] Uploading archive..." -ForegroundColor Yellow
-scp -o StrictHostKeyChecking=no $TEMP_ZIP "${Server}:/tmp/catalyst.zip"
+# ServerAliveInterval/CountMax keep the SSH channel breathing during the upload
+# so a slow link or NAT idle-timeout doesn't drop us mid-transfer.
+scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $TEMP_ZIP "${Server}:/tmp/catalyst.zip"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: scp failed." -ForegroundColor Red
     exit 1
@@ -53,7 +59,7 @@ $ENV_FILE = Join-Path $LOCAL_DIR ".env"
 if (Test-Path $ENV_FILE) {
     Write-Host ""
     Write-Host "[3/4] Uploading .env..." -ForegroundColor Yellow
-    scp -o StrictHostKeyChecking=no $ENV_FILE "${Server}:/tmp/catalyst.env"
+    scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $ENV_FILE "${Server}:/tmp/catalyst.env"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: .env upload failed." -ForegroundColor Red
         exit 1
@@ -66,7 +72,7 @@ if (Test-Path $ENV_FILE) {
 $SETUP_FILE = Join-Path $LOCAL_DIR "setup_remote.sh"
 Write-Host ""
 Write-Host "[4/4] Running remote Docker setup..." -ForegroundColor Yellow
-scp -o StrictHostKeyChecking=no $SETUP_FILE "${Server}:/tmp/catalyst_setup.sh"
+scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $SETUP_FILE "${Server}:/tmp/catalyst_setup.sh"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: setup script upload failed." -ForegroundColor Red
     exit 1

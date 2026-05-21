@@ -479,6 +479,29 @@ class DashboardServer {
       } catch { return this.started; }
     })();
 
+    // Cache-bust token for /assets/cats/*.png. Reads the MAX mtime across all
+    // sprite sheets — earlier this only watched cat-walk.png, so re-builds of
+    // any other sprite (e.g. cat-lying after dropping bad-paw frames) didn't
+    // invalidate the immutable browser cache. Same mechanic as _logoVersion:
+    // bytes change -> URL changes -> Cache-Control:immutable harmless.
+    this._catSpritesVersion = (() => {
+      try {
+        const dir = path.join(process.cwd(), 'assets', 'cats');
+        const names = [
+          'cat-idle', 'cat-walk', 'cat-walk-left', 'cat-lie', 'cat-observe',
+          'cat-cute', 'cat-headup', 'cat-staytall', 'cat-lying'
+        ];
+        let max = 0;
+        for (const n of names) {
+          try {
+            const s = fs.statSync(path.join(dir, n + '.png'));
+            if (s.mtimeMs > max) max = s.mtimeMs;
+          } catch {}
+        }
+        return Math.floor(max) || this.started;
+      } catch { return this.started; }
+    })();
+
     // Bot username for nav-link to the Telegram bot. Resolves asynchronously
     // at start() — empty string until then. SPA template injects whatever's
     // cached at HTML render time. Falls back to a generic t.me link if empty.
@@ -622,6 +645,20 @@ class DashboardServer {
     // an onError fallback to a 🐱 emoji so the nav never looks broken.
     if (path === '/assets/logo.png' && method === 'GET') {
       return this._handleBrandLogo(req, res);
+    }
+
+    // Cat mascot sprite sheets (R6 Task 3 + R7 idle-cycle 2026-05-21) — public
+    // PNG sheets baked into the Docker image at /app/assets/cats/*.png.
+    // Whitelisted to the nine known sprite filenames so we don't expose the
+    // assets/ tree generically.
+    //   idle/lie/observe/walk/walk-left  — original R6 motion + sleep + forecast
+    //   cute/headup/staytall              — additional sitting variants (R7)
+    //   lying                             — awake-lying pose, distinct from
+    //                                       cat-lie (which is the curled-up
+    //                                       sleeping pose triggered by inactivity)
+    if (path.match(/^\/assets\/cats\/cat-(idle|walk|walk-left|lie|observe|cute|headup|staytall|lying)\.png$/) && method === 'GET') {
+      const m = path.match(/^\/assets\/cats\/(cat-(?:idle|walk|walk-left|lie|observe|cute|headup|staytall|lying)\.png)$/);
+      return this._handleCatSprite(req, res, m[1]);
     }
 
     // Reddit video proxy — public. <video> elements can't send custom
@@ -945,6 +982,39 @@ class DashboardServer {
       this.logger.warn(`[BrandLogo] handler error: ${e.message}`);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'logo handler failed' }));
+    }
+  }
+
+  /**
+   * GET /assets/cats/cat-{idle,walk,lie}.png — pixel-art sprite sheets for
+   * the floating cat mascot (R6). Same pattern as _handleBrandLogo: file
+   * baked into the Docker image at /app/assets/cats/*.png, long-cached
+   * (immutable per deploy). Filename is whitelisted by the calling route,
+   * so no path traversal is possible here.
+   */
+  async _handleCatSprite(req, res, filename) {
+    try {
+      const spritePath = path.join(process.cwd(), 'assets', 'cats', filename);
+      const stat = await fs.promises.stat(spritePath).catch(() => null);
+      if (!stat || !stat.isFile()) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Sprite not bundled' }));
+      }
+      res.writeHead(200, {
+        'Content-Type': 'image/png',
+        'Content-Length': stat.size,
+        'Cache-Control': 'public, max-age=86400, immutable',
+      });
+      const stream = fs.createReadStream(spritePath);
+      stream.on('error', (e) => {
+        this.logger.warn(`[CatSprite] read error: ${e.message}`);
+        try { res.end(); } catch {}
+      });
+      stream.pipe(res);
+    } catch (e) {
+      this.logger.warn(`[CatSprite] handler error: ${e.message}`);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'sprite handler failed' }));
     }
   }
 
@@ -2953,7 +3023,9 @@ class DashboardServer {
       padding: 14px 10px 10px;
       display: flex; flex-direction: column; gap: 2px;
       /* classic layout: sticky scroll, subtract nav(50). Statusbar removed
-         2026-05-02 — viewport extends to bottom edge. */
+         2026-05-02 — viewport extends to bottom edge. R6 2026-05-21 — cat
+         mascot was repositioned to sit ON the footer buttons (bottom:67px,
+         left:73px), so no sidebar-floor reservation is needed any more. */
       position: sticky; top: 50px; height: calc(100vh - 50px); overflow-y: auto;
     }
     /* In dashboard-grid the sidebar is app-shell (overrides above) */
@@ -3207,8 +3279,9 @@ class DashboardServer {
     /* ── Sidebar footer (unified bottom nav: Feed / Stats / Settings) ── */
     .sidebar-footer {
       margin-top: auto;
+      /* R6 2026-05-21 — border-top removed so the cat-mascot sits cleanly on
+         top of the nav row without a divider line crossing through its body. */
       padding: 6px 4px 4px;
-      border-top: 1px solid var(--border);
       background: transparent;
     }
     .sb-foot-nav {
@@ -3756,6 +3829,347 @@ class DashboardServer {
     .sort-chip:focus-visible {
       outline: 2px solid rgba(var(--accent-rgb), .5);
       outline-offset: 1px;
+    }
+
+    /* ===== Cat Mascot (R6) =====
+       2026-05-21 post-deploy polish:
+       - sprites mirrored horizontally (per-frame, order preserved) so the
+         cat faces right (the direction he walks)
+       - sheets cropped to remove transparent top/bottom padding (fixes idle
+         pose floating in mid-air over BottomNav)
+       - all states scaled 1.15x; integer-aligned: scaled_frame_w x n_frames
+         equals scaled_sheet_w so steps() lands on frame boundaries
+       - filter combines subtle red glow with the existing dark drop-shadow */
+    .cat-mascot {
+      position: fixed;
+      /* R6 polish 2026-05-21 — cat sits ON TOP of the sidebar footer's nav box.
+         Base bottom:74px lands idleSitting/walking/forecastWatching slightly
+         above the nav border (operator-tuned: 2px below the nav-outer-top edge
+         at 76 — looks more natural than perched right on the line).
+         idleSleeping gets a separate override at 73 (1px lower than base).
+         left:73px = (sidebar 240 - cat idle 94) / 2 = horizontally centered
+         over the 3-button group.
+         No dark drop-shadow: with cat sitting on the bar, an offset shadow
+         would fall onto the captions and look like the cat is leaking into
+         the buttons. Red glow alone keeps it lively. */
+      bottom: 72px;
+      left: 73px;
+      width: 96px;
+      height: 96px;
+      z-index: 500;
+      pointer-events: none;
+      filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2));
+      transition: opacity 0.2s ease;
+      /* Pixel-art crisp scaling */
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background-repeat: no-repeat;
+      background-position: 0 0;
+    }
+    .cat-mascot[data-hidden="true"] {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    /* R7 2026-05-21 — dashboard cat is clickable: triple-click within 1.5s
+       triggers a flee (walkingLeft). Hidden Easter egg, same as the logo
+       triple-click toggle — no cursor:pointer so the cat isn't telegraphed
+       as interactive; users have to discover it. Login cat stays unclickable
+       (base pointer-events:none). */
+    .cat-mascot[data-route="dashboard"] {
+      pointer-events: auto;
+    }
+
+    /* R7 2026-05-21 — login-route override. Cat is mounted INSIDE the login
+       card and absolute-positioned relative to it, perched on the top-right
+       corner: its bottom edge sits flush with the card's top edge (bottom:100%
+       inside the card box) and its right edge aligns with the card's right
+       border. Works for the sitting pose (idleCute) — paws on card top edge. */
+    .cat-mascot[data-route="login"] {
+      position: absolute;
+      left: auto;
+      right: 0;
+      top: auto;
+      bottom: 100%;
+      /* +10% size on login — operator-tuned for the login card scale.
+         transform-origin pins the bottom-right corner so the anchor point
+         (where the cat meets the card top-right corner) doesn't shift during
+         scaling; the cat grows up and to the left only. JS never writes
+         inline transform on the login route (walking is disabled there),
+         so this CSS transform isn't shadowed. */
+      transform: scale(1.1);
+      transform-origin: bottom right;
+    }
+    /* Lying pose has an extended paw at the bottom 8px of the sprite
+       (body Y=0-19, paw Y=19-28 after 1.15x scale of the 24px source).
+       Offset the sprite down so the body bottom (not the paw tip) lands at
+       the card top edge — the paw then dangles 8px into the card area.
+       animation-duration override: login runs animations 10% faster than the
+       original baseline (vs dashboard's 20%), so the shared sprite needs its
+       own duration to match the operator-tuned login pace. */
+    .cat-mascot[data-route="login"][data-state="idleLying"] {
+      bottom: calc(100% - 10px);
+      animation-duration: 4.65s;
+    }
+    /* Cute on login — operator-tuned 30% faster than the prior 4.1s login
+       baseline (= 3.15s). Lying on login keeps its 4.65s pace, so the cute
+       cat looks livelier than the lying one. */
+    .cat-mascot[data-route="login"][data-state="idleCute"] {
+      animation-duration: 3.15s;
+    }
+
+    /* Idle (sitting) — 15 frames, post-crop 82x29, 1.15x scale = 94x33, sheet 1410x33 */
+    .cat-mascot[data-state="idleSitting"] {
+      background-image: url('/assets/cats/cat-idle.png?v=${this._catSpritesVersion}');
+      background-size: 1410px 33px;
+      width: 94px;
+      height: 33px;
+      animation: catIdleLoop 4.0s steps(15) infinite, catIdleGlow 4.0s linear infinite;
+    }
+
+    /* R7 2026-05-21 — idle pose variants. Cat cycles between idleSitting +
+       these four every 4-6 min (60s on login) for visual variety. Each pose
+       has its own sprite sheet + keyframe (different sheet widths). */
+
+    /* Cute sitting — 15 frames, 29x31 source, 1.15x = 33x36, sheet 500x36 */
+    .cat-mascot[data-state="idleCute"] {
+      background-image: url('/assets/cats/cat-cute.png?v=${this._catSpritesVersion}');
+      background-size: 500px 36px;
+      width: 33px;
+      height: 36px;
+      animation: catCuteLoop 3.75s steps(15) infinite;
+    }
+
+    /* HeadUp sitting — 16-frame source, but the active idle state only plays
+       frames 3-15 (head-up, sideways head turns). Frames 0-2 (head-down
+       nod) are skipped because they make the cat look like it's drowsing
+       awkwardly; those frames are used only by idleHeadUpAsleep (static
+       frame 1) for the sleep variant. 13 frames * 250ms (matches original
+       per-frame timing) = 3.25s. No glow blink — all played frames have
+       eyes open, so the base filter (always on) is the right behavior. */
+    .cat-mascot[data-state="idleHeadUp"] {
+      background-image: url('/assets/cats/cat-headup.png?v=${this._catSpritesVersion}');
+      background-size: 368px 33px;
+      width: 23px;
+      height: 33px;
+      animation: catHeadUpLoop 3.25s steps(13) infinite;
+    }
+
+    /* HeadUp asleep — R7 special sleep variant. When user goes inactive while
+       idleHeadUp is current, FSM switches here instead of idleSleeping. Shows
+       a static "head-down" frame (frame 1, background-position -23px = 1 frame
+       width) with no animation, so the cat looks like it nodded off mid-bob.
+       On wake, FSM returns to idleHeadUp which restarts catHeadUpLoop from
+       frame 0 — the head-down frames (0-2) play first and the cat naturally
+       "raises its head" at frame 3. Glow is held at half (0.1) to match the
+       eyes-closed state. */
+    .cat-mascot[data-state="idleHeadUpAsleep"] {
+      background-image: url('/assets/cats/cat-headup.png?v=${this._catSpritesVersion}');
+      background-size: 368px 33px;
+      width: 23px;
+      height: 33px;
+      background-position: -23px 0;
+      animation: none;
+      filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1));
+    }
+
+    /* StayTall sitting — 17 frames, 19x29 source, 1.15x = 22x33, sheet 371x33 */
+    .cat-mascot[data-state="idleStayTall"] {
+      background-image: url('/assets/cats/cat-staytall.png?v=${this._catSpritesVersion}');
+      background-size: 371px 33px;
+      width: 22px;
+      height: 33px;
+      animation: catStayTallLoop 4.3s steps(17) infinite, catStayTallGlow 4.3s linear infinite;
+    }
+
+    /* Lying (awake) — 17 frames, 30x24 source, 1.15x = 34x28, sheet 586x28.
+       Distinct from idleSleeping (which uses cat-lie, curled-up pose
+       triggered by inactivity). idleLying is awake-but-lying-down. */
+    .cat-mascot[data-state="idleLying"] {
+      background-image: url('/assets/cats/cat-lying.png?v=${this._catSpritesVersion}');
+      background-size: 586px 28px;
+      width: 34px;
+      height: 28px;
+      animation: catLyingLoop 4.3s steps(17) infinite, catLyingGlow 4.3s linear infinite;
+    }
+
+    /* R7 2026-05-21 — center idle poses over the Saved button.
+       Base .cat-mascot { left: 73px } centers idleSitting (W=94, center X=120)
+       on the Saved button (sidebar X=84-156, center 120). Narrower poses end
+       up off-center with the same left, so each gets its own override
+       (left = 120 - width/2). [data-route="dashboard"] keeps these from
+       overriding the login route's right-anchored positioning. */
+    .cat-mascot[data-route="dashboard"][data-state="idleCute"]     { left: 103px; }
+    .cat-mascot[data-route="dashboard"][data-state="idleHeadUp"],
+    .cat-mascot[data-route="dashboard"][data-state="idleHeadUpAsleep"] { left: 108px; }
+    .cat-mascot[data-route="dashboard"][data-state="idleStayTall"] { left: 109px; }
+    .cat-mascot[data-route="dashboard"][data-state="idleLying"]    { left: 103px; bottom: 63px; }
+    /* Also re-center the curled-up sleeping pose (cat-lie, W=37) over Saved. */
+    .cat-mascot[data-route="dashboard"][data-state="idleSleeping"] { left: 101px; }
+    /* Walking/forecast/fade states share sprite width 45 (cat-walk*, cat-observe).
+       Centered at left=97 (120 - 45/2 = 97.5) so transitions in/out of idle
+       poses don't snap the cat horizontally. HOME_X_PX in JS matches this so
+       the walkingLeft/appearing off-screen translateX still lands at X=-100. */
+    .cat-mascot[data-route="dashboard"][data-state="walkingLeft"],
+    .cat-mascot[data-route="dashboard"][data-state="walkingHome"],
+    .cat-mascot[data-route="dashboard"][data-state="disappearing"],
+    .cat-mascot[data-route="dashboard"][data-state="dormant"],
+    .cat-mascot[data-route="dashboard"][data-state="appearing"],
+    .cat-mascot[data-route="dashboard"][data-state="forecastWatching"] {
+      left: 97px;
+    }
+
+    /* Walking left (away from home) — uses cat-walk-left.png, per-frame mirror
+       of cat-walk so the cat faces the direction of motion. Same sheet dims
+       (16 frames, 39x33 source, 1.15x = 45x38, sheet 720x38). */
+    .cat-mascot[data-state="walkingLeft"] {
+      background-image: url('/assets/cats/cat-walk-left.png?v=${this._catSpritesVersion}');
+      background-size: 720px 38px;
+      width: 45px;
+      height: 38px;
+      animation: catWalkLoop 1.05s steps(16) infinite;
+    }
+
+    /* Walking home (returning from off-screen-left back to the buttons) —
+       face-right sprite, same sheet dims as walkingLeft. */
+    .cat-mascot[data-state="walkingHome"] {
+      background-image: url('/assets/cats/cat-walk.png?v=${this._catSpritesVersion}');
+      background-size: 720px 38px;
+      width: 45px;
+      height: 38px;
+      animation: catWalkLoop 1.05s steps(16) infinite;
+    }
+
+    /* Sleeping (lying) — 17 frames, post-crop 32x26, 1.15x = 37x30, sheet 629x30.
+       bottom override: 1px below the shared base (idle/walking/forecast use 74)
+       so the curled-up sleeping pose visually rests deeper on the bar. */
+    .cat-mascot[data-state="idleSleeping"] {
+      background-image: url('/assets/cats/cat-lie.png?v=${this._catSpritesVersion}');
+      background-size: 629px 30px;
+      width: 37px;
+      height: 30px;
+      bottom: 71px;
+      animation: catLieLoop 6.3s steps(17) infinite, catLieGlow 6.3s linear infinite;
+    }
+
+    /* Observing (Forecast Catalyst loading reaction R3) — 17 frames, post-crop
+       39x36, 1.15x = 45x41, sheet 765x41. Sticky state: holds while the
+       catalyst:forecast-loading event is active. */
+    .cat-mascot[data-state="forecastWatching"] {
+      background-image: url('/assets/cats/cat-observe.png?v=${this._catSpritesVersion}');
+      background-size: 765px 41px;
+      width: 45px;
+      height: 41px;
+      animation: catObserveLoop 4.3s steps(17) infinite, catObserveGlow 4.3s linear infinite;
+    }
+
+    /* Fade states (Task 4 FSM, R6 polish 2026-05-21 reversed direction):
+       - disappearing: opacity 0 (fade-out after walkingLeft at off-screen left)
+       - dormant: opacity 0 + visibility hidden while off-screen left
+       - appearing: visibility back to visible, opacity defaults to 1 — the
+         base .cat-mascot transition: opacity 0.2s ease animates the fade-in
+         from dormant's 0 to 1. No explicit opacity rule here. */
+    .cat-mascot[data-state="disappearing"] {
+      opacity: 0;
+    }
+    .cat-mascot[data-state="dormant"] {
+      opacity: 0;
+      visibility: hidden;
+    }
+    .cat-mascot[data-state="appearing"] {
+      visibility: visible;
+    }
+
+    @keyframes catIdleLoop {
+      to { background-position: -1410px 0; }
+    }
+    @keyframes catWalkLoop {
+      to { background-position: -720px 0; }
+    }
+    @keyframes catLieLoop {
+      to { background-position: -629px 0; }
+    }
+    @keyframes catObserveLoop {
+      to { background-position: -765px 0; }
+    }
+    /* R7 2026-05-21 — idle pose variant keyframes. Each slides its sheet
+       by exactly the sheet width so steps(N) produces a clean cycle. */
+    @keyframes catCuteLoop {
+      to { background-position: -500px 0; }
+    }
+    /* catHeadUpLoop — active idleHeadUp loops only frames 3-15 (head-up,
+       eyes open, sideways head turns). Frames 0-2 (head-down nod) are
+       reserved for the idleHeadUpAsleep state which freezes at frame 1.
+       From -69px (frame 3) to -368px (one frame past frame 15), steps(13). */
+    @keyframes catHeadUpLoop {
+      from { background-position: -69px 0; }
+      to   { background-position: -368px 0; }
+    }
+    @keyframes catStayTallLoop {
+      to { background-position: -371px 0; }
+    }
+    @keyframes catLyingLoop {
+      to { background-position: -586px 0; }
+    }
+
+    /* R7 2026-05-21 — eye-blink-synced glow. The cat's red glow filter dims
+       from alpha 0.2 (open eyes) down to alpha 0.1 (closed eyes, half power)
+       in sync with sprite blinks. Frame indices come from per-frame red-pixel
+       analysis of each sprite (closed-eye frames have near-zero bright red).
+       Anchor keyframes 2% before/after each transition hold the start/end
+       values, so linear interpolation produces ~80ms fade-out/fade-in around
+       each blink — glow stays at full strength during open frames, dims
+       smoothly when eyes close, and recovers smoothly when they reopen.
+       cat-cute has no detected blinks — base filter stays on, no animation. */
+    @keyframes catIdleGlow {
+      /* cat-idle (15 frames): closed at [2, 9, 10] */
+      0%, 11.33%   { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      13.33%, 20%  { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      22%, 58%     { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      60%, 73.33%  { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      75.33%, 100% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+    }
+    /* catHeadUpGlow removed — idleHeadUp now only plays frames 3-15 (all
+       eyes-open), so glow stays at base 0.2 without blink animation. */
+    @keyframes catStayTallGlow {
+      /* cat-staytall (17 frames): closed at [10, 12] — quick double-blink */
+      0%, 56.82%   { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      58.82%, 64.71% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      66.71%, 68.59% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      70.59%, 76.47% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      78.47%, 100% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+    }
+    @keyframes catLyingGlow {
+      /* cat-lying (17 frames): closed at [0, 1, 2, 3, 10, 16] */
+      0%, 23.53% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      25.53%, 56.82% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      58.82%, 64.71% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      66.71%, 92.12% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      94.12%, 100% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+    }
+    @keyframes catLieGlow {
+      /* cat-lie sleeping (17 frames): closed at [0, 1, 2, 8, 16] */
+      0%, 17.65% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      19.65%, 45.06% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      47.06%, 52.94% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      54.94%, 92.12% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      94.12%, 100% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+    }
+    @keyframes catObserveGlow {
+      /* cat-observe (17 frames): closed at [2, 7] */
+      0%, 9.76%    { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      11.76%, 17.65% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      19.65%, 39.18% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+      41.18%, 47.06% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.1)); }
+      49.06%, 100% { filter: drop-shadow(0 0 6px rgba(255, 50, 50, 0.2)); }
+    }
+
+    /* Pause all cat animations + transitions when tab hidden (R7 edge case).
+       Applied to both root and all descendants to cover any nested elements. */
+    .cat-mascot.cat-paused,
+    .cat-mascot.cat-paused * {
+      animation-play-state: paused !important;
+      transition: none !important;
     }
 
     /* ── Badges ── */
@@ -7215,6 +7629,10 @@ const I18N = {
     'toast.manual_only_on': 'Showing manual submissions only',
     'toast.manual_only_off': 'Showing all trends',
     'toast.error_prefix': 'Error: {e}',
+
+    // Cat mascot (triple-click toggle on Header logo)
+    'cat.toggle_on':  'Cat mascot enabled',
+    'cat.toggle_off': 'Cat mascot disabled',
   },
 
   ru: {
@@ -7643,6 +8061,10 @@ const I18N = {
     'toast.manual_only_on': 'Только ручные сабмиты',
     'toast.manual_only_off': 'Показываю все тренды',
     'toast.error_prefix': 'Ошибка: {e}',
+
+    // Cat mascot (triple-click toggle on Header logo)
+    'cat.toggle_on':  'Кот-маскот включён',
+    'cat.toggle_off': 'Кот-маскот выключен',
   },
 };
 
@@ -9573,6 +9995,9 @@ function TriggerSection({ trend, lang, me }) {
   const onSearch = async () => {
     if (loading) return;
     setLoading(true); setError(null);
+    // Notify CatMascot (R3 — Forecast Catalyst loading reaction). The mascot
+    // listens for this and switches to the observing sprite until active=false.
+    try { window.dispatchEvent(new CustomEvent('catalyst:forecast-loading', { detail: { active: true } })); } catch (e) {}
     try {
       const res = await fetch('/api/trends/' + trend.id + '/trigger', {
         method: 'POST',
@@ -9617,6 +10042,7 @@ function TriggerSection({ trend, lang, me }) {
       setError(t('trigger.error', { err: e.message }));
     } finally {
       setLoading(false);
+      try { window.dispatchEvent(new CustomEvent('catalyst:forecast-loading', { detail: { active: false } })); } catch (e) {}
     }
   };
 
@@ -12095,7 +12521,13 @@ function LoginScreen({ onLoggedIn }) {
           border: '1px solid rgba(var(--red-rgb), 0.25)',
           borderRadius: 10,
         }
-      }, error)
+      }, error),
+
+      // R7 2026-05-21 — cat mascot perched on the top-right corner of the
+      // login card. Mounted INSIDE the card (card has position:relative) so
+      // its position:absolute override anchors to the card's box, not the
+      // viewport. CSS .cat-mascot[data-route="login"] handles the offset.
+      h(CatMascot, { route: 'login' })
     ),
 
     // ── Footer — Twitter/X follow link, subtle ───────────────────────
@@ -12290,6 +12722,429 @@ function BottomNav({ view, setView, me, favoritesOnly, setFavoritesOnly, favorit
   );
 }
 
+function CatMascot(props) {
+  // ALL hooks called unconditionally at the top (Rules of Hooks).
+  // Visibility gate is a single combined check AFTER hooks, before render.
+
+  // Route is a plain prop read (not a hook) so it can feed useState init and
+  // effect guards below. Dashboard = full FSM (walk + sleep + forecast + pose
+  // cycle). Login = simpler subset (only pose cycle between cute + lying).
+  const route = props.route || 'dashboard';
+  const isLoginRoute = route === 'login';
+
+  // FSM timings + helper. Declared inside component for closure-safe access
+  // by the effects below. Values are intentionally non-tunable from outside.
+  const CAT_TIMINGS = {
+    WALK_THROUGH_INTERVAL_MIN_MS: 300000,   // 5 min
+    WALK_THROUGH_INTERVAL_MAX_MS: 600000,   // 10 min
+    WALK_LEFT_DURATION_MS: 5600,            // 5.6s walk off the left edge (R7 2026-05-21: 20% faster than the original 6700ms dashboard pace)
+    WALK_HOME_DURATION_MS: 5600,            // 5.6s walk back — symmetric with WALK_LEFT (operator-tuned 20% speedup on both legs of the walk-through)
+    EDGE_FADE_MS: 200,
+    DORMANT_MIN_MS: 30000,                  // 30s
+    DORMANT_MAX_MS: 60000,                  // 60s
+    HOME_X_PX: 97,                          // matches CSS left:97 for walking/forecast/fade states (centered over Saved, W=45 sprite); appearing translateX(-HOME_X-100) puts cat at X=-100 off-screen
+    INACTIVITY_TIMEOUT_MS: 60000,           // 60s of no input -> sleep
+    ACTIVITY_THROTTLE_MS: 1000,             // throttle mousemove activity reads
+    // R7 2026-05-21 — idle pose cycle.
+    // Dashboard: NO timer. Pose changes happen at the end of each walk-through
+    //   (walkingHome landing) — the cat picks a random idle pose to sit in,
+    //   so cycles are naturally paced by the 5-10 min walk interval.
+    // Login: 60s timer (no walking on login, so cycle has to be time-driven).
+    LOGIN_POSE_CYCLE_MS: 60000,             // 1 min (login — pool is smaller, cycle faster)
+  };
+  // Per-route idle pose pools. Walking/sleeping/forecastWatching are NOT in the
+  // pool — they're event-triggered states, not idle. cat-lying is the awake
+  // lying pose; cat-lie (idleSleeping) is the curled-up sleeping pose triggered
+  // by inactivity, not by the cycle.
+  const IDLE_POSES_DASHBOARD = ['idleSitting', 'idleCute', 'idleHeadUp', 'idleStayTall', 'idleLying'];
+  const IDLE_POSES_LOGIN     = ['idleCute', 'idleLying'];
+  function isIdlePose(name) {
+    return name === 'idleSitting' || name === 'idleCute'
+        || name === 'idleHeadUp'  || name === 'idleStayTall'
+        || name === 'idleLying';
+  }
+  function randomInterval(min, max) {
+    return min + Math.random() * (max - min);
+  }
+
+  const [isOff, setIsOff] = useState(function() {
+    return localStorage.getItem('catMascotOff') === 'true';
+  });
+
+  const [isWide, setIsWide] = useState(function() {
+    return window.innerWidth >= 700;
+  });
+
+  // Active FSM state name. Drives data-state attribute + scheduler/controller
+  // effects below. stateNameRef mirrors it for closure-safe reads inside
+  // setTimeout callbacks (avoids stale-state bugs from captured snapshots).
+  // Initial pose: pick a random idle pose from the route's pool so each page
+  // load shows a different cat (dashboard: 5 poses, login: 2). Otherwise the
+  // dashboard would always start in idleSitting until the first walk-through
+  // ~5-10 min later.
+  const [stateName, setStateName] = useState(function() {
+    const pool = isLoginRoute ? IDLE_POSES_LOGIN : IDLE_POSES_DASHBOARD;
+    return pool[Math.floor(Math.random() * pool.length)];
+  });
+  const stateNameRef = useRef(stateName);
+  useEffect(function() {
+    stateNameRef.current = stateName;
+  }, [stateName]);
+
+  // R7 2026-05-21 — triple-click flee. Three clicks on the cat within 1.5s
+  // start a walk-through (cat runs off left as if startled). Only fires while
+  // the cat is in an idle pose AND on dashboard route (login cat has no
+  // walking states, so clicks would be a no-op). State lives in a ref so
+  // tracking doesn't trigger re-renders.
+  const clickStateRef = useRef({ count: 0, lastClickMs: 0 });
+  function onCatClick() {
+    if (isLoginRoute) return;
+    if (!isIdlePose(stateNameRef.current)) return;
+    const now = Date.now();
+    const s = clickStateRef.current;
+    if (now - s.lastClickMs > 1500) s.count = 0;
+    s.count++;
+    s.lastClickMs = now;
+    if (s.count >= 3) {
+      s.count = 0;
+      setStateName('walkingLeft');
+    }
+  }
+
+  // Forecast Catalyst loading reaction (R6 Task 5 / R3). TriggerSection
+  // dispatches catalyst:forecast-loading {active:bool} when the user fires
+  // the search button and when the response settles. Cat switches to the
+  // sticky observing pose for the duration.
+  const [forecastLoading, setForecastLoading] = useState(false);
+  useEffect(function() {
+    function onLoadingChange(ev) {
+      const active = !!(ev && ev.detail && ev.detail.active);
+      setForecastLoading(active);
+    }
+    window.addEventListener('catalyst:forecast-loading', onLoadingChange);
+    return function() {
+      window.removeEventListener('catalyst:forecast-loading', onLoadingChange);
+    };
+  }, []);
+
+  // Direct DOM handle for inline transform/transition writes during walks.
+  const catRef = useRef(null);
+
+  useEffect(function() {
+    const mq = window.matchMedia('(min-width: 700px)');
+    function handler(e) { setIsWide(e.matches); }
+    mq.addEventListener('change', handler);
+    return function() { mq.removeEventListener('change', handler); };
+  }, []);
+
+  // Listen to triple-click toggle event from Header (dispatched in Task 2)
+  useEffect(function() {
+    function onToggle() {
+      setIsOff(localStorage.getItem('catMascotOff') === 'true');
+    }
+    window.addEventListener('catalyst:cat-toggle', onToggle);
+    return function() {
+      window.removeEventListener('catalyst:cat-toggle', onToggle);
+    };
+  }, []);
+
+  // Walk-through scheduler: arms a timer while the cat is in ANY idle pose
+  // (R7 — any of the 5 sitting/lying variants). Login route never walks (no
+  // sidebar to anchor to). Any non-idle state returns early; the controller
+  // lands us back on idleSitting after a walk, which retriggers this effect.
+  useEffect(function() {
+    if (isLoginRoute) return;
+    if (!isIdlePose(stateName)) return;
+    const interval = randomInterval(
+      CAT_TIMINGS.WALK_THROUGH_INTERVAL_MIN_MS,
+      CAT_TIMINGS.WALK_THROUGH_INTERVAL_MAX_MS
+    );
+    const timeoutId = setTimeout(function() {
+      setStateName('walkingLeft');
+    }, interval);
+    return function() { clearTimeout(timeoutId); };
+  }, [stateName]);
+
+  // R7 pose cycle (login-only): every 60s snap to the other pose in the
+  // 2-pose login pool. Dashboard cycles via the walk-through chain instead —
+  // when the cat walks home it lands in a random idle pose (see state-flow
+  // controller below), so a separate timer would just double-trigger changes.
+  useEffect(function() {
+    if (!isLoginRoute) return;
+    if (!isIdlePose(stateName)) return;
+    const pool = IDLE_POSES_LOGIN;
+    const timeoutId = setTimeout(function() {
+      const others = pool.filter(function(p) { return p !== stateName; });
+      if (others.length === 0) return;
+      const next = others[Math.floor(Math.random() * others.length)];
+      setStateName(next);
+    }, CAT_TIMINGS.LOGIN_POSE_CYCLE_MS);
+    return function() { clearTimeout(timeoutId); };
+  }, [stateName]);
+
+  // Loading reaction (R3): whenever forecastLoading flips, snap into the
+  // sticky forecastWatching state, and when it clears, drop back to idle.
+  // Sticky means the state-flow controller branch below does NOT queue a
+  // timed transition out — the state holds until this effect flips us back.
+  // Login route skips this — there's no Forecast Catalyst on the login screen.
+  useEffect(function() {
+    if (isLoginRoute) return;
+    if (forecastLoading) {
+      if (stateNameRef.current !== 'forecastWatching') {
+        setStateName('forecastWatching');
+      }
+    } else {
+      if (stateNameRef.current === 'forecastWatching') {
+        setStateName('idleSitting');
+      }
+    }
+  }, [forecastLoading]);
+
+  // Inactivity -> sleep, activity -> wake (R6).
+  // Empty deps so the listener set is installed exactly once on mount;
+  // current FSM state is read through stateNameRef.current to stay closure-safe.
+  // Sleep triggers from ANY idle pose (R7 — five sitting/lying variants).
+  // Mid-walk and forecastWatching never get put to sleep.
+  // Wake-up snaps back to idleSitting on any input event, which re-arms the
+  // walk-through scheduler + pose cycle via their [stateName] deps.
+  // Login route skips this entirely (no sleep timer there).
+  useEffect(function() {
+    if (isLoginRoute) return;
+    let inactivityTimer;
+    let lastMouseMove = 0;
+
+    function onActivity(e) {
+      // Throttle mousemove to once per second to avoid event spam costs.
+      if (e && e.type === 'mousemove') {
+        const now = Date.now();
+        if (now - lastMouseMove < CAT_TIMINGS.ACTIVITY_THROTTLE_MS) return;
+        lastMouseMove = now;
+      }
+
+      // Wake up from either sleep variant. idleHeadUpAsleep → idleHeadUp
+      // restarts catHeadUpLoop from frame 0, so the cat naturally raises its
+      // head as the closed-eye frames (0-2) play out into the head-up frames.
+      if (stateNameRef.current === 'idleSleeping') {
+        setStateName('idleSitting');
+      } else if (stateNameRef.current === 'idleHeadUpAsleep') {
+        setStateName('idleHeadUp');
+      }
+
+      // Reset the inactivity timer.
+      clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(function() {
+        // Sleep behavior: idleHeadUp gets its own static-frame sleep variant
+        // (head frozen mid-nod), all other idle poses share the curled-up
+        // cat-lie sleeping pose. Mid-walk and forecast-watching never sleep.
+        const cur = stateNameRef.current;
+        if (cur === 'idleHeadUp') {
+          setStateName('idleHeadUpAsleep');
+        } else if (isIdlePose(cur)) {
+          setStateName('idleSleeping');
+        }
+      }, CAT_TIMINGS.INACTIVITY_TIMEOUT_MS);
+    }
+
+    // Start the initial timer so the cat falls asleep without any input.
+    inactivityTimer = setTimeout(function() {
+      const cur = stateNameRef.current;
+      if (cur === 'idleHeadUp') {
+        setStateName('idleHeadUpAsleep');
+      } else if (isIdlePose(cur)) {
+        setStateName('idleSleeping');
+      }
+    }, CAT_TIMINGS.INACTIVITY_TIMEOUT_MS);
+
+    // Passive where applicable so scroll/wheel/touch listeners do not block
+    // the main thread (preserves the R5 wheel-scroll perf fix).
+    const events = [
+      ['mousemove', { passive: true }],
+      ['keydown', null],
+      ['click', null],
+      ['wheel', { passive: true }],
+      ['touchmove', { passive: true }],
+      ['scroll', { passive: true }],
+    ];
+    events.forEach(function(pair) {
+      document.addEventListener(pair[0], onActivity, pair[1]);
+    });
+
+    return function() {
+      clearTimeout(inactivityTimer);
+      events.forEach(function(pair) {
+        document.removeEventListener(pair[0], onActivity, pair[1]);
+      });
+    };
+  }, []);
+
+  // Page Visibility — pause animations when tab hidden, resume on return (R7 edge case)
+  useEffect(function() {
+    function onVisibilityChange() {
+      const root = catRef.current;
+      if (!root) return;
+      if (document.hidden) {
+        root.classList.add('cat-paused');
+      } else {
+        root.classList.remove('cat-paused');
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return function() {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
+
+  // Window resize — teleport home if mid-walk on significant width change (R7 edge case).
+  // Empty deps + stateNameRef for closure-safe state read (same pattern as Task 6).
+  useEffect(function() {
+    let lastWidth = window.innerWidth;
+
+    function onResize() {
+      const newWidth = window.innerWidth;
+      const delta = Math.abs(newWidth - lastWidth);
+      lastWidth = newWidth;
+
+      if (delta < 100) return;
+
+      const current = stateNameRef.current;
+      if (current === 'walkingLeft' || current === 'walkingHome') {
+        const root = catRef.current;
+        if (root) {
+          root.style.transition = 'none';
+          root.style.transform = '';
+          void root.offsetWidth;
+        }
+        setStateName('idleSitting');
+      }
+    }
+
+    window.addEventListener('resize', onResize, { passive: true });
+    return function() {
+      window.removeEventListener('resize', onResize);
+    };
+  }, []);
+
+  // State-flow controller: heart of the FSM. Each branch handles one state's
+  // entry side-effects (transform/transition writes) and queues the timed
+  // transition into the next state. The chain is:
+  //   walkingLeft -> disappearing -> dormant -> appearing -> walkingHome -> <random idle pose>
+  // R6 2026-05-21: cat now exits left and returns from left (was exit right /
+  // return left). dormant no longer needs a teleport — walkingLeft ends at the
+  // same off-screen-left X that appearing starts from.
+  // R7 2026-05-21: walkingHome lands in a RANDOM pose from IDLE_POSES_DASHBOARD
+  // (instead of always idleSitting). This is the pose-cycle mechanism on
+  // dashboard — replaces the old time-based pose cycle effect (now login-only).
+  // forecastWatching is a sticky branch outside the chain — see loading
+  // reaction effect above.
+  // Cleanup clears the pending timeout so unmount or state-jump never fires
+  // a stale transition.
+  useEffect(function() {
+    const root = catRef.current;
+    if (!root) return;
+
+    let timeoutId;
+    function transitionTo(next, delay) {
+      timeoutId = setTimeout(function() { setStateName(next); }, delay);
+    }
+
+    if (stateName === 'walkingLeft') {
+      // Drive transform leftward past the viewport edge over WALK_LEFT_DURATION.
+      // Final translateX(-HOME_X_PX - 100) puts the cat at absolute X = -100,
+      // i.e. 100px past the left edge — the same off-screen position appearing
+      // starts from, so dormant doesn't need to teleport later.
+      // Force a layout flush via offsetWidth read so the browser commits the
+      // current transform before applying the new one (otherwise the
+      // transition collapses to an instant jump).
+      // Include opacity in the transition list so the following disappearing
+      // state can fade opacity 1->0 without the inline transition shadowing
+      // the base class opacity transition.
+      root.style.transition = 'transform ' + CAT_TIMINGS.WALK_LEFT_DURATION_MS + 'ms linear, opacity 0.2s ease';
+      void root.offsetWidth;
+      root.style.transform = 'translateX(' + (-CAT_TIMINGS.HOME_X_PX - 100) + 'px)';
+      transitionTo('disappearing', CAT_TIMINGS.WALK_LEFT_DURATION_MS);
+    } else if (stateName === 'disappearing') {
+      // CSS [data-state="disappearing"] applies opacity 0; inline transition
+      // set in walkingLeft still includes opacity 0.2s ease so the fade-out
+      // runs smoothly. Hold briefly then move to dormant.
+      transitionTo('dormant', CAT_TIMINGS.EDGE_FADE_MS);
+    } else if (stateName === 'dormant') {
+      // Cat is already at the off-screen-left X after walkingLeft + disappearing.
+      // No teleport needed — just hold opacity 0 + visibility hidden, then
+      // hand off to appearing. Reset the inline transition so the appearing
+      // state's opacity fade isn't shadowed by the walkingLeft transform clause.
+      root.style.transition = 'opacity 0.2s ease';
+      const dormantMs = randomInterval(CAT_TIMINGS.DORMANT_MIN_MS, CAT_TIMINGS.DORMANT_MAX_MS);
+      transitionTo('appearing', dormantMs);
+    } else if (stateName === 'appearing') {
+      // appearing flips visibility back; inline opacity transition set in
+      // dormant fades opacity 0->1 over 200ms. Brief hold then start walk home.
+      transitionTo('walkingHome', CAT_TIMINGS.EDGE_FADE_MS);
+    } else if (stateName === 'walkingHome') {
+      // Include opacity so any state-driven opacity change continues to fade.
+      root.style.transition = 'transform ' + CAT_TIMINGS.WALK_HOME_DURATION_MS + 'ms linear, opacity 0.2s ease';
+      void root.offsetWidth;
+      root.style.transform = 'translateX(0px)';
+      // R7 2026-05-21 — pose cycle is now driven by the walk-through chain:
+      // cat lands in a RANDOM idle pose from the dashboard pool when it gets
+      // home (instead of always idleSitting). This replaces the previous
+      // time-based pose cycle that operators rarely noticed because the
+      // walk-through interval (5-10 min) is the natural pace anyway.
+      const pool = isLoginRoute ? IDLE_POSES_LOGIN : IDLE_POSES_DASHBOARD;
+      const next = pool[Math.floor(Math.random() * pool.length)];
+      transitionTo(next, CAT_TIMINGS.WALK_HOME_DURATION_MS);
+    } else if (isIdlePose(stateName)) {
+      // Any idle pose (R7: idleSitting/Cute/HeadUp/StayTall/Lying) is stable.
+      // Clear inline transition and transform so the base class CSS takes over
+      // (transition: opacity 0.2s ease) and the next cycle starts from a clean
+      // baseline. No timed transitionTo — the pose cycle effect arms its own
+      // timer to flip us to the next pose.
+      root.style.transition = '';
+      root.style.transform = '';
+    } else if (stateName === 'forecastWatching') {
+      // Sticky observing pose during Forecast Catalyst loading. Kill any
+      // in-flight walk transform (cat may have been mid-walk-through when
+      // the user fired the search) and pin back to home X=0. No timed
+      // transitionTo — the loading reaction effect above flips us out when
+      // forecastLoading clears.
+      root.style.transition = 'none';
+      root.style.transform = '';
+      void root.offsetWidth;
+    } else if (stateName === 'idleSleeping') {
+      // Sticky sleeping pose (R6). Cat sits at home position with no
+      // animation transforms; CSS [data-state="idleSleeping"] drives the
+      // cat-lie sprite. Wake-up is handled by the inactivity effect above
+      // (any input event flips back to idleSitting).
+      root.style.transition = '';
+      root.style.transform = '';
+    } else if (stateName === 'idleHeadUpAsleep') {
+      // R7 sticky sleep variant — frozen at static head-down frame of
+      // cat-headup (the "nodder" pose). CSS [data-state="idleHeadUpAsleep"]
+      // drives the static frame + no animation. Wake-up handled by the
+      // inactivity effect above (any input event flips back to idleHeadUp,
+      // which restarts catHeadUpLoop from frame 0 = the natural head-rising
+      // cycle).
+      root.style.transition = '';
+      root.style.transform = '';
+    }
+
+    return function() { clearTimeout(timeoutId); };
+  }, [stateName]);
+
+  // Visibility gate — 3 conditions combined. All hooks already called above,
+  // so this early return is safe (no hooks below it). route is read at the top
+  // of the component so it can drive useState init + effect guards too.
+  const isLoginOrDashboard = route === 'login' || route === 'dashboard';
+  if (!isLoginOrDashboard || isOff || !isWide) return null;
+
+  return h('div', {
+    ref: catRef,
+    className: 'cat-mascot',
+    'data-state': stateName,
+    'data-route': route,
+    onClick: onCatClick
+  });
+}
+
 function App() {
   useLang();
   // Auth: null = checking, false = logged out, object = logged in
@@ -12384,6 +13239,11 @@ function App() {
   const toastId = useRef(0);
   const sentinelRef = useRef(null);
   const mainFeedRef = useRef(null);
+  // Triple-click buffer for Catalyst logo → toggles localStorage.catMascotOff.
+  // Stores recent click timestamps within a 1.5s window; on the 3rd hit we
+  // flip the flag, dispatch catalyst:cat-toggle, and reset the buffer. See
+  // handleLogoClick below and the matching listener inside CatMascot.
+  const catLogoClicksRef = useRef([]);
   const LIMIT = 25;
 
   // Scroll-to-top button — shown when user scrolls the main feed below
@@ -12932,6 +13792,35 @@ function App() {
     style: { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.7 }
   }, t('app.loading'));
 
+  // Catalyst logo triple-click → toggle cat mascot. 3 clicks within 1500ms
+  // flip localStorage.catMascotOff, show a toast, and dispatch the event
+  // CatMascot listens for. localStorage is wrapped in try/catch — private
+  // browsing or storage-disabled contexts throw SecurityError; on failure
+  // we silently no-op (no toggle, no toast).
+  function handleLogoClick() {
+    const now = Date.now();
+    const WINDOW_MS = 1500;
+    catLogoClicksRef.current = catLogoClicksRef.current.filter(function(ts) {
+      return now - ts < WINDOW_MS;
+    });
+    catLogoClicksRef.current.push(now);
+    if (catLogoClicksRef.current.length < 3) return;
+    catLogoClicksRef.current = [];
+    let wasOff;
+    try {
+      wasOff = localStorage.getItem('catMascotOff') === 'true';
+      if (wasOff) localStorage.removeItem('catMascotOff');
+      else        localStorage.setItem('catMascotOff', 'true');
+    } catch (e) {
+      // localStorage unavailable (private mode / quota / SecurityError) —
+      // bail out without flipping state or showing a toast.
+      return;
+    }
+    if (wasOff) addToast(t('cat.toggle_on'),  'success');
+    else        addToast(t('cat.toggle_off'), 'info');
+    window.dispatchEvent(new CustomEvent('catalyst:cat-toggle'));
+  }
+
   return h('div', null,
     // Toast notifications (fixed top-right)
     h(Toasts, { toasts, onDismiss: dismissToast }),
@@ -12983,7 +13872,16 @@ function App() {
 
     // ── Nav ──
     h('nav', { className: 'nav' },
-      h('div', { className: 'nav-logo' },
+      h('div', {
+        className: 'nav-logo',
+        // Triple-click within 1.5s toggles the cat mascot (Easter-egg dev
+        // affordance). Handler is defined just above the App return — uses
+        // a ref'd circular buffer to track clicks; see handleLogoClick.
+        onClick: handleLogoClick,
+        // Keep it discoverable for power users without affecting normal
+        // text users — no cursor change so it doesn't beg to be clicked.
+        title: t('app.title'),
+      },
         // Brand logo. PNG comes from /assets/logo.png (baked into Docker
         // image). LOGO_VERSION (server-injected) busts the cache on every
         // rebuild, so replacing the file + redeploy actually shows the new
@@ -13534,7 +14432,13 @@ function App() {
         // items use — full carousel + score bars + Ask Grok / source link.
         onOpenTrend: (trend) => { setModalTrend(trend); setView('trends'); },
       })
-    ) : null
+    ) : null,
+
+    // Cat Mascot (R6) — fixed at bottom-left, painted on top of all UI.
+    // Self-gated: returns null on narrow viewport or when localStorage flag set.
+    // Route hardcoded to 'dashboard' here since auth-gate above returns
+    // LoginScreen before this branch is reached. Task 6 may refactor.
+    h(CatMascot, { route: 'dashboard' })
   );
 }
 
