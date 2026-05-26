@@ -16,7 +16,8 @@
       "Bash(awk 'NR>=329' ai-context/WORKLOG.md)",
       "Read(//tmp/**)",
       "Bash(head -9 ai-context/WORKLOG_ARCHIVE.md)",
-      "Bash(tail -n +10 ai-context/WORKLOG_ARCHIVE.md)"
+      "Bash(tail -n +10 ai-context/WORKLOG_ARCHIVE.md)",
+      "Bash(cat > *)"
     ]
   }
 }
