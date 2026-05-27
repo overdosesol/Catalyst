@@ -709,21 +709,50 @@ class AdminServer {
     }
   }
 
-  _setUserPlan(userId, planName, days = 30) {
+  /**
+   * Set user plan (admin panel grant/revoke).
+   * ADM-005 + BILL-002 (Bundle #2): wrapped in db.transaction() so the
+   * UPDATE either fully succeeds (with audit row) or fully rolls back.
+   *
+   * @param {number} userId
+   * @param {string} planName
+   * @param {number} [days=30]
+   * @param {Object} [opts]
+   * @param {string} [opts.source='admin_panel'] - audit log source
+   */
+  _setUserPlan(userId, planName, days = 30, opts = {}) {
     const plan = this.db.db.prepare(`SELECT id, name FROM plans WHERE name = ?`).get(planName);
     if (!plan) throw new Error(`Plan not found: ${planName}`);
 
     if (plan.name === 'free' || plan.name === 'admin') {
-      // Free and Admin plans have no expiry
-      this.db.db.prepare(`
-        UPDATE users
-        SET plan_id = ?, subscription_expires_at = NULL, status = 'active'
-        WHERE id = ?
-      `).run(plan.id, userId);
+      // Free and Admin plans have no expiry. Atomic UPDATE + audit log.
+      const tx = this.db.db.transaction(() => {
+        const prev = this.db.db.prepare(`SELECT plan_id FROM users WHERE id = ?`).get(userId);
+        this.db.db.prepare(`
+          UPDATE users
+          SET plan_id = ?, subscription_expires_at = NULL, status = 'active'
+          WHERE id = ?
+        `).run(plan.id, userId);
+        this.db.recordAuditEvent(
+          plan.name === 'admin' ? 'plan_grant_admin' : 'plan_revoke',
+          null,                  // single-tenant admin panel: no per-admin id
+          'admin',
+          userId,
+          {
+            from_plan_id: prev?.plan_id ?? null,
+            to_plan_id:   plan.id,
+            to_plan_name: plan.name,
+            source:       opts.source || 'admin_panel',
+          },
+          true,
+        );
+      });
+      tx();
       return;
     }
 
-    this.db.upgradePlan(userId, plan.name, days);
+    // Paid plans — upgradePlan already wraps в transaction + audit (see database.js Task 3).
+    this.db.upgradePlan(userId, plan.name, days, { source: opts.source || 'admin_panel' });
   }
 
   async _broadcast(message, planFilter) {

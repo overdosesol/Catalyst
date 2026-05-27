@@ -434,11 +434,8 @@ class DashboardServer {
     this.started       = Date.now();
     this.sseClients    = new Set();  // active Server-Sent Event subscribers
     this._sseKeepAlive = null;
-    // In-memory rate-limit rings. Map<userId, number[]> — array of timestamps
-    // within the rolling 24h window. Reset on restart, which is fine for a
-    // soft cap (only matters for sustained abuse).
-    this._manualAnalysisHits = new Map();
-    this._catalystHits       = new Map();
+    // Bundle #2 (2026-06-07): cost cap counters moved from in-memory Maps
+    // to feature_usage_log DB table. See COST-003 — restart-resilient.
 
     // Brute-force protection on /api/auth/verify. 6-digit codes have only
     // ~20 bits of entropy; without throttling an attacker who knows the
@@ -1331,6 +1328,13 @@ class DashboardServer {
    * check here.
    */
   async _handleTweetPreview(req, res, url) {
+    // BILL-001 (Bundle #3): gate hover preview by plan entitlements.
+    // Twitter is paid-only (not in free.sources). Reject before any fetch.
+    const planSources = getPlanEntitlements(req.user?.plan_name).sources;
+    if (!planSources || !planSources.includes('twitter')) {
+      return json(res, 403, { error: 'Twitter preview requires a paid plan', reason: 'plan' });
+    }
+
     const idParam  = url.searchParams.get('id') || '';
     const urlParam = url.searchParams.get('url') || '';
     const id = /^\d{5,25}$/.test(idParam) ? idParam : extractTweetId(urlParam);
@@ -1387,6 +1391,15 @@ class DashboardServer {
    * upvotes/comments back to the trend row via db.updateRedditEngagement.
    */
   async _handleRedditPreview(req, res, url) {
+    // BILL-001 (Bundle #3): gate hover preview by plan entitlements.
+    // Reddit is in free.sources currently → this gate rarely rejects;
+    // added for consistency with tweet-preview and as future-proofing if
+    // free plan ever excludes reddit.
+    const planSources = getPlanEntitlements(req.user?.plan_name).sources;
+    if (!planSources || !planSources.includes('reddit')) {
+      return json(res, 403, { error: 'Reddit preview requires a paid plan', reason: 'plan' });
+    }
+
     const idParam  = url.searchParams.get('id') || '';
     const urlParam = url.searchParams.get('url') || '';
     const id = /^[a-z0-9]{4,12}$/i.test(idParam) ? idParam : extractRedditPostId(urlParam);
@@ -1655,16 +1668,16 @@ class DashboardServer {
       return json(res, 200, { ...existing, fromCache: true });
     }
 
-    // Daily cap (per-user, rolling 24h, in-memory). Admin bypass.
+    // Daily cap (per-user, rolling 24h). Bundle #2 (2026-06-07): persisted
+    // в feature_usage_log table — restart-resilient (closes COST-003).
+    // Admin bypass via ent.catalyst === 0 (entitlements.js).
     if (ent.catalyst > 0) {
-      const now = Date.now();
       const dayMs = 24 * 60 * 60 * 1000;
-      const hits = (this._catalystHits.get(userId) || []).filter(t => now - t < dayMs);
+      const hits = this.db.getRecentFeatureUsageHits(userId, 'catalyst', dayMs);
       if (hits.length >= ent.catalyst) {
         return json(res, 403, { error: 'Daily Catalyst limit reached', reason: 'daily_limit', cap: ent.catalyst });
       }
-      hits.push(now);
-      this._catalystHits.set(userId, hits);
+      this.db.recordFeatureUsage(userId, 'catalyst');
     }
 
     // DB-level claim — dedupe parallel clicks across TG and dashboard
@@ -1687,7 +1700,8 @@ class DashboardServer {
       // Usage counter for plans that show it (test only). Pro/admin omit.
       let usage = null;
       if (shouldShowUsageCounter(planName) && ent.catalyst > 0) {
-        const used = (this._catalystHits.get(userId) || []).length;
+        const dayMs = 24 * 60 * 60 * 1000;
+        const used = this.db.getRecentFeatureUsageHits(userId, 'catalyst', dayMs).length;
         usage = { used, cap: ent.catalyst, left: Math.max(0, ent.catalyst - used) };
       }
       return json(res, 200, { ...saved, fromCache: false, usage });
@@ -1953,12 +1967,15 @@ class DashboardServer {
     // keeps a pro user from burning their daily cap on duplicate URL clicks.
     // 30s cooldown stays for everyone except admin (anti-spam, anti-dupe).
     const cacheAge = peekManualAnalysisCache(rawUrl);
+    // Bundle #2 (2026-06-07): persisted в feature_usage_log table —
+    // restart-resilient (closes COST-003). `hits` array shape unchanged
+    // (epoch ms ASC), so cooldown + dailyCap checks below are untouched.
     if (cacheAge === null && ent.manualAnalyze > 0) {
       const now = Date.now();
       const dayMs = 24 * 60 * 60 * 1000;
       const cooldownMs = 30 * 1000;
       const dailyCap = ent.manualAnalyze;
-      const hits = (this._manualAnalysisHits.get(userId) || []).filter(t => now - t < dayMs);
+      const hits = this.db.getRecentFeatureUsageHits(userId, 'manualAnalysis', dayMs);
       if (hits.length && now - hits[hits.length - 1] < cooldownMs) {
         const secLeft = Math.max(1, Math.ceil((cooldownMs - (now - hits[hits.length - 1])) / 1000));
         return json(res, 403, { error: 'Cooldown active — analysis can take 10-30s', reason: 'cooldown', secLeft });
@@ -1966,8 +1983,7 @@ class DashboardServer {
       if (hits.length >= dailyCap) {
         return json(res, 403, { error: 'Daily limit reached (' + dailyCap + ' / 24h)', reason: 'daily', cap: dailyCap });
       }
-      hits.push(now);
-      this._manualAnalysisHits.set(userId, hits);
+      this.db.recordFeatureUsage(userId, 'manualAnalysis');
     }
 
     try {
@@ -2047,7 +2063,8 @@ class DashboardServer {
       // hits — those don't consume a daily slot.
       let usage = null;
       if (!result.fromCache && shouldShowUsageCounter(planName) && ent.manualAnalyze > 0) {
-        const used = (this._manualAnalysisHits.get(userId) || []).length;
+        const dayMs = 24 * 60 * 60 * 1000;
+        const used = this.db.getRecentFeatureUsageHits(userId, 'manualAnalysis', dayMs).length;
         usage = { used, cap: ent.manualAnalyze, left: Math.max(0, ent.manualAnalyze - used) };
       }
       // Notify all connected dashboards that the feed changed — manual
@@ -2633,9 +2650,10 @@ class DashboardServer {
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
 
     /* ===== THEME SYSTEM (rewritten 2026-05-06) =====
-       2 dark themes:
-         ink   — pure black + X-blue          (default, no data-theme attribute)
-         tide  — deep navy + cyan/aqua accent (crypto-terminal vibe)
+       3 themes:
+         pulse — soft graphite (default, :root baseline, no data-theme attribute)
+         ink   — pure black + X-blue          (data-theme="ink")
+         tide  — deep navy + cyan/aqua accent (data-theme="tide", crypto-terminal vibe)
 
        Design principles:
          • One accent colour per theme, used sparingly
@@ -3417,12 +3435,6 @@ class DashboardServer {
     .stat-lbl { font-size: 10px; color: var(--muted); margin-top: 5px; font-weight: 500; }
     .stat-sub { font-size: 10px; color: var(--dim); margin-top: 2px; }
 
-    /* ── Toolbar ── */
-    .toolbar {
-      display: flex; align-items: center; gap: 8px;
-      margin-bottom: 10px; flex-wrap: wrap;
-      padding: 10px 14px;
-    }
     .toolbar-label { font-size: 9px; color: var(--dim); margin-right: 1px; white-space: nowrap; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; }
 
     /* ── Control Panel ── */
@@ -4932,8 +4944,6 @@ class DashboardServer {
       border: 1px solid var(--border); border-radius: var(--r1);
       padding: 3px 8px; white-space: nowrap;
     }
-    .kbd { display: inline-block; background: rgba(255,255,255,.05); border: 1px solid var(--border2); border-radius: 4px; padding: 1px 5px; font-size: 9px; font-family: 'JetBrains Mono', monospace; color: var(--dim); }
-
     /* ── Settings modal (centered, blurred backdrop) ── */
     @keyframes sheetIn  { from { opacity:0; } to { opacity:1; } }
     @keyframes sheetPop { from { opacity:0; transform: translateY(12px) scale(.97); } to { opacity:1; transform: translateY(0) scale(1); } }
@@ -7090,6 +7100,31 @@ const LOGO_VERSION = ${JSON.stringify(this._logoVersion)};
 // in nav (t.me/ root). Used for the Telegram-bot nav link next to the X icon.
 const BOT_USERNAME = ${JSON.stringify(this._botUsername || '')};
 
+// ── URL safety helpers (Bundle #3, 2026-06-07) ────────────────────────────
+// Client-side duplicate of src/utils/url-safety.js. SPA cannot ESM-import,
+// so we duplicate inline. Keep in sync with the server-side module.
+function escHtmlAttr(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+function safeUrl(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(String(url));
+    return /^https?:$/.test(u.protocol) ? String(url) : null;
+  } catch (e) {
+    return null;
+  }
+}
+function safeHref(url) {
+  const safe = safeUrl(url);
+  return safe ? escHtmlAttr(safe) : '#';
+}
+
 // ── Auth token ────────────────────────────────────────────────────────────
 // Login is Telegram-bot-only. The bot issues a 6-digit code bound to a session;
 // verifying the code returns a 64-hex bearer token that is attached to every
@@ -8190,18 +8225,6 @@ function withSubjectHighlight(text, aliases) {
   return out;
 }
 
-// Lifespan key → i18n token. Built from LIFESPAN_VALUES injected by the
-// server (see src/analysis/lifespan.js). Renaming a value there triggers
-// loud failures upstream (i18n assertCoversLifespans + scorer normalize)
-// rather than silent '—' here.
-const LIFESPAN_KEYS = LIFESPAN_VALUES.reduce(
-  (m, k) => { m[k] = 'lifespan.' + k; return m; },
-  { unknown: 'lifespan.unknown' }
-);
-function lifespanLabel(k) {
-  const key = LIFESPAN_KEYS[k];
-  return key ? t(key) : '—';
-}
 
 // Source link labels
 // 2026-05-20 R4 — emoji prefixes removed; labels are plain text. Brand
@@ -8232,18 +8255,6 @@ function phaseDot(p) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-function memeClass(v) {
-  if (v >= 80) return 'hot';
-  if (v >= 60) return 'warm';
-  if (v >= 40) return 'ok';
-  return 'cold';
-}
-// 2026-05-20: dead in dashboard (shadowed by const memeColor = barColor(meme)
-// in TrendCard at line ~8706). Kept for any external import — collapsed to
-// solid --accent to match the unified scoring palette (no more светофор).
-function memeColor(_v) {
-  return 'var(--accent)';
-}
 // Bar color for emergence/adoption/meme scores. Unified on --accent —
 // score LEVEL is communicated via bar-fill LENGTH, not color (no more
 // red/yellow/green "светофор"). Single token; theme-aware.
@@ -9802,7 +9813,7 @@ function FeedCard({ trend, onOpen, onHide, onFavToggle, canFavorite }) {
       }, t('feed.details')),
       trend.url ? h('a', {
         className: 'feed-action-btn',
-        href: trend.url, target: '_blank', rel: 'noopener',
+        href: safeHref(trend.url), target: '_blank', rel: 'noopener',
         onClick: e => e.stopPropagation(),
         // Hover-preview tags: only one of these is set (the URL pattern
         // determines which), and only on Twitter/Reddit URLs. TikTok and
@@ -10660,7 +10671,7 @@ function TrendModal({ trend, onClose, me = null, onFavToggle = null, onFavNote =
           h('div', { className: 'modal-actions' },
             trend.url ? h('a', {
               className: 'trend-link' + srcLinkCls,
-              href: trend.url, target: '_blank', rel: 'noopener',
+              href: safeHref(trend.url), target: '_blank', rel: 'noopener',
               // Hover-preview tags — only one is set per trend (Twitter or
               // Reddit URLs match their respective regex; other sources
               // skip both).
@@ -10756,7 +10767,7 @@ function TrendModal({ trend, onClose, me = null, onFavToggle = null, onFavNote =
                   return h('a', {
                     key: i,
                     className: 'xtrends-toptweet',
-                    href: tw.url || '#',
+                    href: safeHref(tw.url),
                     target: '_blank',
                     rel: 'noopener',
                     'data-tweet-id': tw.id || null,
@@ -11422,7 +11433,7 @@ function AnalyzePanel({ onBack, onOpenTrend }) {
             (tr.category ? ' · ' + tr.category : '')
           ),
           h('div', { className: 'analyze-hero-actions' },
-            tr.url ? h('a', { href: tr.url, target: '_blank', rel: 'noopener', className: 'btn btn-ghost btn-sm' }, icon('external-link', { size: 12 }), ' ', t('analyze.open_link')) : null,
+            tr.url ? h('a', { href: safeHref(tr.url), target: '_blank', rel: 'noopener', className: 'btn btn-ghost btn-sm' }, icon('external-link', { size: 12 }), ' ', t('analyze.open_link')) : null,
             h('button', { className: 'btn btn-primary btn-sm', onClick: () => onOpenTrend(tr) }, icon('eye', { size: 12 }), ' ', t('analyze.open_full'))
           )
         )
