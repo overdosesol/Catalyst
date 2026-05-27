@@ -131,3 +131,47 @@ CREATE TABLE IF NOT EXISTS broadcast_deliveries (
 CREATE INDEX IF NOT EXISTS idx_broadcasts_created_at ON broadcasts(created_at);
 CREATE INDEX IF NOT EXISTS idx_broadcast_deliveries_broadcast ON broadcast_deliveries(broadcast_id);
 CREATE INDEX IF NOT EXISTS idx_broadcast_deliveries_user ON broadcast_deliveries(user_id);
+
+-- ── Bundle #2 (2026-06-07): observability persistence ────────────────────
+-- Replaces in-memory state that previously lost on restart.
+-- See docs/superpowers/specs/2026-06-07-observability-persistence-design.md
+
+-- admin_audit_log: plan changes + admin actions. Forever retention.
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts              TEXT    NOT NULL DEFAULT (datetime('now')),
+  actor_user_id   INTEGER,                          -- admin doing the action (NULL = system)
+  actor_kind      TEXT    NOT NULL,                 -- 'admin' | 'system' | 'user_self'
+  event_type      TEXT    NOT NULL,                 -- 'plan_grant_admin' | 'plan_revoke' | 'plan_upgrade' | etc.
+  target_user_id  INTEGER,                          -- the user the action affected
+  payload_json    TEXT,                             -- JSON: structured payload
+  success         INTEGER NOT NULL DEFAULT 1        -- 1 | 0
+);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_ts     ON admin_audit_log(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_target ON admin_audit_log(target_user_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_event  ON admin_audit_log(event_type, ts DESC);
+
+-- alert_decisions: alert dispatcher decisions. 14d retention.
+CREATE TABLE IF NOT EXISTS alert_decisions (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts           TEXT    NOT NULL DEFAULT (datetime('now')),
+  trend_id     INTEGER,
+  user_id      INTEGER,
+  source       TEXT,                                -- 'reddit' | 'twitter' | 'google_trends' | ...
+  reason       TEXT    NOT NULL,                    -- 'sent' | 'skipped_seen' | 'skipped_score' | etc.
+  gates_json   TEXT,                                -- full gate evaluations
+  weights_json TEXT,                                -- optional weight breakdown
+  sent         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_alert_decisions_ts    ON alert_decisions(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_decisions_user  ON alert_decisions(user_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_decisions_trend ON alert_decisions(trend_id, ts DESC);
+
+-- feature_usage_log: per-hit event log for rolling cost caps. 7d retention.
+CREATE TABLE IF NOT EXISTS feature_usage_log (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts        TEXT    NOT NULL DEFAULT (datetime('now')),
+  user_id   INTEGER NOT NULL,
+  feature   TEXT    NOT NULL                        -- 'manualAnalysis' | 'catalyst'
+);
+CREATE INDEX IF NOT EXISTS idx_feature_usage_user_feature_ts ON feature_usage_log(user_id, feature, ts DESC);

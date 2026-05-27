@@ -4,6 +4,7 @@
 import { getTranslations } from '../i18n/index.js';
 import { normalizeLifespan } from '../analysis/lifespan.js';
 import { collectSubjectNames, buildSubjectMatchRegex } from '../analysis/subject-names.js';
+import { safeUrl, safeHref } from '../utils/url-safety.js';
 
 const SCORE_EMOJI = (score) => {
   if (score >= 90) return '\u{1F525}\u{1F525}\u{1F525}';
@@ -140,9 +141,13 @@ export function formatTelegramAlert(trend, lang = 'en') {
     }
   }
 
-  if (trend.url) {
+  // BOT-001 + BOT-002 (Bundle #3): validate protocol AND HTML-attr-escape the URL.
+  // If URL is invalid (not http(s) or unparseable) — skip the link entirely.
+  // Telegram parse_mode=HTML returns 400 on bad attribute escaping → alert lost;
+  // skipping the link is better UX than risking the whole alert being dropped.
+  if (trend.url && safeUrl(trend.url)) {
     msg += DIV + '\n';
-    msg += `\u{1F517} <a href="${trend.url}">${t.alertOpen}</a>`;
+    msg += `\u{1F517} <a href="${safeHref(trend.url)}">${t.alertOpen}</a>`;
   }
 
   return msg;

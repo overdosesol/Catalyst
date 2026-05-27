@@ -107,6 +107,25 @@ setInterval(() => {
   } catch (e) { logger.warn(`[Maintenance] alert_score_history sweep failed: ${e.message}`); }
 }, 24 * 60 * 60 * 1000);
 
+// Bundle #2 (2026-06-07): retention cleanup for new observability tables.
+// alert_decisions — 14d (debugging window for post-deploy incidents).
+// feature_usage_log — 7d (caps need only 24h; extra week for cap-hit debugging).
+// admin_audit_log — no cleanup (audit-grade data, low write rate; defer until scaling concern).
+const ALERT_DECISIONS_RETENTION_DAYS  = 14;
+const FEATURE_USAGE_RETENTION_DAYS    =  7;
+try { db.pruneAlertDecisions(ALERT_DECISIONS_RETENTION_DAYS); }
+catch (e) { logger.warn(`[Maintenance] alert_decisions sweep failed: ${e.message}`); }
+try { db.pruneFeatureUsageLog(FEATURE_USAGE_RETENTION_DAYS); }
+catch (e) { logger.warn(`[Maintenance] feature_usage_log sweep failed: ${e.message}`); }
+setInterval(() => {
+  try { db.pruneAlertDecisions(ALERT_DECISIONS_RETENTION_DAYS); }
+  catch (e) { logger.warn(`[Maintenance] alert_decisions sweep failed: ${e.message}`); }
+}, 24 * 60 * 60 * 1000);
+setInterval(() => {
+  try { db.pruneFeatureUsageLog(FEATURE_USAGE_RETENTION_DAYS); }
+  catch (e) { logger.warn(`[Maintenance] feature_usage_log sweep failed: ${e.message}`); }
+}, 24 * 60 * 60 * 1000);
+
 // ── Initialize Solana Pay Monitor ───────────────────────────────────────────
 const solanaMonitor = new SolanaPayMonitor(
   config,
@@ -248,10 +267,32 @@ function setPipelineStage(stage) {
 }
 
 function recordAlertDecision(rec) {
+  // ADM-002 + PIPE-016 (Bundle #2): memory buffer stays as fast cache for
+  // /api/decisions API; DB write becomes authoritative for post-mortem.
   appState.alertDecisions.push({ ts: new Date().toISOString(), ...rec });
   const over = appState.alertDecisions.length - appState.alertDecisionsCap;
   if (over > 0) appState.alertDecisions.splice(0, over);
+
+  // Fire-and-forget DB write. Error swallow — never block alert flow.
+  // db.recordAlertDecision already wraps the INSERT in try/catch + logger.error,
+  // so this outer try/catch is belt-and-suspenders for edge cases like `db`
+  // being undefined during early-boot.
+  try {
+    db.recordAlertDecision({
+      trendId: rec.trend_id ?? rec.trendId ?? null,
+      userId:  rec.user_id  ?? rec.userId  ?? null,
+      source:  rec.source   ?? null,
+      reason:  rec.reason,
+      gates:   rec.gates    ?? null,
+      weights: rec.weights  ?? null,
+      sent:    rec.sent === true || rec.reason === 'sent',
+    });
+  } catch (e) {
+    // db.recordAlertDecision already logs; this catch handles edge cases
+    // like `db` being undefined. Stay silent — alert flow is more important.
+  }
 }
+
 
 const STORAGE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const LOW_DISK_FREE_BYTES = 2 * 1024 * 1024 * 1024;

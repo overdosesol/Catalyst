@@ -848,7 +848,9 @@ class TrendDatabase {
   }
 
   /**
-   * Atomically confirm payment and upgrade user plan.
+   * Atomically confirm payment and upgrade user plan. Audit log row written
+   * inside the same transaction so confirm + upgrade + audit are atomic.
+   *
    * Returns upgraded payment row or null if payment is not eligible.
    */
   confirmPaymentAndUpgrade(reference, txSignature, durationDays = 30) {
@@ -866,12 +868,32 @@ class TrendDatabase {
       const plan = this.db.prepare(`SELECT id FROM plans WHERE name = ?`).get(payment.plan_name);
       if (!plan) throw new Error(`Plan not found: ${payment.plan_name}`);
 
+      // BILL-002 (Bundle #2): capture previous plan before UPDATE for audit payload.
+      const prev = this.db.prepare(`SELECT plan_id FROM users WHERE id = ?`).get(payment.user_id);
+
       const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
       this.db.prepare(`
         UPDATE users
         SET plan_id = ?, subscription_expires_at = ?, status = 'active'
         WHERE id = ?
       `).run(plan.id, expiresAt, payment.user_id);
+
+      // BILL-002 (Bundle #2): audit log inside the existing transaction.
+      this.recordAuditEvent(
+        'plan_upgrade',
+        null,                         // no admin actor — payment-driven
+        'system',
+        payment.user_id,
+        {
+          from_plan_id: prev?.plan_id ?? null,
+          to_plan_id:   plan.id,
+          to_plan_name: payment.plan_name,
+          expires_at:   expiresAt,
+          source:       'payment_confirmed',
+          payment_id:   payment.id,
+        },
+        true,
+      );
 
       return { ...payment, tx_signature: sig };
     });
@@ -890,17 +912,44 @@ class TrendDatabase {
   }
 
   /**
-   * Upgrade user plan after payment
+   * Upgrade user plan after payment (atomic). Writes audit row inside the
+   * same transaction so plan change + audit are committed together.
+   *
+   * @param {number} userId
+   * @param {string} planName
+   * @param {number} durationDays
+   * @param {Object} [opts]
+   * @param {number|null} [opts.actorUserId] - admin id, null = system/payment-driven
+   * @param {string} [opts.source] - 'admin_panel' | 'payment_confirmed' | 'cron' | ...
    */
-  upgradePlan(userId, planName, durationDays = 30) {
+  upgradePlan(userId, planName, durationDays = 30, opts = {}) {
+    // BILL-002 / ADM-005 (Bundle #2): atomic UPDATE + audit log write.
     const plan = this.db.prepare(`SELECT id FROM plans WHERE name = ?`).get(planName);
     if (!plan) throw new Error(`Plan not found: ${planName}`);
 
     const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
-    this.db.prepare(`
-      UPDATE users SET plan_id = ?, subscription_expires_at = ?, status = 'active'
-      WHERE id = ?
-    `).run(plan.id, expiresAt, userId);
+    const tx = this.db.transaction(() => {
+      const prev = this.db.prepare(`SELECT plan_id FROM users WHERE id = ?`).get(userId);
+      this.db.prepare(`
+        UPDATE users SET plan_id = ?, subscription_expires_at = ?, status = 'active'
+        WHERE id = ?
+      `).run(plan.id, expiresAt, userId);
+      this.recordAuditEvent(
+        'plan_upgrade',
+        opts.actorUserId ?? null,
+        opts.actorUserId ? 'admin' : 'system',
+        userId,
+        {
+          from_plan_id: prev?.plan_id ?? null,
+          to_plan_id:   plan.id,
+          to_plan_name: planName,
+          expires_at:   expiresAt,
+          source:       opts.source || 'unknown',
+        },
+        true,
+      );
+    });
+    tx();
   }
 
   // ── Broadcast history ───────────────────────────────────────────────────────
@@ -2363,6 +2412,161 @@ class TrendDatabase {
 
   close() {
     this.db.close();
+  }
+
+  // ── Bundle #2 (2026-06-07): observability persistence ───────────────────
+  // See docs/superpowers/specs/2026-06-07-observability-persistence-design.md
+
+  /**
+   * Record an admin-side audit event (plan changes, admin actions, etc.).
+   * Synchronous insert. Safe to call inside an outer db.transaction(); will
+   * participate in that transaction's atomicity.
+   *
+   * @param {string} eventType - e.g. 'plan_grant_admin', 'plan_revoke', 'plan_upgrade'
+   * @param {number|null} actorUserId - admin doing the action (null = system)
+   * @param {string} actorKind - 'admin' | 'system' | 'user_self'
+   * @param {number|null} targetUserId - the user affected
+   * @param {Object|null} payload - JSON-serializable structured payload
+   * @param {boolean} success
+   */
+  recordAuditEvent(eventType, actorUserId, actorKind, targetUserId, payload, success = true) {
+    try {
+      return this.db.prepare(`
+        INSERT INTO admin_audit_log (event_type, actor_user_id, actor_kind, target_user_id, payload_json, success)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        eventType,
+        actorUserId ?? null,
+        actorKind || 'admin',
+        targetUserId ?? null,
+        payload ? JSON.stringify(payload) : null,
+        success ? 1 : 0,
+      );
+    } catch (e) {
+      this.logger.error('[audit] recordAuditEvent failed', { err: e.message, eventType, actorUserId, targetUserId });
+      return null;
+    }
+  }
+
+  /**
+   * Record one alert-dispatcher decision. Called from src/index.js
+   * recordAlertDecision() as a fire-and-forget dual write. Errors are
+   * swallowed — never blocks the alert flow.
+   *
+   * @param {Object} rec
+   * @param {number|null} rec.trendId
+   * @param {number|null} rec.userId
+   * @param {string|null} rec.source
+   * @param {string} rec.reason - 'sent' | 'skipped_seen' | ...
+   * @param {Object|null} [rec.gates]
+   * @param {Object|null} [rec.weights]
+   * @param {boolean} [rec.sent]
+   */
+  recordAlertDecision({ trendId, userId, source, reason, gates, weights, sent }) {
+    try {
+      return this.db.prepare(`
+        INSERT INTO alert_decisions (trend_id, user_id, source, reason, gates_json, weights_json, sent)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        trendId ?? null,
+        userId ?? null,
+        source || null,
+        reason,
+        gates ? JSON.stringify(gates) : null,
+        weights ? JSON.stringify(weights) : null,
+        sent ? 1 : 0,
+      );
+    } catch (e) {
+      this.logger.error('[audit] recordAlertDecision failed', { err: e.message, trendId, userId, reason });
+      return null;
+    }
+  }
+
+  /**
+   * Record one feature usage hit (cost cap event). Called from dashboard
+   * cost-cap callsites instead of mutating in-memory Maps.
+   *
+   * @param {number} userId
+   * @param {string} feature - 'manualAnalysis' | 'catalyst'
+   */
+  recordFeatureUsage(userId, feature) {
+    if (!userId || !feature) return null;
+    try {
+      return this.db.prepare(`
+        INSERT INTO feature_usage_log (user_id, feature) VALUES (?, ?)
+      `).run(userId, feature);
+    } catch (e) {
+      this.logger.error('[audit] recordFeatureUsage failed', { err: e.message, userId, feature });
+      return null;
+    }
+  }
+
+  /**
+   * Get all hit timestamps (epoch ms) for user/feature within the last
+   * `windowMs` milliseconds. Returns ASC-ordered array; empty on error or
+   * no hits. Matches the legacy in-memory `hits` array shape so caller
+   * code (cooldown check, length-based cap) is preserved.
+   *
+   * @param {number} userId
+   * @param {string} feature
+   * @param {number} windowMs
+   * @returns {number[]}
+   */
+  getRecentFeatureUsageHits(userId, feature, windowMs) {
+    if (!userId || !feature || !windowMs) return [];
+    try {
+      const sinceMs = Date.now() - windowMs;
+      // strftime('%s', ts) returns UTC seconds-since-epoch (text). Cast →
+      // INTEGER and multiply by 1000 for ms. Compared against sinceMs in
+      // both filter and SELECT for consistency.
+      const rows = this.db.prepare(`
+        SELECT CAST(strftime('%s', ts) AS INTEGER) * 1000 AS ms
+        FROM feature_usage_log
+        WHERE user_id = ?
+          AND feature = ?
+          AND CAST(strftime('%s', ts) AS INTEGER) * 1000 > ?
+        ORDER BY ts ASC
+      `).all(userId, feature, sinceMs);
+      return rows.map(r => r.ms);
+    } catch (e) {
+      this.logger.error('[audit] getRecentFeatureUsageHits failed', { err: e.message, userId, feature });
+      return [];
+    }
+  }
+
+  /**
+   * Delete alert_decisions older than `retentionDays`. Called daily.
+   * Returns number of rows deleted.
+   */
+  pruneAlertDecisions(retentionDays) {
+    try {
+      const res = this.db.prepare(`DELETE FROM alert_decisions WHERE ts < datetime('now', ?)`)
+        .run(`-${retentionDays} days`);
+      if (res.changes > 0) {
+        this.logger.info(`[Maintenance] alert_decisions: pruned ${res.changes} rows older than ${retentionDays}d`);
+      }
+      return res.changes;
+    } catch (e) {
+      this.logger.warn(`[Maintenance] pruneAlertDecisions failed: ${e.message}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Delete feature_usage_log older than `retentionDays`. Called daily.
+   */
+  pruneFeatureUsageLog(retentionDays) {
+    try {
+      const res = this.db.prepare(`DELETE FROM feature_usage_log WHERE ts < datetime('now', ?)`)
+        .run(`-${retentionDays} days`);
+      if (res.changes > 0) {
+        this.logger.info(`[Maintenance] feature_usage_log: pruned ${res.changes} rows older than ${retentionDays}d`);
+      }
+      return res.changes;
+    } catch (e) {
+      this.logger.warn(`[Maintenance] pruneFeatureUsageLog failed: ${e.message}`);
+      return 0;
+    }
   }
 }
 
