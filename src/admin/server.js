@@ -673,8 +673,10 @@ class AdminServer {
     // Curated model sets for cleaner admin UX
     const curated = {
       xai: [
+        'grok-4-1-fast-reasoning',
         'grok-4-1-fast-non-reasoning',
         'grok-4-fast-non-reasoning',
+        'grok-4.20-0309-reasoning',
         'grok-4.20-0309-non-reasoning',
         'grok-3-mini',
       ],
@@ -4535,6 +4537,24 @@ function DecisionsPage() {
                     }
                   }, lbl);
                 })(),
+                // Deep Escalation badge — did this trend go through Stage 2, and how.
+                d.deepDiveReason && (() => {
+                  const map = {
+                    escalation: { icon: '⚡', label: 'Escalated', color: '#e17055', bg: 'rgba(225,112,85,.12)', tip: 'Deep Escalation: тренд отправлен на Stage 2 как недооценённый (эвристика) или по флагу needsDeeperLook' },
+                    high_meme:  { icon: '🔍', label: 'Stage 2',   color: '#a29bfe', bg: 'rgba(162,155,254,.12)', tip: 'Прошёл Stage 2 deep-dive обычным путём (high meme), без эскалации' },
+                  };
+                  const m = map[d.deepDiveReason];
+                  if (!m) return null;
+                  return h('span', {
+                    title: m.tip,
+                    style: {
+                      fontSize: 11, padding: '2px 7px', borderRadius: 4,
+                      color: m.color, background: m.bg,
+                      border: '1px solid ' + m.color + '33',
+                      fontWeight: 600,
+                    }
+                  }, m.icon + ' ' + m.label);
+                })(),
                 d.preset && h('span', null, '🎯 ', h('b', null, d.preset)),
                 d.userChatId && h('span', null, '👤 @', d.userChatId)
               ),
@@ -5291,7 +5311,8 @@ function BotPage() {
         },
           React.createElement('option',{value:''},'— не задано (reasoning off) —'),
           (() => {
-            const list = (aiModels.xai || []).slice();
+            const isReasoning = m => /reasoning|mini/i.test(m) && !/non-reasoning/i.test(m);
+            const list = (aiModels.xai || []).filter(isReasoning);
             const cur = aiDraft.stage2ReasoningModel;
             if (cur && !list.includes(cur)) list.unshift(cur);
             return list.map(m => React.createElement('option',{key:m,value:m},m));
