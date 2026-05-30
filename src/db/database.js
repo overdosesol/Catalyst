@@ -1838,18 +1838,51 @@ class TrendDatabase {
    * Does NOT touch users/plans/payments.
    */
   cleanupAlerts(daysOld = 30) {
-    const cutoff = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000).toISOString();
+    const cutoff = sqliteCutoff(daysOld * 24 * 60 * 60 * 1000);
 
+    // foreign_keys=ON (Bundle #10) means a trend cannot be deleted while ANY
+    // child row still references it. The aged-out trend set is the source of
+    // truth; we delete its dependents in child→parent order INSIDE the txn,
+    // then the trends themselves. alert_score_history is ON DELETE CASCADE so
+    // it clears automatically — the rest (notifications, feedback_votes,
+    // hidden_trends, x_analysis_history) have no cascade and must be explicit.
+    // NB: we delete children of the OLD-TREND set, not by their own age — a
+    // fresh notification on an old trend must still go, or the parent delete
+    // would abort the whole transaction (this was the crash: 2026-05-29).
     const runTxn = this.db.transaction((dateCutoff) => {
-      const notifResult = this.db.prepare(`DELETE FROM notifications WHERE sent_at < ?`).run(dateCutoff);
-      const trendsResult = this.db.prepare(`DELETE FROM trends WHERE first_seen_at < ?`).run(dateCutoff);
-      // Safety pass for potential orphan rows if FK checks were disabled earlier
-      this.db.prepare(`DELETE FROM notifications WHERE trend_id NOT IN (SELECT id FROM trends)`).run();
-      return {
-        cutoff: dateCutoff,
-        trendsDeleted: trendsResult.changes,
-        notificationsDeleted: notifResult.changes,
-      };
+      const oldTrendIds = this.db
+        .prepare(`SELECT id FROM trends WHERE first_seen_at < ?`)
+        .all(dateCutoff)
+        .map(r => r.id);
+
+      if (oldTrendIds.length === 0) {
+        // Still clear genuinely-old notifications (e.g. orphaned/legacy rows).
+        const notifResult = this.db.prepare(`DELETE FROM notifications WHERE sent_at < ?`).run(dateCutoff);
+        return { cutoff: dateCutoff, trendsDeleted: 0, notificationsDeleted: notifResult.changes };
+      }
+
+      // Chunk the IN(...) list so we never blow past SQLite's variable limit
+      // (default 999) on a large backlog.
+      const CHUNK = 400;
+      let notifDeleted = 0;
+      let trendsDeleted = 0;
+      for (let i = 0; i < oldTrendIds.length; i += CHUNK) {
+        const slice = oldTrendIds.slice(i, i + CHUNK);
+        const ph = slice.map(() => '?').join(',');
+        // children first (no ON DELETE CASCADE on these)
+        notifDeleted += this.db.prepare(`DELETE FROM notifications      WHERE trend_id IN (${ph})`).run(...slice).changes;
+        this.db.prepare(`DELETE FROM feedback_votes       WHERE trend_id IN (${ph})`).run(...slice);
+        this.db.prepare(`DELETE FROM hidden_trends        WHERE trend_id IN (${ph})`).run(...slice);
+        this.db.prepare(`DELETE FROM x_analysis_history   WHERE trend_id IN (${ph})`).run(...slice);
+        // parent last (alert_score_history cascades automatically)
+        trendsDeleted += this.db.prepare(`DELETE FROM trends            WHERE id       IN (${ph})`).run(...slice).changes;
+      }
+
+      // Also drop notifications older than cutoff whose trend already rotated
+      // out in a previous run (legacy orphans from the pre-FK era).
+      notifDeleted += this.db.prepare(`DELETE FROM notifications WHERE sent_at < ?`).run(dateCutoff).changes;
+
+      return { cutoff: dateCutoff, trendsDeleted, notificationsDeleted: notifDeleted };
     });
 
     const result = runTxn(cutoff);

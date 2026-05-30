@@ -805,8 +805,13 @@ function startScheduler() {
     const midnight = new Date(now);
     midnight.setHours(24, 0, 0, 0);
     setTimeout(() => {
-      db.cleanup(30);
-      db.resetDailyAlertCounts();
+      // Each task is isolated: a failure in cleanup must never skip the daily
+      // alert-count reset, and neither must ever crash the process via an
+      // uncaughtException (a FK error in cleanup did exactly that, 2026-05-29).
+      try { db.cleanup(30); }
+      catch (e) { logger.error(`Daily cleanup failed: ${e.message}`); }
+      try { db.resetDailyAlertCounts(); }
+      catch (e) { logger.error(`Daily alert-count reset failed: ${e.message}`); }
       logger.info('Daily cleanup + alert count reset done');
       scheduleDailyTasks();
     }, midnight.getTime() - now.getTime());

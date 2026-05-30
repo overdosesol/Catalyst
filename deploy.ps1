@@ -112,7 +112,7 @@ if ($success) {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "  OK - Catalyst deployed (Docker)!" -ForegroundColor Green
-    Write-Host "  Dashboard: http://<server-ip>:8080" -ForegroundColor Cyan
+    Write-Host "  Dashboard: https://catalyst.example.com" -ForegroundColor Cyan
     Write-Host "  Admin:     localhost-only on server (127.0.0.1:8081)" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Green
 } else {
