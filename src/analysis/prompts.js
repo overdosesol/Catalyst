@@ -58,6 +58,7 @@ For every trend, return:
 • isGenuinelyInteresting:    Boolean. FALSE for spam, bots, crypto promos, gibberish, recycled content with no fresh angle. TRUE for genuine narratives even if memePotential is low. This is a final SAFETY filter — Stage 0b already mostly filters these out, but you have the broader-context view to catch what slipped through.
 • category, viralityScore, memePotential: ECHO Stage 0b values verbatim. Set these from the input "GeminiScoring" / "Category" lines.
 • scoreOverride:             null in 95% of cases. {"value": int 0-100, "reason": "one-sentence why"} only when Stage 0b missed obvious context.
+- needsDeeperLook: set true when this trend's importance is genuinely AMBIGUOUS — the title may hide the real story, judging it needs context you don't have, or it could be bigger than the surface suggests. Put a short why in escalationReason. Do NOT set it just because a score is high; this flags UNCERTAINTY, not interest. When unsure, use false and an empty escalationReason.
 
 ━━━ ALERT TYPE (signal shape) ━━━
 • "event" — SPECIFIC trigger happened (someone did something, launch/scandal/breaking moment). If whyNow non-empty pointing to outside trigger → almost always "event".
@@ -292,6 +293,8 @@ export const STAGE1_RESPONSE_SCHEMA = {
           // scoreOverride defaults to null on most outputs, so requiring it
           // costs us nothing — model just emits "scoreOverride": null.
           'scoreOverride',
+          'needsDeeperLook',
+          'escalationReason',
         ],
         properties: {
           title:                  { type: 'string', description: 'Trend title in English' },
@@ -359,6 +362,8 @@ export const STAGE1_RESPONSE_SCHEMA = {
               },
             ],
           },
+          needsDeeperLook: { type: 'boolean' },
+          escalationReason: { type: 'string', maxLength: 200, description: 'If needsDeeperLook is true, one short reason; else empty string' },
         },
       },
     },
