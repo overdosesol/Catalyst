@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SERVER="${1:-root@37.1.196.83}"
+SERVER="${1:-root@136.244.82.53}"
 REMOTE_DIR="${2:-/opt/catalyst}"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP_ARCHIVE="/tmp/catalyst_deploy_$$.zip"
@@ -52,6 +52,6 @@ rm -f "$TMP_ARCHIVE"
 echo ""
 echo "═══════════════════════════════════════════════════════"
 echo "✅ Catalyst задеплоен (Docker)"
-echo "🌐 Dashboard: http://37.1.196.83:8080"
+echo "🌐 Dashboard: https://catalystparser.io"
 echo "🔒 Admin: localhost-only (127.0.0.1:8081 на сервере)"
 echo "═══════════════════════════════════════════════════════"

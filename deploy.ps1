@@ -1,5 +1,5 @@
 param(
-    [string]$Server = "root@37.1.196.83",
+    [string]$Server = "root@136.244.82.53",
     [string]$RemoteDir = "/opt/catalyst"
 )
 
@@ -112,7 +112,7 @@ if ($success) {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "  OK - Catalyst deployed (Docker)!" -ForegroundColor Green
-    Write-Host "  Dashboard: http://37.1.196.83:8080" -ForegroundColor Cyan
+    Write-Host "  Dashboard: https://catalystparser.io" -ForegroundColor Cyan
     Write-Host "  Admin:     localhost-only on server (127.0.0.1:8081)" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Green
 } else {
