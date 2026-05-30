@@ -349,6 +349,33 @@ export function isUnderscored(trend, th = DEFAULT_ESCALATION_THRESHOLDS) {
          _escalItemCount(trend) >= th.bigCluster;
 }
 
+// Build the Stage 2 deep-dive candidate list: high-meme (existing gate) + escalated
+// (under-scored or model-flagged), under a shared `cap` with `reserve` slots held for
+// escalations. Unused slots in either group reflow to the other. Tags each pick with
+// `_deepDiveReason` for telemetry. google_trends excluded (x_search needs a URL).
+export function selectDeepDiveCandidates({ stage1Results, stage2Threshold, cap, reserve, forceStage2 = false, thresholds }) {
+  const eligible = stage1Results.filter(t => (t.source || '').toLowerCase() !== 'google_trends');
+
+  const highMeme = eligible.filter(t => forceStage2 ||
+    ((Number(t.memePotential) || 0) >= stage2Threshold && t.clusterMetrics?.isNovel !== false));
+  const highMemeSet = new Set(highMeme);
+
+  const escalated = eligible
+    .filter(t => !highMemeSet.has(t) && (isUnderscored(t, thresholds) || t.needsDeeperLook === true))
+    .sort((a, b) => escalationSignalStrength(b) - escalationSignalStrength(a));
+
+  const R       = Math.max(0, Math.min(reserve, cap));
+  const escTake = Math.min(escalated.length, R);
+  const hmTake  = Math.min(highMeme.length, cap - escTake);
+  const escExtra = Math.min(escalated.length - escTake, cap - escTake - hmTake);
+
+  const picks = [
+    ...highMeme.slice(0, hmTake).map(t => { t._deepDiveReason = 'high_meme'; return t; }),
+    ...escalated.slice(0, escTake + escExtra).map(t => { t._deepDiveReason = 'escalation'; return t; }),
+  ];
+  return picks; // length <= cap by construction
+}
+
 /**
  * AI Scorer — uses xAI Responses API to analyze trend virality and meme potential.
  *
