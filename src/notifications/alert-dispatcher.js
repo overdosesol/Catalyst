@@ -272,6 +272,10 @@ export async function dispatchAlerts({ trends, deps, source = 'scan' }) {
           scoreSource:   trend.scoreSource   || null,
           scoreOverride: trend.scoreOverride || null,
           memePotential: trend.memePotential ?? null,
+          // Deep Escalation path tag (in-memory from scorer.selectDeepDiveCandidates):
+          // 'escalation' = under-scored / needsDeeperLook second-chance into Stage 2;
+          // 'high_meme'  = normal meme-gate Stage 2; null = no Stage 2 deep-dive.
+          deepDiveReason: trend._deepDiveReason || null,
         };
 
         const gates = [];
