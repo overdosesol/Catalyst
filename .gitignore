@@ -9,3 +9,9 @@ logs/
 # Claude Code worktrees (temporary isolated copies, not for version control)
 .claude/worktrees/
 .superpowers/
+
+# grok-cli experiment artifacts: prompt builds, raw responses, and prod-trend
+# dumps are generated locally for parity-checks — never commit (contain prod data).
+experiments/grok-cli/out/
+experiments/grok-cli/trends.json
+experiments/grok-cli/*.jsonl
