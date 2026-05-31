@@ -378,6 +378,24 @@ export function selectDeepDiveCandidates({ stage1Results, stage2Threshold, cap, 
 }
 
 /**
+ * Run `worker(item, index)` over items with at most `limit` in flight.
+ * Returns results in INPUT order (critical: Stage 1 maps responses by index).
+ */
+export async function runBounded(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) break;
+      results[i] = await worker(items[i], i);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
+/**
  * AI Scorer — uses xAI Responses API to analyze trend virality and meme potential.
  *
  * v3 changes:
@@ -719,18 +737,24 @@ class Scorer {
       stage2OutputTokens: 0,
     };
 
-    for (let i = 0; i < trends.length; i += batchSize) {
-      const batch = trends.slice(i, i + batchSize);
-      try {
-        const scored = await this._analyzeBatchStage1(batch, metrics, systemPrompt);
-        stage1Results.push(...scored);
-      } catch (error) {
-        this.logger.error(`Stage 1 batch failed: ${error.message}`);
-        stage1Results.push(...this._fallback(batch, 'AI unavailable'));
-      }
+    const batches = [];
+    for (let i = 0; i < trends.length; i += batchSize) batches.push(trends.slice(i, i + batchSize));
 
-      if (i + batchSize < trends.length) {
-        await new Promise(r => setTimeout(r, 2000));
+    if (this.current.transport === 'cli') {
+      // CLI is slow (~70-90s/batch) — run with bounded concurrency instead of serially.
+      const batchResultArrays = await runBounded(
+        batches,
+        this.current.concurrency || 4,
+        (batch) => this._scoreBatchWithFallback(batch, metrics, systemPrompt)
+      );
+      for (const scored of batchResultArrays) stage1Results.push(...scored);
+    } else {
+      for (let bi = 0; bi < batches.length; bi++) {
+        const scored = await this._scoreBatchWithFallback(batches[bi], metrics, systemPrompt);
+        stage1Results.push(...scored);
+        if (bi + 1 < batches.length) {
+          await new Promise(r => setTimeout(r, 2000));
+        }
       }
     }
 
@@ -863,9 +887,43 @@ class Scorer {
     return stage1Results;
   }
 
+  // ─── Stage 1 batch resilience helpers ───────────────────────────────────────
+
+  // One batch with resilience: cli retry → http fallback → heuristic.
+  async _scoreBatchWithFallback(batch, metrics, systemPrompt) {
+    const rt = this.current;
+    if (rt.transport === 'cli') {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try { return await this._analyzeBatchStage1(batch, metrics, systemPrompt, rt); }
+        catch (e) { this.logger.warn(`[grokcli] batch attempt ${attempt} failed: ${e.message}`); }
+      }
+      const httpRt = this._firstHttpRuntime();
+      if (httpRt) {
+        this.logger.warn('[grokcli] falling back to HTTP provider for this batch');
+        try { return await this._analyzeBatchStage1(batch, metrics, systemPrompt, httpRt); }
+        catch (e) { this.logger.error(`[grokcli] http fallback also failed: ${e.message}`); }
+      }
+      return this._fallback(batch, 'grokcli + http fallback unavailable');
+    }
+    try { return await this._analyzeBatchStage1(batch, metrics, systemPrompt, null); }
+    catch (e) { this.logger.error(`Stage 1 batch failed: ${e.message}`); return this._fallback(batch, 'AI unavailable'); }
+  }
+
+  // First http provider that has a key, as a runtime config (for cli fallback).
+  _firstHttpRuntime() {
+    for (const name of ['xai', 'openai', 'gemini']) {
+      const cfg = this.providers[name];
+      if (cfg?.apiKey) {
+        return { provider: name, transport: 'http', model: cfg.defaultModel,
+                 apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, enabled: true };
+      }
+    }
+    return null;
+  }
+
   // ─── Stage 1: base scoring via Responses API (no tools) ────────────────────
 
-  async _analyzeBatchStage1(trends, metrics = null, systemPrompt = null) {
+  async _analyzeBatchStage1(trends, metrics = null, systemPrompt = null, runtime = null) {
     const prompt  = buildAnalysisPrompt(trends);
     // Mirror the assembly order in scoreTrends() when called standalone
     // (e.g. from manual-submit pipeline) so cache prefix stays consistent.
@@ -892,6 +950,7 @@ class Scorer {
         schema: STAGE1_RESPONSE_SCHEMA,
       },
       reasoningEffort: this.openaiReasoningEffort,
+      runtimeOverride: runtime,
     });
 
     if (metrics) {
