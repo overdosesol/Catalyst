@@ -58,3 +58,27 @@ export function callGrokCli({ bin = 'grok', prompt, timeoutMs = 180000, cwd, log
     });
   });
 }
+
+/**
+ * Cheap liveness check: `grok models` prints "logged in with grok.com" + the
+ * model list when the cached OIDC session is valid, or "not authenticated"
+ * when it's dead. No scoring cost. Returns false on any error/timeout.
+ */
+export function probeGrokSession({ bin = 'grok', timeoutMs = 30000 } = {}) {
+  return new Promise(resolve => {
+    const env = { ...process.env };
+    delete env.XAI_API_KEY;
+    const child = spawn(bin, ['models'], { env, shell: process.platform === 'win32' });
+    let out = '';
+    let settled = false;
+    const done = v => { if (!settled) { settled = true; clearTimeout(t); resolve(v); } };
+    const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} done(false); }, timeoutMs);
+    child.stdout.on('data', d => { out += d.toString(); });
+    child.on('error', () => done(false));
+    child.on('close', () => {
+      const ok = /logged in with grok|Available models|grok-build/i.test(out) &&
+                 !/not authenticated/i.test(out);
+      done(ok);
+    });
+  });
+}
