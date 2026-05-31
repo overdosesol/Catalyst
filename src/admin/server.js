@@ -5039,7 +5039,7 @@ function BotPage() {
   const [broadcasts, setBroadcasts] = useState([]);
   const [aiCfg, setAiCfg] = useState(null);
   const [aiDraft, setAiDraft] = useState({ provider: 'xai', model: 'grok-4-1-fast-non-reasoning', stage2Enabled: true, deepReasoningEnabled: false, stage2ReasoningModel: '', escalationReserve: 2 });
-  const [aiModels, setAiModels] = useState({ xai: [], openai: [], gemini: [] });
+  const [aiModels, setAiModels] = useState({ xai: [], openai: [], gemini: [], grokcli: [] });
   const [aiModelsError, setAiModelsError] = useState('');
   const [editedPlans, setEditedPlans] = useState({});
   const [msg, setMsg] = useState('');
@@ -5072,7 +5072,7 @@ function BotPage() {
     try {
       const cfg = await api('/api/ai-config');
       setAiCfg(cfg);
-      setAiDraft({ provider: cfg.provider, model: cfg.model, stage2Enabled: !!cfg.stage2Enabled, deepReasoningEnabled: !!cfg.deepReasoningEnabled, stage2ReasoningModel: cfg.stage2ReasoningModel || '', escalationReserve: cfg.escalationReserve ?? 2, grokcliModel: cfg.grokcliModel || 'grok-build' });
+      setAiDraft({ provider: cfg.provider, model: cfg.model, stage2Enabled: !!cfg.stage2Enabled, deepReasoningEnabled: !!cfg.deepReasoningEnabled, stage2ReasoningModel: cfg.stage2ReasoningModel || '', escalationReserve: cfg.escalationReserve ?? 2 });
     } catch (_) {}
   };
 
