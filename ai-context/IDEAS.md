@@ -102,7 +102,7 @@ TODO:
 
 #### ✅ Stage 1 grokcli provider — SHIPPED (2026-06-01)
 
-Путь «CLI как Stage 1 провайдер» реализован и залит в main. Plan: `docs/superpowers/plans/2026-06-01-grokcli-stage1-provider.md`. Ships OFF (default provider не изменён); оператор включает через admin-селектор. Только 30/60-мин циклы. Подробности — в SESSION_CONTEXT §AI provider config.
+Путь «CLI как Stage 1 провайдер» реализован в ветке `experiment/grok-cli` (НЕ смержен в main, ждёт parity-check оператора перед мержем/деплоем). Plan: `docs/superpowers/plans/2026-06-01-grokcli-stage1-provider.md`. Ships OFF (default provider не изменён); оператор включает через admin-селектор. Только 30/60-мин циклы. Подробности — в SESSION_CONTEXT §AI provider config.
 
 #### ❌ Grok Build CLI по подписке вместо API — ПРОВЕРЕНО, НЕ РАБОТАЕТ (2026-06-01)
 
