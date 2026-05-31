@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { writeFileSync, chmodSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { callGrokCli } from '../src/analysis/grok-cli.js';
+import { callGrokCli, probeGrokSession } from '../src/analysis/grok-cli.js';
 
 // On Windows, Node's spawn() uses CreateProcess which doesn't honour the
 // shebang line — only .exe/.bat/.cmd are directly executable. We create a
@@ -45,4 +45,16 @@ test('throws on timeout (and kills child)', async () => {
     () => callGrokCli({ bin, prompt: 'hi', timeoutMs: 500, cwd: tmpdir() }),
     /timeout/i
   );
+});
+
+test('probeGrokSession true when models lists grok-build', async () => {
+  const bin = fakeGrok('echo "You are logged in with grok.com"; echo "Default model: grok-build"');
+  const alive = await probeGrokSession({ bin, timeoutMs: 5000 });
+  assert.strictEqual(alive, true);
+});
+
+test('probeGrokSession false when not authenticated', async () => {
+  const bin = fakeGrok('echo "You are not authenticated."');
+  const alive = await probeGrokSession({ bin, timeoutMs: 5000 });
+  assert.strictEqual(alive, false);
 });
