@@ -220,11 +220,12 @@ Feature flag `MARKET_STAGE_DETECTION=1`. 4 состояния: `none / tokenizin
 
 ## AI provider config
 
-Stage 1 provider/model — runtime-tunable из админки (вкладка «Бот» → AI Pipeline). **Default**: `gpt-5.4-mini` (OpenAI), reasoning_effort=low.
+Stage 1 provider/model — runtime-tunable из админки (вкладка «Бот» → AI Pipeline). Default в коде: `gpt-5.4-mini` (OpenAI). **АКТИВНО В ПРОДЕ сейчас (2026-06-01): `grokcli`** (`grok-build` по подписке) — оператор переключил после parity-проверки; Stage 2 reasoning ON (`grok-4.20-0309-reasoning`), scan-интервал 30мин.
 
 - xAI curated: `grok-4-1-fast-non-reasoning`, `grok-4-fast-non-reasoning`, `grok-4.20-0309-non-reasoning`, `grok-3-mini`.
 - OpenAI curated: `gpt-4.1-mini/.1`, `gpt-4o-mini/4o`, `gpt-5-mini/5`, `gpt-5.4-mini/5.4-nano/5.4`.
-- **grokcli** (4-й вариант) — Grok Build CLI по подписке SuperGrok, без per-token биллинга. **SHIPS OFF** (default provider не изменён). Admin-switchable через тот же селектор. Ограничения: только 30/60-мин циклы (латенси ~70-90с/батч, bounded-concurrency=4; не для 15-мин цикла). Для работы требует одноразового `grok login --device-auth` на прод-хосте + `/root/.grok` смонтированного в контейнер (см. `docker-compose.yml`). CLI retry×2 → HTTP-fallback на первый доступный HTTP-провайдер → heuristic-fallback. Session expiry → auto-fallback (проверяется через `probeGrokSession` в `grok-cli.js`).
+- **grokcli** (4-й вариант, `src/analysis/grok-cli.js`) — Grok Build CLI по подписке SuperGrok, **без per-token биллинга** (Stage 1 = 0 API-токенов, подтверждено в бою: `stage1_calls=N in=0 out=0`). Admin-switchable через тот же селектор. Ограничения: только 30/60-мин циклы (латенси ~70-90с/батч, bounded-concurrency=4; не для 15-мин цикла — Stage1 не успеет). CLI retry×2 → HTTP-fallback на первый доступный HTTP-провайдер → heuristic. Session expiry → auto-fallback (`probeGrokSession` на boot + каждые 5мин, `index.js`).
+  - **Прод-инфра (хост 136.244.82.53, см. WORKLOG 2026-06-01):** CLI-бинарь ставится в образ (`Dockerfile`, нужен `bash` — alpine его не несёт). Сессия `grok login --device-auth` живёт на хосте `/root/.grok`, монтируется в `/home/node/.grok` (compose). **Права критичны:** контейнер бежит под uid 1000 (node), CLI нужен READ+WRITE в `~/.grok` → каталог должен быть `chown 1000:1000` (иначе `Permission denied` → тихий fallback на API). Держится тремя слоями: `setup_remote.sh` re-chown'ит на каждом деплое + ежечасный cron `/etc/cron.d/grok-auth-perms` + ручной фикс. При DR-rebuild повторить `grok login`.
 
 **Stage 1 features (OpenAI only)**: Structured Outputs через `STAGE1_RESPONSE_SCHEMA` гарантирует shape `{trends:[...]}`. xAI fallback: `parsed.trends || parsed.results`. Reasoning effort через `OPENAI_REASONING_EFFORT` env. Не-reasoning модели авто-ретраятся без `reasoning` через 400-error path.
 
