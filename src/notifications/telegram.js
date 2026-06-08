@@ -1854,8 +1854,8 @@ class TelegramNotifier {
    *   1. If trigger already in DB → render & return (no Grok call, no cooldown).
    *   2. Plan gate is enforced upstream (callback dispatcher) - by the time we
    *      get here the user is pro/admin.
-   *   3. Per-user 15min cooldown (admin bypasses) - checked against the last
-   *      time THIS user actually triggered a Grok call (cached reads don't count).
+   *   3. Per-user daily cap (per-plan; admin bypasses) - replaced the old
+   *      15-min cooldown 2026-05-10 (Catalyst is cheap, daily caps suffice).
    *   4. DB-level claim via `db.claimTriggerSearch` to dedupe parallel clicks.
    *   5. Call Grok → save result → render. On failure release the lock so a
    *      retry is possible.

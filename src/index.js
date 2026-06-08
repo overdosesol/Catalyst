@@ -283,9 +283,9 @@ hotRefresher.start();
 // the refresher and the twitter instance exist (see _attachTwitter call below).
 const tagRefresher = new TagRefresher({ db, logger, config, telegram });
 
-// Hourly check loop — fires refreshAll() when 7-day cooldown expired AND
-// auto-refresh is enabled AND circuit breaker is closed. First check 5 min
-// after boot to keep startup light.
+// Hourly check loop — fires refreshAll() when the cooldown expired (default
+// 2 days, TAG_REFRESH_COOLDOWN_DAYS) AND auto-refresh is enabled AND circuit
+// breaker is closed. First check 5 min after boot to keep startup light.
 setTimeout(() => {
   setInterval(async () => {
     try {
