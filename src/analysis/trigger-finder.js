@@ -16,7 +16,7 @@
  * Cost note: reasoning is ~15× more expensive per token than the
  * fast-non-reasoning model used in Stage 2. We accept this because:
  *   1. Calls are user-initiated (~5-50/day total, not 100s)
- *   2. Per-user cooldown (15min) is enforced upstream by the Telegram handler
+ *   2. Per-user daily cap (per-plan) is enforced upstream by the Telegram handler
  *   3. The reasoning premium buys us cross-tweet timestamp correlation,
  *      originator detection, and astroturf vs organic distinction —
  *      things `non-reasoning` can't do reliably from a single x_search batch
