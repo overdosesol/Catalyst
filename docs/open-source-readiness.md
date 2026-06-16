@@ -18,19 +18,18 @@ The first cleanup pass removed internal/private paths from the public tree with
 `git rm --cached`, genericized production host/domain/bucket references, and
 removed hard-coded public URLs from deploy and Telegram notification code.
 
-The remaining blocker for a history-preserving publication is git history:
-older commits still contain private operational context and real-looking
-`ADMIN_API_KEY` examples in `.env.example` blobs.
+The local history has now been rewritten to remove the known internal paths,
+old production references, and real-looking `.env.example` key examples.
 
-Recommended publication path: keep the history, but clean it with a dedicated
-history-rewrite tool, then re-scan the rewritten repository before making it
-public.
+Remaining publication work: push the rewritten `main` history intentionally,
+clean or delete any remote non-main branches that still point to old history,
+and address dependency audit findings before promoting the project broadly.
 
 ## Findings
 
-### OSR-001: Private/internal files are tracked
+### OSR-001: Private/internal files were tracked
 
-Severity: High
+Severity: Resolved locally / verify remote before publication
 
 Evidence:
 
@@ -39,23 +38,22 @@ Evidence:
   `EvilCatPack`.
 - They have been removed from the current public tree with `git rm --cached`
   and added to `.gitignore`.
+- Local rewritten history now reports 0 matches for these paths.
 
 Impact:
 
 Publishing these files would expose agent session rules, private worklogs,
 internal plans, local assistant settings, old source snapshots, and possibly
-third-party asset files without clear redistribution evidence. Current-tree
-cleanup prevents future commits from carrying them, but old commits still need
-history cleanup if history is preserved.
+third-party asset files without clear redistribution evidence.
 
 Recommendation:
 
-Keep these files local/private. Before publication with history, remove them
-from historical commits with a history-rewrite tool and re-scan.
+Keep these files local/private. Before publication, make sure GitHub no longer
+has old refs that point to the pre-rewrite history.
 
-### OSR-002: Production infrastructure details are present
+### OSR-002: Production infrastructure details were present
 
-Severity: High
+Severity: Resolved locally / verify remote before publication
 
 Evidence:
 
@@ -64,8 +62,8 @@ Evidence:
 - `DEPLOY.md`, `scripts/nginx-catalyst.conf`, `scripts/check-cert-expiry.sh`,
   internal context, and audit/planning docs referenced the live domain,
   hostnames, SSH commands, backup bucket names, and operational procedures.
-- Current public files now use example domains/placeholders instead of the live
-  host/domain/bucket.
+- Current public files and rewritten history now use example
+  domains/placeholders instead of the live host/domain/bucket.
 
 Impact:
 
@@ -75,17 +73,17 @@ internet users a map of the production setup.
 Recommendation:
 
 Keep real production runbooks in private operator notes or a password manager.
-Re-scan history before publication.
+Re-scan GitHub after force-pushing the rewritten history.
 
-### OSR-003: `.env.example` history contains real-looking key values
+### OSR-003: `.env.example` history contained real-looking key values
 
-Severity: Medium
+Severity: Resolved locally / rotate if any doubt
 
 Evidence:
 
 - Current `.env.example` has been changed to use explicit placeholders.
-- History scan found 13 generic high-entropy `ADMIN_API_KEY` assignments in
-  `.env.example` blobs.
+- Historical real-looking `ADMIN_API_KEY` / `DASHBOARD_API_KEY` examples were
+  rewritten to placeholders.
 - Local `.env` values for checked secret keys did not match historical
   `.env.example` values.
 
@@ -96,8 +94,7 @@ were ever used in production or staging, they must be considered compromised.
 
 Recommendation:
 
-Rotate any matching live keys before publication. If publishing with history,
-rewrite history and re-scan.
+Rotate any matching live keys before publication if there is any doubt.
 
 ### OSR-004: Open source metadata is mostly in place
 
@@ -185,11 +182,11 @@ as production-ready for third parties.
 
 1. Rotate secrets before publication if there is any doubt.
 2. Keep the sanitized working tree on `main`.
-3. Rewrite history to remove internal/private files and old real-looking
-   example keys while preserving the visible development timeline.
-4. Re-scan the rewritten repository with gitleaks or TruffleHog.
-5. Publish the cleaned repository and turn on GitHub secret scanning and
-   Dependabot.
+3. Force-push the rewritten `main` history intentionally.
+4. Clean or delete any remote non-main branches that still point to old
+   history.
+5. Re-scan the GitHub repository with gitleaks or TruffleHog.
+6. Turn on GitHub secret scanning and Dependabot.
 
 ## Proposed Public Exclude List
 
@@ -206,13 +203,17 @@ Review and remove from the public release:
 
 ## Scan Notes
 
-Custom scans performed:
+Custom scans performed before and after local history rewrite:
 
 - Current tracked tree scan for common secret formats.
 - Git history unique text blob scan for common secret formats.
 - Search for production host/domain references.
 - Search for internal tracked file groups.
 - `npm audit --omit=dev`.
+- Post-rewrite path scan for excluded internal paths: 0 findings.
+- Post-rewrite old production string scan: 0 findings.
+- Post-rewrite `.env.example` bad API key line scan: 0 findings.
+- Post-rewrite common secret-format scan: 0 findings.
 
 Limitations:
 
