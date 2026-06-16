@@ -21,9 +21,8 @@ removed hard-coded public URLs from deploy and Telegram notification code.
 The local history has now been rewritten to remove the known internal paths,
 old production references, and real-looking `.env.example` key examples.
 
-Remaining publication work: push the rewritten `main` history intentionally,
-clean or delete any remote non-main branches that still point to old history,
-and address dependency audit findings before promoting the project broadly.
+Remaining publication work: submit the Codex for OSS application and monitor
+GitHub alerts after the dependency cleanup is pushed.
 
 ## Findings
 
@@ -118,26 +117,49 @@ Recommendation:
 Fill in package `author` if desired, and expand contributor docs after the
 first public release.
 
-### OSR-005: Dependency audit has production vulnerabilities
+### OSR-005: Dependency audit had production vulnerabilities
 
-Severity: Medium
+Severity: Resolved locally / verify after push
 
 Evidence:
 
-- `npm audit --omit=dev` reports 10 vulnerabilities: 2 critical, 1 high, 7
-  moderate.
-- The main chain is `node-telegram-bot-api -> request/form-data/qs`.
-- `lodash` also reports high/moderate advisories.
+- Before cleanup, `npm audit --omit=dev` reported 10 vulnerabilities: 2
+  critical, 1 high, 7 moderate.
+- GitHub Dependabot alerts are enabled and reported 10 open alerts before the
+  local dependency update.
+- GitHub Dependabot security updates are enabled.
+- The vulnerable chain was `node-telegram-bot-api -> request/form-data/qs`.
+- `node-telegram-bot-api` was upgraded to 1.1.0.
+- Local `npm audit --omit=dev` now reports 0 vulnerabilities.
 
 Impact:
 
-Publishing with known vulnerabilities is not automatically fatal, but public
-users will see the audit output immediately.
+The public repository should stop showing these Dependabot alerts after the
+dependency update is committed and pushed.
 
 Recommendation:
 
-Triage before release. The `node-telegram-bot-api` fix is a breaking major
-upgrade, so it needs testing. `lodash` may be fixable with a normal audit fix.
+Push the dependency update, then verify GitHub Dependabot alerts close.
+
+### OSR-008: GitHub secret scanning is enabled
+
+Severity: Resolved
+
+Evidence:
+
+- The repository is public.
+- GitHub secret scanning is enabled.
+- GitHub secret scanning push protection is enabled.
+- GitHub secret scanning currently reports 0 open alerts.
+
+Impact:
+
+GitHub will scan pushes/history for supported secret patterns and block known
+secret leaks before they land when push protection detects them.
+
+Recommendation:
+
+Keep secret scanning and push protection enabled.
 
 ### OSR-006: Asset licensing is unclear
 
@@ -182,11 +204,10 @@ as production-ready for third parties.
 
 1. Rotate secrets before publication if there is any doubt.
 2. Keep the sanitized working tree on `main`.
-3. Force-push the rewritten `main` history intentionally.
-4. Clean or delete any remote non-main branches that still point to old
-   history.
-5. Re-scan the GitHub repository with gitleaks or TruffleHog.
-6. Turn on GitHub secret scanning and Dependabot.
+3. Re-scan the GitHub repository with gitleaks or TruffleHog.
+4. Push the local dependency cleanup commit.
+5. Verify GitHub Dependabot alerts close.
+6. Prepare and submit the Codex for OSS application.
 
 ## Proposed Public Exclude List
 
@@ -210,6 +231,14 @@ Custom scans performed before and after local history rewrite:
 - Search for production host/domain references.
 - Search for internal tracked file groups.
 - `npm audit --omit=dev`.
+- GitHub Dependabot alerts: enabled, 10 open alerts before local dependency
+  cleanup.
+- GitHub Dependabot security updates: enabled.
+- Local `npm audit --omit=dev` after dependency cleanup: 0 vulnerabilities.
+- GitHub repository visibility: public.
+- GitHub secret scanning: enabled.
+- GitHub secret scanning push protection: enabled.
+- GitHub secret scanning open alerts: 0.
 - Post-rewrite path scan for excluded internal paths: 0 findings.
 - Post-rewrite old production string scan: 0 findings.
 - Post-rewrite `.env.example` bad API key line scan: 0 findings.
