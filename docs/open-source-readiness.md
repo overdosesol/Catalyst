@@ -21,8 +21,11 @@ removed hard-coded public URLs from deploy and Telegram notification code.
 The local history has now been rewritten to remove the known internal paths,
 old production references, and real-looking `.env.example` key examples.
 
+Public-facing repository docs and GitHub contribution templates have been
+prepared for the first OSS release.
+
 Remaining publication work: submit the Codex for OSS application and monitor
-GitHub alerts after the dependency cleanup is pushed.
+GitHub alerts after new public commits.
 
 ## Findings
 
@@ -227,6 +230,31 @@ Recommendation:
 
 Before re-enabling or promoting paid plans, either remove the amount-matching
 fallback or gate it behind an explicit manual-review/operator workflow.
+
+### OSR-010: Public repository presentation is prepared
+
+Severity: Resolved
+
+Evidence:
+
+- `README.md` now explains the project purpose, pipeline, architecture,
+  OpenAI/GPT usage, Codex-assisted maintenance workflow, setup, deployment,
+  contribution flow, security policy and roadmap.
+- `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `MAINTAINERS.md`,
+  `ROADMAP.md`, issue templates and a pull request template are present.
+- `package.json` now has repository, bugs, homepage, author and Node engine
+  metadata.
+
+Impact:
+
+The public repository now gives reviewers a clearer picture of what the project
+does, how it is maintained, how contributors should engage, and how AI/Codex
+fits into the project without making unsupported claims.
+
+Recommendation:
+
+Use the README and ROADMAP wording as source material for the Codex for OSS
+application fields, especially the API-credit and maintainer-workflow answers.
 
 ## Recommended Release Strategy
 

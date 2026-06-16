@@ -1,30 +1,54 @@
 # Security Policy
 
-## Reporting a Vulnerability
+## Reporting A Vulnerability
 
 Please do not open public issues for vulnerabilities, leaked secrets, auth
-bypasses, payment bugs, or production deployment details.
+bypasses, payment bugs or production deployment details.
 
 For now, report security concerns privately to the repository owner. Include:
 
-- affected version or commit
-- a short reproduction path
-- expected vs actual behavior
-- any logs or screenshots with secrets redacted
+- affected commit or version;
+- a short reproduction path;
+- expected vs actual behavior;
+- logs or screenshots with secrets, tokens, chat IDs and provider responses
+  redacted.
+
+## Supported Versions
+
+Security fixes target the current `main` branch until the project starts
+publishing tagged releases.
 
 ## Scope
 
-This project is a single-operator Node.js application with a Telegram bot,
-SQLite storage, local deployment scripts, and optional third-party API
-integrations.
+Catalyst is a single-operator Node.js application with:
 
-Before running it in production, review your own deployment, rotate all keys
-that were ever committed or shared, and enable GitHub secret scanning and
-Dependabot alerts on the public repository.
+- Telegram bot auth and alerts;
+- SQLite storage;
+- dashboard and admin HTTP surfaces;
+- optional third-party API integrations;
+- local Docker/VPS deployment scripts;
+- Solana Pay billing support.
 
-## Known Security Notes
+Before running your own production deployment, review your environment, rotate
+all keys that were ever committed or shared, and enable GitHub secret scanning
+and Dependabot alerts on your fork.
 
-- Dashboard/admin tokens are currently stored in browser localStorage.
+## Current Security Notes
+
+- Dashboard bearer sessions are stored as hashed tokens server-side. The browser
+  keeps the active dashboard token in `sessionStorage` so it is not persisted
+  across browser restarts.
+- Admin still stores the operator key in browser `localStorage`; the admin panel
+  is designed for loopback/SSH-tunnel access only, not direct internet exposure.
 - Production secrets must live in `.env` or a private secret manager, never in
   git.
-- The pre-publication audit is tracked in `docs/open-source-readiness.md`.
+- The pre-publication audit is tracked in
+  [docs/open-source-readiness.md](docs/open-source-readiness.md).
+- The Solana Pay manual-transfer fallback is a known deferred risk. See
+  [ROADMAP.md](ROADMAP.md).
+
+## Disclosure Expectations
+
+Please give the maintainer reasonable time to investigate before sharing details
+publicly. If the report is valid, the fix and credit can be included in release
+notes unless you prefer to stay anonymous.

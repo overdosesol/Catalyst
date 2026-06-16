@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible Catalyst bug
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please do not include secrets, tokens, chat IDs, private logs or production host details.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: List the smallest set of steps that reproduces the issue.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "Node 20.x, Windows/Ubuntu, Docker or local"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste only redacted logs.
+      render: text

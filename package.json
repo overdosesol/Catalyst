@@ -1,7 +1,7 @@
 {
   "name": "catalyst",
   "version": "3.0.0",
-  "description": "24/7 AI-powered memecoin trend monitoring with multi-user Telegram bot and Solana Pay",
+  "description": "Open-source AI trend intelligence system with LLM scoring, Telegram alerts, dashboard and Solana Pay plans",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -18,8 +18,19 @@
     "solana",
     "memecoin"
   ],
-  "author": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/overdosesol/Narrative-Parser.git"
+  },
+  "bugs": {
+    "url": "https://github.com/overdosesol/Narrative-Parser/issues"
+  },
+  "homepage": "https://github.com/overdosesol/Narrative-Parser#readme",
+  "author": "Overdose",
   "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "better-sqlite3": "^12.8.0",
     "dotenv": "^17.3.1",
