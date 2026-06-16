@@ -51,6 +51,7 @@ ADMIN_API_KEY=<generate-with-openssl-rand-base64-32>
 DASHBOARD_API_KEY=<generate-with-openssl-rand-base64-32>
 PUBLIC_BASE_URL=https://catalyst.example.com
 DASHBOARD_ALLOWED_ORIGINS=https://catalyst.example.com
+TRUST_PROXY=1
 DB_PATH=/var/lib/catalyst/data/catalyst.db
 LOG_FILE=/var/log/catalyst/catalyst.log
 ```
@@ -729,9 +730,12 @@ docker compose logs app | grep -iE "oom|heap"
 
 ## 14. Future hardening (not blocking for v1)
 
+- **Optional Grok CLI provider** — normal Docker builds skip the external Grok
+  installer. To use `grokcli`, build with `INSTALL_GROK_CLI=1` and authenticate
+  inside the container volume: `docker compose exec catalyst grok login --device-auth`.
 - **Telegram webhook** — drops alert latency from 3-5s polling to ~instant
 - **Redis** for `_authVerifyAttempts`, `_authInitiateAttempts`,
-  `_manualAnalysisHits` — if/when running multiple processes
+  `_streamTickets`, `_manualAnalysisHits` — if/when running multiple processes
 - **Content-Security-Policy** header — currently relaxed because the SPA
   inlines its own React + styles into the HTML. Tightening requires
   splitting CSS/JS into separate files.

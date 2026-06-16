@@ -39,17 +39,24 @@ RUN apk add --no-cache \
     git \
     bash
 
-# Установить Grok Build CLI (pinned version, binary в /root/.grok/bin/grok).
-# BEST-EFFORT: если x.ai недоступен в момент сборки — образ всё равно собирается,
-# а grokcli-провайдер просто будет недоступен (скоринг падает на API-fallback,
-# фича ships OFF). Это сознательно: install НЕ должен ронять deploy-сборку и
-# гасить прод из-за внешней зависимости от x.ai (ср. инцидент 502 «деплой всё разом»).
+# Optional Grok Build CLI. Default is OFF so normal OSS builds do not execute
+# a remote installer. Enable explicitly with --build-arg INSTALL_GROK_CLI=1.
 ARG GROK_CLI_VERSION=0.2.14
-RUN (curl -fsSL https://x.ai/cli/install.sh | bash -s "${GROK_CLI_VERSION}" \
-      && cp -L /root/.grok/bin/grok /usr/local/bin/grok \
-      && chmod 755 /usr/local/bin/grok \
-      && /usr/local/bin/grok --version) \
-    || echo "WARN: Grok CLI install failed (x.ai unreachable?) — grokcli provider will be unavailable; scoring falls back to API."
+ARG INSTALL_GROK_CLI=0
+RUN if [ "${INSTALL_GROK_CLI}" = "1" ]; then \
+      if curl -fsSL https://x.ai/cli/install.sh -o /tmp/grok-install.sh \
+        && bash /tmp/grok-install.sh "${GROK_CLI_VERSION}" \
+        && cp -L /root/.grok/bin/grok /usr/local/bin/grok \
+        && chmod 755 /usr/local/bin/grok \
+        && /usr/local/bin/grok --version; then \
+        rm -f /tmp/grok-install.sh; \
+      else \
+        rm -f /tmp/grok-install.sh; \
+        echo "WARN: Grok CLI install failed (x.ai unreachable?) — grokcli provider will be unavailable; scoring falls back to API."; \
+      fi; \
+    else \
+      echo "Skipping optional Grok CLI install (INSTALL_GROK_CLI=0)"; \
+    fi
 
 # node:20-alpine already has user 'node' (uid/gid 1000) - use it directly
 

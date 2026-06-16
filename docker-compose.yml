@@ -28,8 +28,9 @@ services:
       - catalyst_data:/data
       # Логи
       - catalyst_logs:/logs
-      # Grok CLI сессия (operator runs `grok login --device-auth` once on host)
-      - /root/.grok:/home/node/.grok
+      # Grok CLI session. Run `docker compose exec catalyst grok login --device-auth`
+      # if you intentionally enable the grokcli provider.
+      - catalyst_grok:/home/node/.grok
     
     # Ограничение ресурсов
     deploy:
@@ -68,6 +69,8 @@ volumes:
   catalyst_data:
     driver: local
   catalyst_logs:
+    driver: local
+  catalyst_grok:
     driver: local
 
 networks:

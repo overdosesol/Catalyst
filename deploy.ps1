@@ -61,7 +61,7 @@ Write-Host ""
 Write-Host "[3/5] Uploading archive..." -ForegroundColor Yellow
 # ServerAliveInterval/CountMax keep the SSH channel breathing during the upload
 # so a slow link or NAT idle-timeout doesn't drop us mid-transfer.
-scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $TEMP_ZIP "${Server}:/tmp/catalyst.zip"
+scp -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $TEMP_ZIP "${Server}:/tmp/catalyst.zip"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: scp failed." -ForegroundColor Red
     exit 1
@@ -72,7 +72,7 @@ $ENV_FILE = Join-Path $LOCAL_DIR ".env"
 if (Test-Path $ENV_FILE) {
     Write-Host ""
     Write-Host "[4/5] Uploading .env..." -ForegroundColor Yellow
-    scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $ENV_FILE "${Server}:/tmp/catalyst.env"
+    scp -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $ENV_FILE "${Server}:/tmp/catalyst.env"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: .env upload failed." -ForegroundColor Red
         exit 1
@@ -85,7 +85,7 @@ if (Test-Path $ENV_FILE) {
 $SETUP_FILE = Join-Path $LOCAL_DIR "setup_remote.sh"
 Write-Host ""
 Write-Host "[5/5] Running remote Docker setup..." -ForegroundColor Yellow
-scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $SETUP_FILE "${Server}:/tmp/catalyst_setup.sh"
+scp -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $SETUP_FILE "${Server}:/tmp/catalyst_setup.sh"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: setup script upload failed." -ForegroundColor Red
     exit 1
@@ -94,9 +94,9 @@ if ($LASTEXITCODE -ne 0) {
 # === Sync production backup script (single source of truth: scripts/catalyst-backup.sh) ===
 Write-Host "Syncing catalyst-backup.sh to VPS..."
 $BACKUP_SCRIPT = Join-Path $LOCAL_DIR "scripts\catalyst-backup.sh"
-scp -o StrictHostKeyChecking=no $BACKUP_SCRIPT "${Server}:/usr/local/bin/catalyst-backup.sh"
+scp -o StrictHostKeyChecking=accept-new $BACKUP_SCRIPT "${Server}:/usr/local/bin/catalyst-backup.sh"
 if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: failed to scp catalyst-backup.sh" -ForegroundColor Red; exit 1 }
-ssh -o StrictHostKeyChecking=no $Server "chmod +x /usr/local/bin/catalyst-backup.sh"
+ssh -o StrictHostKeyChecking=accept-new $Server "chmod +x /usr/local/bin/catalyst-backup.sh"
 if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: failed to chmod catalyst-backup.sh" -ForegroundColor Red; exit 1 }
 Write-Host "Backup script synced." -ForegroundColor Green
 # === End backup sync ===
@@ -106,7 +106,7 @@ Write-Host "Backup script synced." -ForegroundColor Green
 # the auth handshake count down on small VPS where re-auth is expensive.
 $success = $false
 $remoteCmd = "mkdir -p '$RemoteDir' && REMOTE_DIR='$RemoteDir' bash /tmp/catalyst_setup.sh 2>&1"
-ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $Server $remoteCmd | Tee-Object -Variable lines | ForEach-Object {
+ssh -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 $Server $remoteCmd | Tee-Object -Variable lines | ForEach-Object {
     Write-Host $_
     if ($_ -match "DEPLOY_SUCCESS") { $success = $true }
 }

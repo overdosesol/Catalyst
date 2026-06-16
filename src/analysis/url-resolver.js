@@ -10,7 +10,143 @@
 // All resolvers throw on unrecoverable errors (404, parse failure, no title).
 // Caller is expected to catch and report to the user.
 
+import dns from 'dns/promises';
+import net from 'net';
+
 const FETCH_TIMEOUT_MS = 8000;
+const GENERIC_MAX_REDIRECTS = 3;
+const GENERIC_MAX_HTML_BYTES = 1024 * 1024;
+
+function normalizeHostname(hostname) {
+  return String(hostname || '').trim().replace(/^\[|\]$/g, '').toLowerCase();
+}
+
+function isPrivateIPv4(ip) {
+  const parts = String(ip).split('.').map(n => Number(n));
+  if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a, b] = parts;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a >= 224) return true;
+  return false;
+}
+
+function isPrivateIPv6(ip) {
+  const s = String(ip).toLowerCase();
+  if (s === '::' || s === '::1') return true;
+  if (s.startsWith('fc') || s.startsWith('fd')) return true;
+  if (s.startsWith('fe8') || s.startsWith('fe9') || s.startsWith('fea') || s.startsWith('feb')) return true;
+  const mapped = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return isPrivateIPv4(mapped[1]);
+  const mappedHex = s.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mappedHex) {
+    const hi = parseInt(mappedHex[1], 16);
+    const lo = parseInt(mappedHex[2], 16);
+    return isPrivateIPv4(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+  }
+  return false;
+}
+
+function isPrivateAddress(ip) {
+  const family = net.isIP(ip);
+  if (family === 4) return isPrivateIPv4(ip);
+  if (family === 6) return isPrivateIPv6(ip);
+  return true;
+}
+
+async function assertPublicHttpUrl(rawUrl) {
+  let parsed;
+  try { parsed = new URL(rawUrl); }
+  catch { throw new Error('Invalid URL'); }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('URL must use http(s)');
+  }
+
+  const hostname = normalizeHostname(parsed.hostname);
+  if (!hostname || hostname === 'localhost' || hostname.endsWith('.localhost')) {
+    throw new Error('Local URLs are not allowed');
+  }
+
+  if (net.isIP(hostname)) {
+    if (isPrivateAddress(hostname)) throw new Error('Private-network URLs are not allowed');
+    return parsed;
+  }
+
+  let answers;
+  try {
+    answers = await dns.lookup(hostname, { all: true, verbatim: false });
+  } catch {
+    throw new Error('URL host could not be resolved');
+  }
+  if (!answers.length || answers.some(a => isPrivateAddress(a.address))) {
+    throw new Error('Private-network URLs are not allowed');
+  }
+  return parsed;
+}
+
+async function readTextLimited(response, maxBytes) {
+  const len = Number(response.headers.get('content-length') || 0);
+  if (len > maxBytes) throw new Error('Response too large');
+
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error('Response too large');
+    return text;
+  }
+
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      try { await reader.cancel(); } catch {}
+      throw new Error('Response too large');
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function fetchPublicHtml(rawUrl, { maxRedirects = GENERIC_MAX_REDIRECTS } = {}) {
+  let current = String(rawUrl);
+
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const parsed = await assertPublicHttpUrl(current);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const r = await fetch(parsed.toString(), {
+        signal: controller.signal,
+        redirect: 'manual',
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Catalyst/3.0)' },
+      });
+
+      if ([301, 302, 303, 307, 308].includes(r.status)) {
+        const loc = r.headers.get('location');
+        if (!loc) throw new Error(`redirect ${r.status} without Location`);
+        current = new URL(loc, parsed).toString();
+        continue;
+      }
+
+      if (!r.ok) throw new Error(`fetch ${r.status}`);
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
+      if (!ct.includes('text/html')) throw new Error('Not an HTML page');
+      return { html: await readTextLimited(r, GENERIC_MAX_HTML_BYTES), finalUrl: parsed.toString() };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw new Error('Too many redirects');
+}
 
 /**
  * Top-level dispatcher. Picks a resolver based on the host and returns the
@@ -439,18 +575,8 @@ async function _resolveTiktokViaOembed(url, videoId) {
 // ── Generic web page (og:image / og:title) ──────────────────────────────────
 
 export async function resolveGenericUrl(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const r = await fetch(url, {
-      signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Catalyst/3.0)' },
-    });
-    clearTimeout(timer);
-    if (!r.ok) throw new Error(`fetch ${r.status}`);
-    const ct = (r.headers.get('content-type') || '').toLowerCase();
-    if (!ct.includes('text/html')) throw new Error('Not an HTML page');
-    const html = await r.text();
+    const { html, finalUrl } = await fetchPublicHtml(url);
     const pick = (re) => { const m = html.match(re); return m ? m[1] : ''; };
     const title = pick(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
                || pick(/<title[^>]*>([^<]+)<\/title>/i);
@@ -466,7 +592,7 @@ export async function resolveGenericUrl(url) {
       title: cleanTitle,
       originalTitle: cleanTitle,
       description: cleanDesc,
-      url,
+      url: finalUrl,
       metrics: {
         upvotes: 0,
         comments: 0,
@@ -478,7 +604,7 @@ export async function resolveGenericUrl(url) {
         searchQuery: '(manual)',
       },
     };
-  } finally {
-    clearTimeout(timer);
+  } catch (e) {
+    throw new Error(e?.message || 'URL fetch failed');
   }
 }

@@ -9,6 +9,10 @@ import { sqliteCutoff } from '../utils/sqlite-time.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function authTokenHash(token) {
+  return crypto.createHash('sha256').update(String(token || ''), 'utf8').digest('hex');
+}
+
 class TrendDatabase {
   constructor(dbPath, logger) {
     this.logger = logger;
@@ -450,10 +454,10 @@ class TrendDatabase {
     // ── Flow ───────────────────────────────────────────────────────────────────
     //   1) Browser calls /api/auth/initiate     → row with session_id only
     //   2) Bot receives /start auth_<session_id>→ row gets chat_id + 6-digit code
-    //   3) Browser calls /api/auth/verify       → row gets long-lived token,
+    //   3) Browser calls /api/auth/verify       → row gets long-lived token hash,
     //                                             code is cleared
     //   4) Browser sends Authorization: Bearer <token> on all requests;
-    //      middleware looks up chat_id via the token row
+    //      middleware looks up chat_id via the token hash row
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS auth_sessions (
         session_id       TEXT PRIMARY KEY,
@@ -461,13 +465,20 @@ class TrendDatabase {
         code             TEXT,
         code_expires_at  DATETIME,
         token            TEXT,
+        token_hash       TEXT,
         token_expires_at DATETIME,
         user_agent       TEXT,
         created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
         verified_at      DATETIME
       )
     `);
+    const authCols = this.db.prepare(`PRAGMA table_info(auth_sessions)`).all();
+    if (!authCols.find(c => c.name === 'token_hash')) {
+      this.db.exec(`ALTER TABLE auth_sessions ADD COLUMN token_hash TEXT`);
+      this.logger.info('DB migration: added column token_hash to auth_sessions');
+    }
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_auth_token   ON auth_sessions(token)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_auth_token_hash ON auth_sessions(token_hash)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_auth_chat    ON auth_sessions(chat_id)`);
 
     // Housekeeping — prune anything that's fully expired and has no token.
@@ -725,9 +736,9 @@ class TrendDatabase {
     ).get(sessionId);
     if (!session) return null;
     // Already verified — refuse (security)
-    if (session.token) return { alreadyVerified: true };
+    if (session.token || session.token_hash) return { alreadyVerified: true };
 
-    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const code = String(crypto.randomInt(100000, 1000000));
     const expires = new Date(Date.now() + ttlMs).toISOString();
     this.db.prepare(`
       UPDATE auth_sessions
@@ -743,11 +754,11 @@ class TrendDatabase {
    */
   getAuthSessionStatus(sessionId) {
     const s = this.db.prepare(
-      `SELECT chat_id, code, code_expires_at, token
+      `SELECT chat_id, code, code_expires_at, token, token_hash
          FROM auth_sessions WHERE session_id = ?`
     ).get(sessionId);
     if (!s) return { exists: false };
-    if (s.token) return { exists: true, verified: true };
+    if (s.token || s.token_hash) return { exists: true, verified: true };
     const hasCode = !!(s.chat_id && s.code &&
       s.code_expires_at && new Date(s.code_expires_at).getTime() > Date.now());
     return { exists: true, verified: false, codeReady: hasCode };
@@ -771,14 +782,15 @@ class TrendDatabase {
     try { if (!crypto.timingSafeEqual(a, b)) return null; } catch { return null; }
 
     const token = crypto.randomBytes(32).toString('hex');
+    const hash = authTokenHash(token);
     const expires = new Date(Date.now() + ttlDays * 24 * 3600_000).toISOString();
 
     this.db.prepare(`
       UPDATE auth_sessions
-         SET token = ?, token_expires_at = ?, verified_at = CURRENT_TIMESTAMP,
+         SET token = NULL, token_hash = ?, token_expires_at = ?, verified_at = CURRENT_TIMESTAMP,
              code = NULL, code_expires_at = NULL
        WHERE session_id = ?
-    `).run(token, expires, sessionId);
+    `).run(hash, expires, sessionId);
 
     const user = this.getUserByChatId(s.chat_id);
     return { token, tokenExpiresAt: expires, chatId: s.chat_id, user };
@@ -790,14 +802,30 @@ class TrendDatabase {
    */
   getUserByAuthToken(token) {
     if (!token || typeof token !== 'string') return null;
+    const hash = authTokenHash(token);
     const row = this.db.prepare(
       `SELECT chat_id, token_expires_at
          FROM auth_sessions
+        WHERE token_hash = ?`
+    ).get(hash);
+    if (row) {
+      if (row.token_expires_at && new Date(row.token_expires_at).getTime() < Date.now()) return null;
+      return this.getUserByChatId(row.chat_id);
+    }
+
+    const legacy = this.db.prepare(
+      `SELECT session_id, chat_id, token_expires_at
+         FROM auth_sessions
         WHERE token = ?`
     ).get(token);
-    if (!row) return null;
-    if (row.token_expires_at && new Date(row.token_expires_at).getTime() < Date.now()) return null;
-    return this.getUserByChatId(row.chat_id);
+    if (!legacy) return null;
+    if (legacy.token_expires_at && new Date(legacy.token_expires_at).getTime() < Date.now()) return null;
+    this.db.prepare(`
+      UPDATE auth_sessions
+         SET token_hash = ?, token = NULL
+       WHERE session_id = ?
+    `).run(hash, legacy.session_id);
+    return this.getUserByChatId(legacy.chat_id);
   }
 
   /**
@@ -805,7 +833,11 @@ class TrendDatabase {
    */
   revokeAuthToken(token) {
     if (!token) return 0;
-    return this.db.prepare(`DELETE FROM auth_sessions WHERE token = ?`).run(token).changes;
+    const hash = authTokenHash(token);
+    return this.db.prepare(`
+      DELETE FROM auth_sessions
+       WHERE token_hash = ? OR token = ?
+    `).run(hash, token).changes;
   }
 
   /**
@@ -2706,7 +2738,8 @@ class TrendDatabase {
 
   pruneAuthSessions(maxAgeHours = 24) {
     const res = this.db.prepare(
-      `DELETE FROM auth_sessions WHERE token IS NULL AND created_at < datetime('now', ?)`
+      `DELETE FROM auth_sessions
+        WHERE token IS NULL AND token_hash IS NULL AND created_at < datetime('now', ?)`
     ).run(`-${maxAgeHours} hours`);
     return res.changes | 0;
   }

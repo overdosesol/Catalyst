@@ -180,25 +180,53 @@ Recommendation:
 Either remove `EvilCatPack` from the public repo, add verifiable licensing and
 attribution, or replace it with assets you own.
 
-### OSR-007: Local auth tokens are stored in browser localStorage
+### OSR-007: Browser and DB auth-token exposure
 
-Severity: Low to Medium
+Severity: Partially resolved
 
 Evidence:
 
-- Dashboard stores `ts_auth_token` in `localStorage`.
-- Admin stores `adminKey` in `localStorage`.
+- Dashboard now keeps `ts_auth_token` in `sessionStorage`, removes the legacy
+  `localStorage` key on load, and no longer places bearer tokens in avatar or
+  SSE URLs.
+- Dashboard auth sessions now store `token_hash` instead of new plaintext
+  bearer tokens. Legacy plaintext tokens migrate to `token_hash` on use.
+- Admin still stores `adminKey` in `localStorage`; admin is designed as an
+  operator-only, loopback/SSH-tunnel surface.
 
 Impact:
 
-Any XSS would expose these tokens. This may be acceptable for a solo/operator
-tool, but public users should know the tradeoff or the flow should move to a
-more robust session design.
+XSS would still be serious because browser JavaScript must attach the bearer
+token to API calls, but long-lived dashboard tokens are no longer persisted in
+localStorage or leaked through query strings.
 
 Recommendation:
 
-Document this in security notes or redesign auth before promoting the project
-as production-ready for third parties.
+For third-party production use, consider a full session-cookie + CSRF design or
+a frontend bundle split that supports a stricter CSP/Trusted Types posture.
+
+### OSR-009: Solana Pay manual-transfer fallback remains deferred
+
+Severity: Medium / postponed by owner
+
+Evidence:
+
+- `src/billing/solana-pay.js` still has a fallback that searches recent merchant
+  transactions and matches by amount/time when the Solana Pay `reference`
+  lookup does not find a transaction.
+- Owner explicitly asked not to change this path in the current security pass
+  because the project is paused.
+
+Impact:
+
+Reference-based Solana Pay verification is safer. Amount/time matching can be
+ambiguous when several users pay the same amount around the same time, and it
+is harder to reason about during disputes or replay-like edge cases.
+
+Recommendation:
+
+Before re-enabling or promoting paid plans, either remove the amount-matching
+fallback or gate it behind an explicit manual-review/operator workflow.
 
 ## Recommended Release Strategy
 

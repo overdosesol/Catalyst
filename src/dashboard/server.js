@@ -21,7 +21,8 @@ import { collectSubjectNames } from '../analysis/subject-names.js';
 import { getPlanEntitlements, shouldShowUsageCounter } from '../billing/entitlements.js';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { timingSafeEqual, createHash } from 'crypto';
+import { timingSafeEqual, createHash, randomBytes } from 'crypto';
+import net from 'net';
 import { UserRateLimiter } from '../utils/rate-limiter.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -62,6 +63,40 @@ function corsOriginFor(req) {
   if (!origin) return null;            // same-origin / non-browser request
   if (ALLOWED_ORIGINS.includes(origin)) return origin;
   return null;
+}
+
+function normalizeIp(ip) {
+  const s = String(ip || '').trim();
+  if (s.startsWith('::ffff:')) return s.slice(7);
+  return s;
+}
+
+function isTrustedProxyPeer(ip) {
+  const s = normalizeIp(ip);
+  if (s === '::1' || s === '127.0.0.1') return true;
+  if (net.isIP(s) !== 4) return false;
+  const parts = s.split('.').map(n => Number(n));
+  const [a, b] = parts;
+  return a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168);
+}
+
+function firstForwardedIp(req) {
+  const xff = String(req.headers?.['x-forwarded-for'] || '')
+    .split(',')[0]
+    .trim();
+  if (net.isIP(normalizeIp(xff))) return normalizeIp(xff);
+  const real = normalizeIp(req.headers?.['x-real-ip'] || '');
+  return net.isIP(real) ? real : '';
+}
+
+function clientIpForRateLimit(req, trustProxy = false) {
+  const socketIp = normalizeIp(req.socket?.remoteAddress || 'unknown');
+  if (trustProxy && isTrustedProxyPeer(socketIp)) {
+    return firstForwardedIp(req) || socketIp;
+  }
+  return socketIp;
 }
 
 /**
@@ -379,6 +414,10 @@ function json(res, status, data) {
   res.end(payload);
 }
 
+function publicErrorMessage(isProduction, err, fallback = 'Request failed') {
+  return isProduction ? fallback : String(err?.message || fallback);
+}
+
 /**
  * Normalize pbs.twimg.com URLs to the original-resolution variant.
  * Twitter serves multiple sizes via ?name=small|medium|large|orig; we want the
@@ -426,6 +465,8 @@ class DashboardServer {
   constructor(config, logger, db, appState, scanFn, telegram = null, triggerFinder = null, extras = {}) {
     this.config        = config.dashboard;
     this.fullConfig    = config;   // keep reference for telegram.botUsername, etc.
+    this.trustProxy    = !!config.trustProxy;
+    this.isProduction  = config.nodeEnv === 'production';
     this.logger        = logger;
     this.db            = db;
     this.appState      = appState;
@@ -443,6 +484,8 @@ class DashboardServer {
     this.server        = null;
     this.started       = Date.now();
     this.sseClients    = new Set();  // active Server-Sent Event subscribers
+    this._streamTickets = new Map(); // short-lived auth tickets for EventSource
+    this._STREAM_TICKET_TTL_MS = 30_000;
     this._sseKeepAlive = null;
     // Bundle #2 (2026-06-07): cost cap counters moved from in-memory Maps
     // to feature_usage_log DB table. See COST-003 — restart-resilient.
@@ -523,6 +566,34 @@ class DashboardServer {
     for (const res of this.sseClients) {
       try { res.write(payload); } catch (e) { /* drop */ }
     }
+  }
+
+  _sweepStreamTickets(now = Date.now()) {
+    for (const [ticket, rec] of this._streamTickets) {
+      if (now - rec.createdAt > this._STREAM_TICKET_TTL_MS) {
+        this._streamTickets.delete(ticket);
+      }
+    }
+  }
+
+  _handleStreamTicket(req, res) {
+    this._sweepStreamTickets();
+    const ticket = randomBytes(18).toString('base64url');
+    this._streamTickets.set(ticket, {
+      user: req.user,
+      createdAt: Date.now(),
+    });
+    return json(res, 200, { ticket, expiresInMs: this._STREAM_TICKET_TTL_MS });
+  }
+
+  _consumeStreamTicket(ticket) {
+    const t = String(ticket || '').trim();
+    if (!/^[A-Za-z0-9_-]{20,40}$/.test(t)) return null;
+    this._sweepStreamTickets();
+    const rec = this._streamTickets.get(t);
+    if (!rec) return null;
+    this._streamTickets.delete(t);
+    return rec.user || null;
   }
 
   start() {
@@ -684,14 +755,24 @@ class DashboardServer {
       return this._handleTwitterVideo(req, res, path);
     }
 
+    // SSE stream uses a short one-time ticket because EventSource cannot send
+    // Authorization headers and long-lived bearer tokens must not sit in URLs.
+    if (path === '/api/stream' && method === 'GET') {
+      const user = this._consumeStreamTicket(url.searchParams.get('ticket'));
+      if (!user) {
+        return json(res, 401, { error: 'Unauthorized - please sign in via Telegram' });
+      }
+      req.user = user;
+      return this._handleStream(req, res);
+    }
+
     // ── Bearer-token auth ──────────────────────────────────────────────────
     // Every /api/* route below this point requires a valid session token
-    // issued by the Telegram bot login flow. The token is passed as either:
-    //   • Authorization: Bearer <token>   (preferred)
-    //   • ?token=<token>                  (for EventSource — no custom headers)
+    // issued by the Telegram bot login flow. The token is passed only via
+    // Authorization: Bearer <token>; URL query tokens are deliberately refused.
     const authHeader = String(req.headers['authorization'] || '');
     const bearerMatch = authHeader.match(/^Bearer\s+([a-f0-9]{64})$/i);
-    const token = bearerMatch ? bearerMatch[1] : (url.searchParams.get('token') || '');
+    const token = bearerMatch ? bearerMatch[1] : '';
     const authUser = token ? this.db.getUserByAuthToken(token) : null;
 
     if (path.startsWith('/api/')) {
@@ -713,11 +794,7 @@ class DashboardServer {
     if (path === '/api/auth/avatar' && method === 'GET')  return this._handleAuthAvatar(req, res);
     if (path === '/api/auth/avatar/debug' && method === 'GET') return this._handleAuthAvatarDebug(req, res);
     if (path === '/api/auth/logout' && method === 'POST') return this._handleAuthLogout(req, res);
-
-    // SSE stream — pushed updates from server (new scans, etc.)
-    if (path === '/api/stream' && method === 'GET') {
-      return this._handleStream(req, res);
-    }
+    if (path === '/api/stream-ticket' && method === 'POST') return this._handleStreamTicket(req, res);
 
     try {
       if (path === '/api/trends'   && method === 'GET')  return this._handleTrends(req, res, url);
@@ -759,17 +836,16 @@ class DashboardServer {
       return json(res, 404, { error: 'Not found' });
     } catch (err) {
       this.logger.error(`Dashboard handler error: ${err.message}`);
-      return json(res, 500, { error: err.message });
+      return json(res, 500, { error: publicErrorMessage(this.isProduction, err, 'Internal server error') });
     }
   }
 
   // ── Auth handlers ───────────────────────────────────────────────────────────
 
   async _handleAuthInitiate(req, res) {
-    // Per-IP flood gate. Sweeps stale entries first (cheap O(active-IPs)
-    // per call). The connecting IP is whatever Node sees on the socket -
-    // that's the proxy IP behind nginx, the real client IP when direct.
-    const ip = String(req.socket?.remoteAddress || 'unknown');
+    // Per-IP flood gate. When TRUST_PROXY=1 and the peer is nginx/docker,
+    // rate-limit by the first forwarded client IP instead of the proxy IP.
+    const ip = clientIpForRateLimit(req, this.trustProxy);
     const now = Date.now();
     for (const [k, rec] of this._authInitiateAttempts) {
       if (now - rec.firstAttempt > this._AUTH_INITIATE_WINDOW_MS) {
@@ -948,7 +1024,11 @@ class DashboardServer {
         },
       });
     } catch (e) {
-      return json(res, 200, { ...info, error: e.message, stack: e.stack });
+      return json(res, 200, {
+        ...info,
+        error: publicErrorMessage(this.isProduction, e, 'Avatar refresh failed'),
+        stack: this.isProduction ? undefined : e.stack,
+      });
     }
   }
 
@@ -7271,13 +7351,17 @@ function useFocusTrap(containerRef, isOpen) {
 // /api/* request. On 401 we clear the token and show the login screen.
 const AUTH_TOKEN_KEY = 'ts_auth_token';
 let AUTH_TOKEN = '';
-try { AUTH_TOKEN = localStorage.getItem(AUTH_TOKEN_KEY) || ''; } catch (e) {}
+try {
+  AUTH_TOKEN = sessionStorage.getItem(AUTH_TOKEN_KEY) || localStorage.getItem(AUTH_TOKEN_KEY) || '';
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+} catch (e) {}
 const authListeners = new Set();
 function setAuthToken(tok) {
   AUTH_TOKEN = tok || '';
   try {
-    if (AUTH_TOKEN) localStorage.setItem(AUTH_TOKEN_KEY, AUTH_TOKEN);
-    else            localStorage.removeItem(AUTH_TOKEN_KEY);
+    if (AUTH_TOKEN) sessionStorage.setItem(AUTH_TOKEN_KEY, AUTH_TOKEN);
+    else            sessionStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_TOKEN_KEY);
   } catch (e) {}
   authListeners.forEach(fn => { try { fn(AUTH_TOKEN); } catch (e) {} });
 }
@@ -12305,6 +12389,51 @@ function AlertTypesRow({ initial }) {
   });
 }
 
+function AuthAvatarImage({ user, token, alt, fallback, onError }) {
+  const [src, setSrc] = useState('');
+  const key = user?.avatarKey || '';
+
+  useEffect(() => {
+    let objectUrl = '';
+    let cancelled = false;
+    setSrc('');
+
+    if (!user?.hasAvatar || !token) return () => {};
+
+    fetch('/api/auth/avatar?k=' + encodeURIComponent(key), {
+      headers: { 'Authorization': 'Bearer ' + token },
+    })
+      .then(r => {
+        if (r.status === 401) setAuthToken('');
+        if (!r.ok) throw new Error('avatar ' + r.status);
+        return r.blob();
+      })
+      .then(blob => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setSrc('');
+      });
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [user?.hasAvatar, key, token]);
+
+  if (!src) return fallback || null;
+  return h('img', {
+    src,
+    alt: alt || user?.username || 'avatar',
+    onError: (e) => {
+      if (onError) onError(e);
+      else e.target.style.display = 'none';
+    },
+  });
+}
+
 // ── AccountPanel — profile / plan / logout (extracted from SettingsPanel) ─────
 function AccountPanel({ onBack, user, onLogout }) {
   const modalRef = useRef(null);
@@ -12324,10 +12453,6 @@ function AccountPanel({ onBack, user, onLogout }) {
   const avatarLetter = (user && user.username)
     ? user.username.charAt(0).toUpperCase()
     : '?';
-  const avatarSrc = user?.hasAvatar
-    ? '/api/auth/avatar?token=' + encodeURIComponent(AUTH_TOKEN) + '&k=' + encodeURIComponent(user.avatarKey || '')
-    : null;
-
   const subExpiry = user?.subscriptionExpiresAt
     ? new Date(user.subscriptionExpiresAt).toLocaleDateString(localeTag(), { day: '2-digit', month: 'short', year: 'numeric' })
     : null;
@@ -12341,9 +12466,13 @@ function AccountPanel({ onBack, user, onLogout }) {
     // Profile hero
     h('div', { className: 'settings-card account-hero' },
       h('div', { className: 'account-avatar-big' },
-        avatarSrc
-          ? h('img', { src: avatarSrc, alt: user?.username || 'avatar', onError: (e) => { e.target.style.display = 'none'; } })
-          : avatarLetter
+        h(AuthAvatarImage, {
+          user,
+          token: AUTH_TOKEN,
+          alt: user?.username || 'avatar',
+          fallback: avatarLetter,
+          onError: (e) => { e.target.style.display = 'none'; },
+        })
       ),
       h('div', { className: 'account-hero-main' },
         h('div', { className: 'account-hero-name' },
@@ -13702,10 +13831,12 @@ function App() {
 
   // ── Live stream (Server-Sent Events) — push-based real-time refresh ─────────
   useEffect(() => {
+    if (!me || me === true) return;
     if (typeof EventSource === 'undefined') return;
 
     let es = null;
     let refreshTimer = null;
+    let reconnectTimer = null;
     let stopped = false;
 
     const scheduleRefresh = (delay = 600) => {
@@ -13716,12 +13847,17 @@ function App() {
       }, delay);
     };
 
-    const connect = () => {
+    const connect = async () => {
       if (stopped) return;
       if (!AUTH_TOKEN) return; // skip stream until user is signed in
+      let ticket = '';
       try {
-        // EventSource can't set custom headers — pass token as query param
-        es = new EventSource('/api/stream?token=' + encodeURIComponent(AUTH_TOKEN));
+        const data = await api('/stream-ticket', { method: 'POST' });
+        ticket = data.ticket || '';
+      } catch (e) { return; }
+      if (stopped || !ticket) return;
+      try {
+        es = new EventSource('/api/stream?ticket=' + encodeURIComponent(ticket));
       } catch (e) { return; }
 
       es.addEventListener('hello', () => { /* connected */ });
@@ -13735,8 +13871,13 @@ function App() {
         scheduleRefresh(400);
       });
       es.onerror = () => {
-        // EventSource auto-reconnects — browser uses the retry interval
-        // we send in the stream handshake.
+        try { es && es.close(); } catch (e) {}
+        if (!stopped && !reconnectTimer) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, 3000);
+        }
       };
     };
 
@@ -13745,9 +13886,10 @@ function App() {
     return () => {
       stopped = true;
       if (refreshTimer) clearTimeout(refreshTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (es) { try { es.close(); } catch (e) {} }
     };
-  }, []);
+  }, [me && me !== true ? me.chatId : '']);
 
   // ── Infinite scroll ────────────────────────────────────────────────────────
   // Auto-load the next page when the sentinel div enters the main feed's
@@ -14142,9 +14284,13 @@ function App() {
         },
           h('span', { className: 'nav-account-avatar' },
             (me && me !== true && me.hasAvatar)
-              ? h('img', {
-                  src: '/api/auth/avatar?token=' + encodeURIComponent(AUTH_TOKEN) + '&k=' + encodeURIComponent(me.avatarKey || ''),
+              ? h(AuthAvatarImage, {
+                  user: me,
+                  token: AUTH_TOKEN,
                   alt: me.username || 'avatar',
+                  fallback: (me && me !== true && me.username)
+                    ? me.username.charAt(0).toUpperCase()
+                    : icon('user', { size: 14 }),
                   onError: (e) => { e.target.style.display = 'none'; },
                 })
               : (me && me !== true && me.username)

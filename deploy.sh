@@ -30,27 +30,27 @@ echo "✅ Архив готов: $TMP_ARCHIVE"
 
 echo ""
 echo "[3/5] Загрузка архива на сервер..."
-scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$TMP_ARCHIVE" "$SERVER:/tmp/catalyst.zip"
+scp -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$TMP_ARCHIVE" "$SERVER:/tmp/catalyst.zip"
 
 if [ -f "$LOCAL_DIR/.env" ]; then
   echo "[4/5] Загрузка .env..."
-  scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$LOCAL_DIR/.env" "$SERVER:/tmp/catalyst.env"
+  scp -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$LOCAL_DIR/.env" "$SERVER:/tmp/catalyst.env"
 else
   echo "[4/5] .env локально не найден, оставляю серверный .env"
 fi
 
 echo ""
 echo "[5/5] Запуск remote setup..."
-scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$LOCAL_DIR/setup_remote.sh" "$SERVER:/tmp/catalyst_setup.sh"
+scp -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$LOCAL_DIR/setup_remote.sh" "$SERVER:/tmp/catalyst_setup.sh"
 # === Sync production backup script (single source of truth: scripts/catalyst-backup.sh) ===
 echo "Syncing catalyst-backup.sh to VPS..."
 BACKUP_SCRIPT="$LOCAL_DIR/scripts/catalyst-backup.sh"
-scp -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$BACKUP_SCRIPT" "$SERVER:/usr/local/bin/catalyst-backup.sh"
-ssh -o StrictHostKeyChecking=no "$SERVER" "chmod +x /usr/local/bin/catalyst-backup.sh"
+scp -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "$BACKUP_SCRIPT" "$SERVER:/usr/local/bin/catalyst-backup.sh"
+ssh -o StrictHostKeyChecking=accept-new "$SERVER" "chmod +x /usr/local/bin/catalyst-backup.sh"
 echo "Backup script synced."
 # === End backup sync ===
 
-ssh -o StrictHostKeyChecking=no "$SERVER" "REMOTE_DIR='$REMOTE_DIR' bash /tmp/catalyst_setup.sh"
+ssh -o StrictHostKeyChecking=accept-new "$SERVER" "REMOTE_DIR='$REMOTE_DIR' bash /tmp/catalyst_setup.sh"
 
 rm -f "$TMP_ARCHIVE"
 
