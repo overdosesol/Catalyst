@@ -9,10 +9,15 @@ logs
 
 # AI / dev context — not needed in image
 .claude
+.codex-backups
+.superpowers
 ai-context
+AGENTS.md
+OPEN_SOURCE_READINESS.md
 
 # Content / posts
 posts
+EvilCatPack
 
 # Deploy & local scripts — not part of the app
 deploy.ps1

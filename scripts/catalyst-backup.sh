@@ -70,7 +70,7 @@ find "$BACKUP_DIR" -name 'catalyst_*.db.gz' -mtime +14 -delete
 
 # Off-site copy to Backblaze B2 (B2 lifecycle rule handles its own retention: 30d hide + 1d delete)
 BACKUP_FILE="${BACKUP_DIR}/catalyst_${DATE}.db.gz"
-rclone copy "$BACKUP_FILE" b2:catalystparser-prod-backups/ --log-level INFO >> /var/log/catalyst-backup-rclone.log 2>&1
+rclone copy "$BACKUP_FILE" b2:catalyst-prod-backups/ --log-level INFO >> /var/log/catalyst-backup-rclone.log 2>&1
 
 SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
 echo "$(date -Is) backup OK: catalyst_${DATE}.db.gz ($SIZE)"

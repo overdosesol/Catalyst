@@ -14,7 +14,7 @@
 --   • stage1_examples   (column `category`)
 --
 -- BEFORE RUNNING: take a backup
---   docker exec catalystparser sqlite3 /app/data/trendscout.db ".backup /app/data/trendscout.db.bak-pre-cat-migration"
+--   docker exec catalyst-app sqlite3 /app/data/trendscout.db ".backup /app/data/trendscout.db.bak-pre-cat-migration"
 --   OR rely on the daily B2 backup that ran today.
 --
 -- ROLLBACK

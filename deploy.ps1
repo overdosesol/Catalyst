@@ -1,5 +1,5 @@
 param(
-    [string]$Server = "root@136.244.82.53",
+    [string]$Server = "",
     [string]$RemoteDir = "/opt/catalyst"
 )
 
@@ -15,6 +15,11 @@ Write-Host ""
 
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     Write-Host "ERROR: ssh not found." -ForegroundColor Red
+    exit 1
+}
+
+if ([string]::IsNullOrWhiteSpace($Server)) {
+    Write-Host "ERROR: pass -Server, for example: .\deploy.ps1 -Server root@your-server.example.com" -ForegroundColor Red
     exit 1
 }
 
@@ -112,7 +117,7 @@ if ($success) {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "  OK - Catalyst deployed (Docker)!" -ForegroundColor Green
-    Write-Host "  Dashboard: https://catalystparser.io" -ForegroundColor Cyan
+    Write-Host "  Dashboard: configure PUBLIC_BASE_URL in .env" -ForegroundColor Cyan
     Write-Host "  Admin:     localhost-only on server (127.0.0.1:8081)" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Green
 } else {

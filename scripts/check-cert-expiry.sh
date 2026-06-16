@@ -1,16 +1,16 @@
-#!/bin/bash
+﻿#!/bin/bash
 # Catalyst HTTPS certificate expiry check
 # Source of truth: scripts/check-cert-expiry.sh in repo (Bundle #17, 2026-06-05).
 # On VPS install (manual, per DEPLOY.md §4.2):
 #   scp scripts/check-cert-expiry.sh root@vps:/usr/local/bin/
 #   ssh root@vps "chmod +x /usr/local/bin/check-cert-expiry.sh"
 #   ssh root@vps "echo '#!/bin/bash' > /etc/cron.daily/catalyst-cert-check"
-#   ssh root@vps "echo '/usr/local/bin/check-cert-expiry.sh catalystparser.io' >> /etc/cron.daily/catalyst-cert-check"
+#   ssh root@vps "echo '/usr/local/bin/check-cert-expiry.sh catalyst.example.com' >> /etc/cron.daily/catalyst-cert-check"
 #   ssh root@vps "chmod +x /etc/cron.daily/catalyst-cert-check"
 
 set -euo pipefail
 
-DOMAIN="${1:-catalystparser.io}"
+DOMAIN="${1:-catalyst.example.com}"
 WARN_DAYS=14   # exit 1 if cert expires in less than WARN_DAYS
 LOG_FILE="${LOG_FILE:-/var/log/catalyst-cert.log}"
 

@@ -1,4 +1,4 @@
-# Catalyst — Deployment Guide
+﻿# Catalyst — Deployment Guide
 
 Production deployment runbook for the Catalyst narrative scanner (Telegram
 bot + web dashboard + admin panel). Targeted at a single-VPS setup with
@@ -175,17 +175,17 @@ Certbot auto-renews HTTPS cert every ~60 days (cert valid 90 days, renews at 30 
 `scripts/check-cert-expiry.sh` runs daily via cron, logs to `/var/log/catalyst-cert.log`, exit 1 (warn) if cert expires in less than 14 days. Install on VPS (one-time setup):
 
 ```bash
-scp scripts/check-cert-expiry.sh root@catalystparser.io:/usr/local/bin/
-ssh root@catalystparser.io "chmod +x /usr/local/bin/check-cert-expiry.sh"
-ssh root@catalystparser.io "echo '#!/bin/bash' > /etc/cron.daily/catalyst-cert-check"
-ssh root@catalystparser.io "echo '/usr/local/bin/check-cert-expiry.sh catalystparser.io' >> /etc/cron.daily/catalyst-cert-check"
-ssh root@catalystparser.io "chmod +x /etc/cron.daily/catalyst-cert-check"
+scp scripts/check-cert-expiry.sh root@catalyst.example.com:/usr/local/bin/
+ssh root@catalyst.example.com "chmod +x /usr/local/bin/check-cert-expiry.sh"
+ssh root@catalyst.example.com "echo '#!/bin/bash' > /etc/cron.daily/catalyst-cert-check"
+ssh root@catalyst.example.com "echo '/usr/local/bin/check-cert-expiry.sh catalyst.example.com' >> /etc/cron.daily/catalyst-cert-check"
+ssh root@catalyst.example.com "chmod +x /etc/cron.daily/catalyst-cert-check"
 ```
 
 If cron MAILTO is configured, operator gets email on warning. Otherwise check log weekly:
 
 ```bash
-ssh root@catalystparser.io "tail -10 /var/log/catalyst-cert.log"
+ssh root@catalyst.example.com "tail -10 /var/log/catalyst-cert.log"
 ```
 
 #### Manual verification
@@ -201,7 +201,7 @@ sudo journalctl -u certbot.timer -n 20
 sudo certbot certificates
 
 # 4. External check (from any machine, no SSH needed)
-echo | openssl s_client -connect catalystparser.io:443 2>/dev/null \
+echo | openssl s_client -connect catalyst.example.com:443 2>/dev/null \
   | openssl x509 -noout -dates
 # Expected: notAfter=<date 30-90d in future>
 
@@ -212,19 +212,19 @@ sudo certbot renew --dry-run
 #### If renewal failed
 
 1. Check `journalctl -u certbot.timer` for the error message
-2. Verify port 80 accessible: `ufw status`, `curl -I http://catalystparser.io`
+2. Verify port 80 accessible: `ufw status`, `curl -I http://catalyst.example.com`
 3. Manual renewal: `sudo certbot renew`
 4. Reload nginx: `sudo nginx -t && sudo systemctl reload nginx`
-5. Re-test cert: `echo | openssl s_client -connect catalystparser.io:443 | openssl x509 -noout -dates`
-6. Log result in `ai-context/WORKLOG.md`: date, reason, fix applied
+5. Re-test cert: `echo | openssl s_client -connect catalyst.example.com:443 | openssl x509 -noout -dates`
+6. Log the result in your private operator notes: date, reason, fix applied
 
 #### nginx config in repo
 
 The production nginx config is versioned at `scripts/nginx-catalyst.conf`. On change in repo:
 
 ```bash
-scp scripts/nginx-catalyst.conf root@catalystparser.io:/etc/nginx/sites-available/catalyst
-ssh root@catalystparser.io "sudo nginx -t && sudo systemctl reload nginx"
+scp scripts/nginx-catalyst.conf root@catalyst.example.com:/etc/nginx/sites-available/catalyst
+ssh root@catalyst.example.com "sudo nginx -t && sudo systemctl reload nginx"
 ```
 
 **Do not edit `/etc/nginx/sites-available/catalyst` directly on VPS** — drift unrecoverable.
@@ -257,7 +257,7 @@ by `scripts/catalyst-backup.sh`, which the deploy scripts sync to
 3. Hot backup via `sqlite3 ".backup"` (lock-aware — safe while the app writes).
 4. `gzip` the snapshot → `/var/backups/catalyst/catalyst_YYYY-MM-DD_HH-MM.db.gz`, then `gzip -t` to verify the archive.
 5. Prune local snapshots older than 14 days.
-6. Copy the snapshot off-site to Backblaze B2 via `rclone` (`b2:catalystparser-prod-backups/`).
+6. Copy the snapshot off-site to Backblaze B2 via `rclone` (`b2:catalyst-prod-backups/`).
 7. On **any** non-zero exit, a Telegram alert is sent to `SUPPORT_GROUP_ID` (failure trap).
 
 Backblaze + Telegram credentials live in `/etc/catalyst.env` (sourced by the
@@ -286,10 +286,10 @@ Off-site (если VPS погиб):
 # На новом VPS — установи rclone (apt install rclone) + настрой B2 remote
 # через `rclone config` (выбери New remote → Backblaze B2 → введи applicationKeyId
 # и applicationKey из Backblaze console). Config ляжет в /root/.config/rclone/rclone.conf.
-# Если есть backup rclone.conf со старого VPS — просто скопируй его сюда. Контракт
-# названия remote: "b2" (см. SESSION_CONTEXT §Production posture).
-rclone ls b2:catalystparser-prod-backups/
-rclone copy b2:catalystparser-prod-backups/catalyst_YYYY-MM-DD_HH-MM.db.gz /tmp/
+# Если есть backup rclone.conf со старого VPS — просто скопируй его сюда.
+# Контракт названия remote: "b2".
+rclone ls b2:catalyst-prod-backups/
+rclone copy b2:catalyst-prod-backups/catalyst_YYYY-MM-DD_HH-MM.db.gz /tmp/
 ```
 
 **Step 2 — Verify archive integrity**
@@ -350,7 +350,7 @@ docker compose logs -f app  # check startup is clean
 
 **Step 8 — Smoke check**
 
-- `curl https://catalystparser.io/api/health` → 200
+- `curl https://catalyst.example.com/api/health` → 200
 - Открой дашборд в браузере → видны trends/users из бэкапа
 - Telegram бот → `/start` → отвечает
 
@@ -363,7 +363,7 @@ rm "$VOLUME_PATH"/catalyst.db-shm.broken-* 2>/dev/null || true
 rm /tmp/restore.db /tmp/catalyst_*.db.gz
 ```
 
-Запиши в `ai-context/WORKLOG.md`: дата, причина, какой бэкап восстанавливали, smoke check result.
+Запиши в private operator notes: дата, причина, какой бэкап восстанавливали, smoke check result.
 
 ### 6.6. Quarterly restore drill
 
@@ -373,8 +373,8 @@ rm /tmp/restore.db /tmp/catalyst_*.db.gz
 
 ```bash
 mkdir -p /tmp/drill
-LATEST=$(rclone lsf b2:catalystparser-prod-backups/ | sort | tail -1)
-rclone copy "b2:catalystparser-prod-backups/$LATEST" /tmp/drill/
+LATEST=$(rclone lsf b2:catalyst-prod-backups/ | sort | tail -1)
+rclone copy "b2:catalyst-prod-backups/$LATEST" /tmp/drill/
 echo "Drill file: /tmp/drill/$LATEST"
 ```
 
@@ -432,12 +432,12 @@ rm -rf /tmp/drill/
 Сценарий: прод-VPS погиб безвозвратно, поднимаем Catalyst на новом сервере.
 Бэкап БД лежит в B2; **секреты и код в бэкап НЕ входят** — восстанавливаем отдельно.
 
-**Что нужно под рукой:** доступ к Backblaze B2 (applicationKeyId + applicationKey), содержимое `/opt/catalyst/.env` (из password manager) и `/etc/catalyst.env`, доступ к DNS-зоне `catalystparser.io`.
+**Что нужно под рукой:** доступ к Backblaze B2 (applicationKeyId + applicationKey), содержимое `/opt/catalyst/.env` (из password manager) и `/etc/catalyst.env`, доступ к DNS-зоне `catalyst.example.com`.
 
 **Step 1 — Новый VPS + DNS**
 
 - Подними чистый VPS (Debian/Ubuntu, та же мажорная версия, что была).
-- Поменяй A-запись `catalystparser.io` (и `www`) на новый IP, дождись пропагейшна (`dig catalystparser.io +short`).
+- Поменяй A-запись `catalyst.example.com` (и `www`) на новый IP, дождись пропагейшна (`dig catalyst.example.com +short`).
 - В `deploy.ps1` / `deploy.sh` обнови хост (старый IP → новый) — деплой ходит по нему.
 
 **Step 2 — Базовый софт**
@@ -469,7 +469,7 @@ chmod 600 /etc/catalyst.env
 
 **Step 5 — Восстанови БД из B2**
 
-Настрой rclone remote `b2` (`rclone config` → Backblaze B2 → ключи), затем выполни процедуру **§6.5 (Steps 1-9)** с off-site источника: pull последнего `.db.gz` из `b2:catalystparser-prod-backups/`, `gzip -t`, gunzip, `PRAGMA integrity_check`, stop container, подмена файла в volume, start, smoke.
+Настрой rclone remote `b2` (`rclone config` → Backblaze B2 → ключи), затем выполни процедуру **§6.5 (Steps 1-9)** с off-site источника: pull последнего `.db.gz` из `b2:catalyst-prod-backups/`, `gzip -t`, gunzip, `PRAGMA integrity_check`, stop container, подмена файла в volume, start, smoke.
 
 **Step 6 — TLS сертификат**
 
@@ -478,7 +478,7 @@ DNS уже указывает на новый IP (Step 1):
 ```bash
 scp scripts/nginx-catalyst.conf root@<new-ip>:/etc/nginx/sites-available/catalyst
 ssh root@<new-ip> "ln -sf /etc/nginx/sites-available/catalyst /etc/nginx/sites-enabled/ && nginx -t && systemctl reload nginx"
-ssh root@<new-ip> "certbot --nginx -d catalystparser.io -d www.catalystparser.io"
+ssh root@<new-ip> "certbot --nginx -d catalyst.example.com -d www.catalyst.example.com"
 ```
 
 **Step 7 — Восстанови cron-задачи**
@@ -488,14 +488,14 @@ ssh root@<new-ip> "certbot --nginx -d catalystparser.io -d www.catalystparser.io
 
 **Step 8 — Финальная проверка**
 
-- `curl https://catalystparser.io/api/health` → 200
+- `curl https://catalyst.example.com/api/health` → 200
 - Дашборд в браузере → видны trends/users из бэкапа
 - Бот → `/start` → отвечает
 - `docker compose logs -f app` → чисто, без ошибок старта
 
 **Step 9 — WORKLOG**
 
-Запиши в `ai-context/WORKLOG.md`: дата, причина DR, какой бэкап восстановили, RTO (время до рабочего сервиса), что пошло не так.
+Запиши в private operator notes: дата, причина DR, какой бэкап восстановили, RTO (время до рабочего сервиса), что пошло не так.
 
 **Целевые метрики:** RTO ~30-60 мин при секретах под рукой. RPO ≤ 24ч (суточный бэкап) — тренды/события с момента последнего ночного бэкапа теряются.
 
@@ -615,11 +615,11 @@ Each secret has a lifetime. Bundle #17 (2026-06-05) documents the recommended ro
 #### Per-key procedure
 
 1. **Generate** new key on the provider side (keep old key active for now)
-2. **Edit `.env`** on VPS: `ssh root@catalystparser.io "nano /opt/catalyst/.env"` — replace old value with new
-3. **Restart**: `ssh root@catalystparser.io "cd /opt/catalyst && docker compose restart app"`
+2. **Edit `.env`** on VPS: `ssh root@catalyst.example.com "nano /opt/catalyst/.env"` — replace old value with new
+3. **Restart**: `ssh root@catalyst.example.com "cd /opt/catalyst && docker compose restart app"`
 4. **Verify** using the test from the schedule table above
 5. **Revoke old key** on the provider side (only AFTER verification — otherwise risk downtime if new key doesn't work)
-6. **Log** in `ai-context/WORKLOG.md`:
+6. **Log** in your private operator notes:
    ```
    ## YYYY-MM-DD · rotation · <KEY_NAME> · OK · verified <method>
    ```
@@ -740,5 +740,5 @@ docker compose logs app | grep -iE "oom|heap"
 - **Log rotation** — currently relies on journald's default rotation.
   Consider `logrotate` if logs get noisy.
 
-That's it. Everything else is in `ai-context/SESSION_CONTEXT.md` for the
-deeper architecture context.
+That's it. Keep deeper architecture/operator context in private notes, not in
+the public repository.
