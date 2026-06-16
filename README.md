@@ -8,8 +8,9 @@ a Telegram bot, a web dashboard, and (optionally) Discord. It's built to run as
 a single Node.js process on one VPS — no microservices, no external queue, all
 state in one SQLite file.
 
-> Private operator repository. Not currently open-source; the sections below
-> assume you already have access to the keys and infrastructure.
+This repository contains the application code and local deployment templates.
+You still need your own API keys, Telegram bots, domain, and infrastructure to
+run it.
 
 ---
 
@@ -128,13 +129,12 @@ rotation and troubleshooting.
 Deploys are done **only** through `deploy.ps1` (Windows) or `deploy.sh` (Linux)
 — never edit the production host by hand.
 
-## Operating context
+## Security
 
-Architecture state lives in `ai-context/SESSION_CONTEXT.md`; the running change
-journal is `ai-context/WORKLOG.md`. Agent working rules are in
-`ai-context/AGENT_RULES.md`.
+Please report vulnerabilities privately. See [SECURITY.md](SECURITY.md) for
+the current policy and known notes.
 
 ## License
 
-Proprietary / all rights reserved. Private repository — not licensed for
-redistribution.
+License TBD. See [docs/open-source-readiness.md](docs/open-source-readiness.md)
+for the current pre-publication checklist.

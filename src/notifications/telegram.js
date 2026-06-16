@@ -226,13 +226,17 @@ class TelegramNotifier {
     });
 
     // /dashboard - send the web-dashboard URL with a clickable button. URL
-    // comes from PUBLIC_BASE_URL (set in production .env) with a hardcoded
-    // fallback so it still works in dev or if the env var is missing.
+    // comes from PUBLIC_BASE_URL (set in production .env). Without it, the
+    // command explains that the dashboard URL is not configured.
     this.bot.onText(/^\/dashboard/, (msg) => {
       const chatId = msg.chat.id;
       const user = this.db.getOrCreateUser(chatId, msg.from?.username);
       const t = getTranslations(user.language);
-      const url = process.env.PUBLIC_BASE_URL || 'https://catalyst.example.com';
+      const url = process.env.PUBLIC_BASE_URL || '';
+      if (!url) {
+        this.bot.sendMessage(chatId, 'Dashboard URL is not configured. Set PUBLIC_BASE_URL in .env.');
+        return;
+      }
 
       this.bot.sendMessage(chatId, t.dashboardPrompt(url), {
         parse_mode: 'HTML',
@@ -764,22 +768,22 @@ class TelegramNotifier {
 
   // ── Keyboard builders ─────────────────────────────────────────────────────
 
-  // "Ask a question" deep-link. Prefers the dedicated support bot when
-  // SUPPORT_BOT_USERNAME is configured; falls back to the legacy personal
-  // DM URL so the button never points nowhere.
+  // "Ask a question" deep-link. Returns null when SUPPORT_BOT_USERNAME is not
+  // configured so public builds do not point at the original operator account.
   _supportUrl() {
     const u = this.config?.support?.botUsername;
-    return u ? `https://t.me/${u}` : 'https://t.me/support-bot';
+    return u ? `https://t.me/${u}` : null;
   }
 
   _startKeyboard(user) {
     const t = getTranslations(user.language);
-    const dashboardUrl = process.env.PUBLIC_BASE_URL || 'https://catalyst.example.com';
+    const dashboardUrl = process.env.PUBLIC_BASE_URL || '';
+    const rows = [[{ text: t.btnOpenMenu || '⚙️ Open Menu', callback_data: 'menu' }]];
+    if (dashboardUrl) {
+      rows.push([{ text: t.btnDashboard || '\u{1F310} Open Dashboard', url: dashboardUrl }]);
+    }
     return {
-      inline_keyboard: [
-        [{ text: t.btnOpenMenu  || '⚙️ Open Menu',     callback_data: 'menu' }],
-        [{ text: t.btnDashboard || '\u{1F310} Open Dashboard', url: dashboardUrl }],
-      ],
+      inline_keyboard: rows,
     };
   }
 
@@ -822,7 +826,8 @@ class TelegramNotifier {
     const status          = this._menuStatusInfo(user);
     const planBadge       = t.badgePlan    ? t.badgePlan(status.plan, status.daysLeft) : '';
     const submenuBadge    = t.badgeSubmenu ? t.badgeSubmenu() : '';
-    const dashboardUrl    = process.env.PUBLIC_BASE_URL || 'https://catalyst.example.com';
+    const dashboardUrl    = process.env.PUBLIC_BASE_URL || '';
+    const supportUrl      = this._supportUrl();
 
     // Layout — three logical groups (header carries status):
     //   1. Alert tuning: Sources + Threshold, AlertTypes + Language (2x2)
@@ -831,8 +836,7 @@ class TelegramNotifier {
     // Top Trends sits with Plan because both are "odd-shaped" tiles that
     // don't fit the alert-tuning grid (Plan is info-only, Top Trends is a
     // submenu entry — neither is an in-place toggle).
-    return {
-      inline_keyboard: [
+    const rows = [
         // ── Group 1: alert tuning ─────────────────────────────────────
         [
           { text: t.btnSources   + sourcesBadge,    callback_data: 'sources'   },
@@ -849,10 +853,13 @@ class TelegramNotifier {
         ],
         // ── Group 3: actions ──────────────────────────────────────────
         [{ text: t.btnStartStop(user.status === 'paused'), callback_data: 'toggle_pause' }],
-        [{ text: t.btnDashboard || '\u{1F4CA} Open Dashboard', url: dashboardUrl }],
-        [{ text: t.btnAskQuestion || '💬 Ask a question',       url: this._supportUrl() }],
-        [{ text: t.btnClose, callback_data: 'close' }],
-      ]
+      ];
+    if (dashboardUrl) rows.push([{ text: t.btnDashboard || '\u{1F4CA} Open Dashboard', url: dashboardUrl }]);
+    if (supportUrl) rows.push([{ text: t.btnAskQuestion || '💬 Ask a question', url: supportUrl }]);
+    rows.push([{ text: t.btnClose, callback_data: 'close' }]);
+
+    return {
+      inline_keyboard: rows
     };
   }
 

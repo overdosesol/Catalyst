@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SERVER="${1:-root@<server-ip>}"
+SERVER="${1:-}"
 REMOTE_DIR="${2:-/opt/catalyst}"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP_ARCHIVE="/tmp/catalyst_deploy_$$.zip"
@@ -9,6 +9,11 @@ TMP_ARCHIVE="/tmp/catalyst_deploy_$$.zip"
 echo "🚀 Catalyst Docker Deploy → $SERVER"
 echo "📁 Источник: $LOCAL_DIR"
 echo ""
+
+if [ -z "$SERVER" ]; then
+  echo "ERROR: pass server as first argument, for example: ./deploy.sh root@your-server.example.com"
+  exit 1
+fi
 
 echo "[1/5] Validating SPA syntax..."
 npm run check:spa
@@ -52,6 +57,6 @@ rm -f "$TMP_ARCHIVE"
 echo ""
 echo "═══════════════════════════════════════════════════════"
 echo "✅ Catalyst задеплоен (Docker)"
-echo "🌐 Dashboard: https://catalyst.example.com"
+echo "🌐 Dashboard: configure PUBLIC_BASE_URL in .env"
 echo "🔒 Admin: localhost-only (127.0.0.1:8081 на сервере)"
 echo "═══════════════════════════════════════════════════════"

@@ -1,14 +1,30 @@
 node_modules/
 .env
+.env.*
+!.env.example
 data/*.db
 data/*.db-wal
 data/*.db-shm
 data/avatars/
 logs/
 
-# Claude Code worktrees (temporary isolated copies, not for version control)
-.claude/worktrees/
+# Local assistant/operator state (not for version control)
+.claude/
+.codex-backups/
 .superpowers/
+AGENTS.md
+CLAUDE.md
+
+# Private project memory / operator notes. If intentionally publishing a subset,
+# copy it into a reviewed docs file instead of committing raw session context.
+ai-context/
+docs/audit/
+docs/superpowers/
+
+# Local/source asset packs. Public release should keep only reviewed assets.
+EvilCatPack/
+DEPLOYMENT_SUMMARY.txt
+posts/
 
 # grok-cli experiment artifacts: prompt builds, raw responses, and prod-trend
 # dumps are generated locally for parity-checks — never commit (contain prod data).

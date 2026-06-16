@@ -1,4 +1,4 @@
-# Catalyst — Deployment Guide
+﻿# Catalyst — Deployment Guide
 
 Production deployment runbook for the Catalyst narrative scanner (Telegram
 bot + web dashboard + admin panel). Targeted at a single-VPS setup with
@@ -216,7 +216,7 @@ sudo certbot renew --dry-run
 3. Manual renewal: `sudo certbot renew`
 4. Reload nginx: `sudo nginx -t && sudo systemctl reload nginx`
 5. Re-test cert: `echo | openssl s_client -connect catalyst.example.com:443 | openssl x509 -noout -dates`
-6. Log result in `ai-context/WORKLOG.md`: date, reason, fix applied
+6. Log the result in your private operator notes: date, reason, fix applied
 
 #### nginx config in repo
 
@@ -286,8 +286,8 @@ Off-site (если VPS погиб):
 # На новом VPS — установи rclone (apt install rclone) + настрой B2 remote
 # через `rclone config` (выбери New remote → Backblaze B2 → введи applicationKeyId
 # и applicationKey из Backblaze console). Config ляжет в /root/.config/rclone/rclone.conf.
-# Если есть backup rclone.conf со старого VPS — просто скопируй его сюда. Контракт
-# названия remote: "b2" (см. SESSION_CONTEXT §Production posture).
+# Если есть backup rclone.conf со старого VPS — просто скопируй его сюда.
+# Контракт названия remote: "b2".
 rclone ls b2:catalyst-prod-backups/
 rclone copy b2:catalyst-prod-backups/catalyst_YYYY-MM-DD_HH-MM.db.gz /tmp/
 ```
@@ -363,7 +363,7 @@ rm "$VOLUME_PATH"/catalyst.db-shm.broken-* 2>/dev/null || true
 rm /tmp/restore.db /tmp/catalyst_*.db.gz
 ```
 
-Запиши в `ai-context/WORKLOG.md`: дата, причина, какой бэкап восстанавливали, smoke check result.
+Запиши в private operator notes: дата, причина, какой бэкап восстанавливали, smoke check result.
 
 ### 6.6. Quarterly restore drill
 
@@ -495,7 +495,7 @@ ssh root@<new-ip> "certbot --nginx -d catalyst.example.com -d www.catalyst.examp
 
 **Step 9 — WORKLOG**
 
-Запиши в `ai-context/WORKLOG.md`: дата, причина DR, какой бэкап восстановили, RTO (время до рабочего сервиса), что пошло не так.
+Запиши в private operator notes: дата, причина DR, какой бэкап восстановили, RTO (время до рабочего сервиса), что пошло не так.
 
 **Целевые метрики:** RTO ~30-60 мин при секретах под рукой. RPO ≤ 24ч (суточный бэкап) — тренды/события с момента последнего ночного бэкапа теряются.
 
@@ -619,7 +619,7 @@ Each secret has a lifetime. Bundle #17 (2026-06-05) documents the recommended ro
 3. **Restart**: `ssh root@catalyst.example.com "cd /opt/catalyst && docker compose restart app"`
 4. **Verify** using the test from the schedule table above
 5. **Revoke old key** on the provider side (only AFTER verification — otherwise risk downtime if new key doesn't work)
-6. **Log** in `ai-context/WORKLOG.md`:
+6. **Log** in your private operator notes:
    ```
    ## YYYY-MM-DD · rotation · <KEY_NAME> · OK · verified <method>
    ```
@@ -740,5 +740,5 @@ docker compose logs app | grep -iE "oom|heap"
 - **Log rotation** — currently relies on journald's default rotation.
   Consider `logrotate` if logs get noisy.
 
-That's it. Everything else is in `ai-context/SESSION_CONTEXT.md` for the
-deeper architecture context.
+That's it. Keep deeper architecture/operator context in private notes, not in
+the public repository.

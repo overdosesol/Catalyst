@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # Catalyst HTTPS certificate expiry check
 # Source of truth: scripts/check-cert-expiry.sh in repo (Bundle #17, 2026-06-05).
 # On VPS install (manual, per DEPLOY.md §4.2):
