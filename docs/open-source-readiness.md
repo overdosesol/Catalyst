@@ -1,37 +1,32 @@
-﻿# Open Source Readiness Audit
+# Open Source Readiness Notes
 
 Date: 2026-06-17
 
-This is a pre-publication audit for turning Catalyst into an open source
-repository while preserving the visible development history. It intentionally
-does not include secret values.
+This is the public readiness note for Catalyst's first open-source preview. It
+summarizes the repository cleanup that was done before publication and the
+operator caveats that still matter for anyone running their own instance. It
+intentionally does not include secret values.
 
 ## Executive Summary
 
-The repository is not ready to publish as-is.
+The repository is ready for a public preview, with the normal caveat that
+production operation still requires an experienced owner with their own API
+keys, Telegram bots, Solana wallet, domain and VPS.
 
-No high-confidence secret formats were found in the current tracked tree during
-the custom scan, and `.env` is currently ignored. The first cleanup pass also
-replaced real-looking keys in `.env.example` with explicit placeholders.
+No high-confidence secret formats were found in the tracked tree during the
+custom scan, `.env` is ignored, and `.env.example` uses explicit placeholders.
+Internal/private agent state, local source asset packs, generated logs and
+runtime databases are excluded from version control.
 
-The first cleanup pass removed internal/private paths from the public tree with
-`git rm --cached`, genericized production host/domain/bucket references, and
-removed hard-coded public URLs from deploy and Telegram notification code.
-
-The local history has now been rewritten to remove the known internal paths,
-old production references, and real-looking `.env.example` key examples.
-
-Public-facing repository docs and GitHub contribution templates have been
-prepared for the first OSS release.
-
-Remaining publication work: submit the Codex for OSS application and monitor
-GitHub alerts after new public commits.
+Public-facing repository docs, GitHub contribution templates, package metadata,
+license, security policy and Dependabot configuration are in place for the
+first OSS release.
 
 ## Findings
 
 ### OSR-001: Private/internal files were tracked
 
-Severity: Resolved locally / verify remote before publication
+Severity: Resolved in the current tracked tree
 
 Evidence:
 
@@ -50,12 +45,12 @@ third-party asset files without clear redistribution evidence.
 
 Recommendation:
 
-Keep these files local/private. Before publication, make sure GitHub no longer
-has old refs that point to the pre-rewrite history.
+Keep these files local/private. If history is rewritten again, verify GitHub no
+longer has old refs that point to excluded private paths.
 
 ### OSR-002: Production infrastructure details were present
 
-Severity: Resolved locally / verify remote before publication
+Severity: Resolved in the current tracked tree
 
 Evidence:
 
@@ -75,7 +70,7 @@ internet users a map of the production setup.
 Recommendation:
 
 Keep real production runbooks in private operator notes or a password manager.
-Re-scan GitHub after force-pushing the rewritten history.
+Re-scan GitHub if repository history is rewritten again.
 
 ### OSR-003: `.env.example` history contained real-looking key values
 
@@ -98,27 +93,27 @@ Recommendation:
 
 Rotate any matching live keys before publication if there is any doubt.
 
-### OSR-004: Open source metadata is mostly in place
+### OSR-004: Open source metadata is in place
 
-Severity: Medium
+Severity: Resolved
 
 Evidence:
 
-- `package.json` has empty `author`.
-- `LICENSE` has been added with MIT.
-- `CONTRIBUTING.md` has been added.
-- `SECURITY.md` and `.github/dependabot.yml` have been added.
-- `README.md` now points to the MIT license.
+- `package.json` has repository, bugs, homepage, author, license and Node
+  engine metadata.
+- `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`,
+  `MAINTAINERS.md`, `ROADMAP.md`, issue templates and a pull request template
+  are present.
+- `README.md` points to the MIT license and the current Catalyst repository.
 
 Impact:
 
-The project is now legally clear enough for a first public release, but owner
-metadata can still be improved.
+The project has the expected public metadata for a first open-source preview.
 
 Recommendation:
 
-Fill in package `author` if desired, and expand contributor docs after the
-first public release.
+Keep these files current when repository URLs, support channels or release
+processes change.
 
 ### OSR-005: Dependency audit had production vulnerabilities
 
@@ -138,11 +133,12 @@ Evidence:
 Impact:
 
 The public repository should stop showing these Dependabot alerts after the
-dependency update is committed and pushed.
+dependency update lands on the default branch and GitHub rescans the lockfile.
 
 Recommendation:
 
-Push the dependency update, then verify GitHub Dependabot alerts close.
+Keep Dependabot enabled and verify GitHub alerts after dependency updates land
+on the default branch.
 
 ### OSR-008: GitHub secret scanning is enabled
 
@@ -164,24 +160,26 @@ Recommendation:
 
 Keep secret scanning and push protection enabled.
 
-### OSR-006: Asset licensing is unclear
+### OSR-006: Asset licensing is limited to reviewed public assets
 
-Severity: Medium
+Severity: Medium / operational caveat
 
 Evidence:
 
-- `EvilCatPack` contains 536 tracked image files.
-- No license/readme/credits file was found inside `EvilCatPack`.
+- `EvilCatPack` is excluded from the tracked public tree.
+- The public tree keeps only the selected generated mascot assets under
+  `assets/cats/`.
 
 Impact:
 
-Redistributing third-party art without a clear license can create copyright
-trouble even when the code license is valid.
+The code repository no longer redistributes the source asset pack, but the
+maintainer should keep provenance notes for mascot assets outside the public
+tree.
 
 Recommendation:
 
-Either remove `EvilCatPack` from the public repo, add verifiable licensing and
-attribution, or replace it with assets you own.
+For broader commercial reuse, add explicit asset attribution/licensing notes or
+replace mascot art with assets owned by the project.
 
 ### OSR-007: Browser and DB auth-token exposure
 
@@ -261,13 +259,12 @@ application fields, especially the API-credit and maintainer-workflow answers.
 1. Rotate secrets before publication if there is any doubt.
 2. Keep the sanitized working tree on `main`.
 3. Re-scan the GitHub repository with gitleaks or TruffleHog.
-4. Push the local dependency cleanup commit.
-5. Verify GitHub Dependabot alerts close.
-6. Prepare and submit the Codex for OSS application.
+4. Verify GitHub Dependabot alerts after dependency updates land.
+5. Prepare and submit the Codex for OSS application.
 
 ## Proposed Public Exclude List
 
-Review and remove from the public release:
+Keep excluded from the public release:
 
 - `.claude/`
 - `.codex-backups/`
@@ -275,7 +272,7 @@ Review and remove from the public release:
 - `docs/superpowers/`
 - `posts/`
 - `DEPLOYMENT_SUMMARY.txt`
-- `EvilCatPack/` unless licensing is confirmed
+- `EvilCatPack/`
 - production-specific deploy defaults and nginx/cert scripts
 
 ## Scan Notes

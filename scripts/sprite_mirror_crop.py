@@ -6,7 +6,7 @@ Run once after deploy R6 to fix cat direction + idle floating-in-air issue.
 from PIL import Image
 import os
 
-PROJ = r"F:\.VibeCoding\Projects\Antigravity\Narrative Parser"
+PROJ = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 sprites = [
     ("cat-idle.png",    15),
     ("cat-walk.png",    16),

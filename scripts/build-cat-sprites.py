@@ -3,7 +3,7 @@ from PIL import Image
 import os
 import shutil
 
-ROOT = r"F:\.VibeCoding\Projects\Antigravity\Narrative Parser"
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 OUT_DIR = os.path.join(ROOT, "assets", "cats")
 os.makedirs(OUT_DIR, exist_ok=True)
 

@@ -20,12 +20,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/overdosesol/Narrative-Parser.git"
+    "url": "git+https://github.com/overdosesol/Catalyst.git"
   },
   "bugs": {
-    "url": "https://github.com/overdosesol/Narrative-Parser/issues"
+    "url": "https://github.com/overdosesol/Catalyst/issues"
   },
-  "homepage": "https://github.com/overdosesol/Narrative-Parser#readme",
+  "homepage": "https://github.com/overdosesol/Catalyst#readme",
   "author": "Overdose",
   "license": "MIT",
   "engines": {
@@ -36,6 +36,6 @@
     "dotenv": "^17.3.1",
     "node-telegram-bot-api": "^1.1.0",
     "sharp": "^0.34.5",
-    "undici": "^6.25.0"
+    "undici": "^6.27.0"
   }
 }

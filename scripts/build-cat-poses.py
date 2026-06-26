@@ -22,7 +22,7 @@ animation that walks `background-position` from 0 to -sheet_width.
 import os
 from PIL import Image
 
-BASE = r'F:\.VibeCoding\Projects\Antigravity\Narrative Parser'
+BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 PACK = os.path.join(BASE, 'EvilCatPack')
 OUT_DIR = os.path.join(BASE, 'assets', 'cats')
 

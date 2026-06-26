@@ -121,8 +121,8 @@ After editing either file, run `npm run check:spa`.
 ## Quick Start
 
 ```powershell
-git clone https://github.com/overdosesol/Narrative-Parser.git
-Set-Location "Narrative-Parser"
+git clone https://github.com/overdosesol/Catalyst.git
+Set-Location "Catalyst"
 npm install
 Copy-Item ".env.example" ".env"
 npm run dev
