@@ -593,7 +593,7 @@ class AdminServer {
   }
 
   _getAiConfig() {
-    const VALID_PROVIDERS = ['xai', 'openai', 'gemini', 'grokcli'];
+    const VALID_PROVIDERS = ['xai', 'openai', 'gemini'];
     const rawProvider = (this.db.getSetting('aiProvider', 'xai') || 'xai').toLowerCase();
     const provider = VALID_PROVIDERS.includes(rawProvider) ? rawProvider : 'xai';
 
@@ -603,7 +603,6 @@ class AdminServer {
     // (/v1beta/openai/chat/completions). Reuses GOOGLE_AI_API_KEY (same key
     // used by Stage 0b captioner) so a single Google key powers both stages.
     const geminiModel = this.db.getSetting('geminiModel', process.env.GEMINI_STAGE1_MODEL || 'gemini-3.1-flash-lite');
-    const grokcliModel = this.db.getSetting('grokcliModel', 'grok-build');
 
     const stage2Enabled = String(this.db.getSetting('aiStage2Enabled', '1')) !== '0';
     const deepReasoningEnabled = String(this.db.getSetting('deepReasoningEnabled', '0')) !== '0';
@@ -612,7 +611,6 @@ class AdminServer {
     const currentModel =
       provider === 'openai' ? openaiModel :
       provider === 'gemini' ? geminiModel :
-      provider === 'grokcli' ? grokcliModel :
       xaiModel;
 
     return {
@@ -621,7 +619,6 @@ class AdminServer {
       xaiModel,
       openaiModel,
       geminiModel,
-      grokcliModel,
       stage2Enabled,
       deepReasoningEnabled,
       stage2ReasoningModel,
@@ -629,7 +626,6 @@ class AdminServer {
       hasXaiKey:    !!process.env.XAI_API_KEY,
       hasOpenaiKey: !!process.env.OPENAI_API_KEY,
       hasGeminiKey: !!process.env.GOOGLE_AI_API_KEY,
-      grokSessionAlive: !!(this.scorer && this.scorer._grokSessionAlive),
       xaiBaseUrl:    process.env.XAI_BASE_URL    || 'https://api.x.ai/v1',
       openaiBaseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
       geminiBaseUrl: process.env.GEMINI_OPENAI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai',
@@ -638,7 +634,7 @@ class AdminServer {
 
   _setAiConfig({ provider, model, stage2Enabled, deepReasoningEnabled, stage2ReasoningModel, escalationReserve }) {
     const safeProvider = String(provider || '').toLowerCase();
-    if (!['xai', 'openai', 'gemini', 'grokcli'].includes(safeProvider)) {
+    if (!['xai', 'openai', 'gemini'].includes(safeProvider)) {
       throw new Error('Invalid AI provider');
     }
     this.db.setSetting('aiProvider', safeProvider);
@@ -646,9 +642,8 @@ class AdminServer {
     const cleanModel = String(model || '').trim();
     if (cleanModel.length > 0) {
       const modelKey =
-        safeProvider === 'openai'  ? 'openaiModel'  :
-        safeProvider === 'gemini'  ? 'geminiModel'  :
-        safeProvider === 'grokcli' ? 'grokcliModel' :
+        safeProvider === 'openai' ? 'openaiModel' :
+        safeProvider === 'gemini' ? 'geminiModel' :
         'xaiModel';
       this.db.setSetting(modelKey, cleanModel);
     }
@@ -5039,7 +5034,7 @@ function BotPage() {
   const [broadcasts, setBroadcasts] = useState([]);
   const [aiCfg, setAiCfg] = useState(null);
   const [aiDraft, setAiDraft] = useState({ provider: 'xai', model: 'grok-4-1-fast-non-reasoning', stage2Enabled: true, deepReasoningEnabled: false, stage2ReasoningModel: '', escalationReserve: 2 });
-  const [aiModels, setAiModels] = useState({ xai: [], openai: [], gemini: [], grokcli: [] });
+  const [aiModels, setAiModels] = useState({ xai: [], openai: [], gemini: [] });
   const [aiModelsError, setAiModelsError] = useState('');
   const [editedPlans, setEditedPlans] = useState({});
   const [msg, setMsg] = useState('');
@@ -5258,17 +5253,14 @@ function BotPage() {
             const next = e.target.value;
             const dflt = next === 'openai' ? 'gpt-5.4-mini'
                        : next === 'gemini' ? 'gemini-3.1-flash-lite'
-                       : next === 'grokcli' ? 'grok-build'
                        : 'grok-4-1-fast-non-reasoning';
             setAiDraft(prev=>({ ...prev, provider: next, model: dflt }));
           }
         },
           React.createElement('option',{value:'xai'},'xAI (Grok)'),
           React.createElement('option',{value:'openai'},'OpenAI (GPT)'),
-          React.createElement('option',{value:'gemini'},'Google (Gemini)'),
-          React.createElement('option',{value:'grokcli'},'Grok Build CLI (subscription)')
+          React.createElement('option',{value:'gemini'},'Google (Gemini)')
         ),
-        aiDraft.provider === 'grokcli' && React.createElement('span',{className:'badge',style:aiCfg?.grokSessionAlive ? {background:'rgba(16,185,129,.15)',color:'var(--green)'} : {background:'rgba(245,158,11,.15)',color:'var(--yellow)'}},aiCfg?.grokSessionAlive ? 'CLI session: OK' : 'CLI session: expired — run grok login'),
         React.createElement('select',{
           className:'filter',
           style:{minWidth:300,maxWidth:360},
@@ -5283,7 +5275,6 @@ function BotPage() {
         React.createElement('button',{className:'btn btn-ghost btn-sm',onClick:()=>setAiDraft(prev=>{
           const dflt = prev.provider === 'openai' ? 'gpt-5.4-mini'
                      : prev.provider === 'gemini' ? 'gemini-3.1-flash-lite'
-                     : prev.provider === 'grokcli' ? 'grok-build'
                      : 'grok-4-1-fast-non-reasoning';
           return { ...prev, model: dflt };
         })},'Default')
@@ -5351,8 +5342,7 @@ function BotPage() {
         ' | Stage 2: ' + (aiCfg.stage2Enabled ? 'ON' : 'OFF') +
         ' | key xAI: ' + (aiCfg.hasXaiKey ? 'yes' : 'no') +
         ' | key OpenAI: ' + (aiCfg.hasOpenaiKey ? 'yes' : 'no') +
-        ' | key Gemini: ' + (aiCfg.hasGeminiKey ? 'yes' : 'no') +
-        ' | grokcli session: ' + (aiCfg.grokSessionAlive ? 'alive' : 'expired')
+        ' | key Gemini: ' + (aiCfg.hasGeminiKey ? 'yes' : 'no')
       )
     ),
 

@@ -81,9 +81,6 @@ $DC build
 
 $DC up -d
 
-echo "Grok CLI auth, if used, lives in Docker volume catalyst_grok."
-echo "Run: $DC exec catalyst grok login --device-auth"
-
 # ── Auto-cleanup: prune stale Docker build cache ──────────────────────────────
 # Build cache piles up at ~70-100MB per deploy; left unchecked it filled the
 # disk to 85% (we hit this 2026-04-27 — needed manual `buildx prune`). We only

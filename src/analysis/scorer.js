@@ -8,7 +8,6 @@ import {
 } from './prompts.js';
 import { normalizeLifespan } from './lifespan.js';
 import { getActivePresetConfig } from './preset-config.js';
-import { callGrokCli } from './grok-cli.js';
 
 /**
  * Deterministic alert-type derivation — used (a) when AI returns an invalid
@@ -380,6 +379,11 @@ export function selectDeepDiveCandidates({ stage1Results, stage2Threshold, cap, 
 /**
  * Run `worker(item, index)` over items with at most `limit` in flight.
  * Returns results in INPUT order (critical: Stage 1 maps responses by index).
+ *
+ * Currently UNCALLED — its only consumer was the grokcli provider, removed
+ * 2026-07-31. Kept deliberately (tested, provider-agnostic): Stage 1 http
+ * batches still run serially with a 2s sleep between them in scoreTrends(),
+ * so this is the ready-made tool if that ever needs parallelising.
  */
 export async function runBounded(items, limit, worker) {
   const results = new Array(items.length);
@@ -419,13 +423,11 @@ class Scorer {
 
     this.providers = {
       xai: {
-        transport: 'http',
         apiKey: process.env.XAI_API_KEY || '',
         baseUrl: process.env.XAI_BASE_URL || 'https://api.x.ai/v1',
         defaultModel: process.env.XAI_MODEL || 'grok-4-1-fast-non-reasoning',
       },
       openai: {
-        transport: 'http',
         apiKey: process.env.OPENAI_API_KEY || '',
         baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
         // Default bumped 2026-04-27: gpt-4.1-mini → gpt-5.4-mini.
@@ -444,28 +446,11 @@ class Scorer {
       // ships json_object mode and relies on the prompt to enforce shape.
       // Same GOOGLE_AI_API_KEY is reused across Stage 0b and Stage 1.
       gemini: {
-        transport: 'http',
         apiKey: process.env.GOOGLE_AI_API_KEY || '',
         baseUrl: process.env.GEMINI_OPENAI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai',
         defaultModel: process.env.GEMINI_STAGE1_MODEL || 'gemini-3.1-flash-lite',
       },
-      // Grok Build CLI — subscription-based, no API key. Availability is
-      // determined by session liveness (probed on boot and periodically).
-      grokcli: {
-        transport: 'cli',
-        bin: process.env.GROK_CLI_BIN || 'grok',
-        cwd: process.env.GROK_CLI_CWD || '/app',
-        defaultModel: process.env.GROKCLI_MODEL || 'grok-build',
-        concurrency: Number(process.env.GROKCLI_CONCURRENCY || 4),
-        timeoutMs: Number(process.env.GROKCLI_TIMEOUT_MS || 180000),
-        apiKey: '',
-        baseUrl: '',
-      },
     };
-
-    // CLI session liveness — refreshed by index.js on boot + periodically.
-    // false until proven alive (probed in index.js).
-    this._grokSessionAlive = false;
 
     this.current = this._getRuntimeAiConfig();
 
@@ -509,12 +494,12 @@ class Scorer {
     if (!this.current.enabled) {
       this.logger.warn('AI API key not set for selected provider — AI scoring disabled, using heuristics');
     } else {
-      this.logger.info(`AI scorer: ${this.current.provider}:${this.current.model} @ ${this.current.transport === 'cli' ? `cli:${this.current.bin || 'grok'}` : this.current.baseUrl} (Responses API, 2-stage)`);
+      this.logger.info(`AI scorer: ${this.current.provider}:${this.current.model} @ ${this.current.baseUrl} (Responses API, 2-stage)`);
     }
   }
 
   _getRuntimeAiConfig() {
-    const VALID_PROVIDERS = ['xai', 'openai', 'gemini', 'grokcli'];
+    const VALID_PROVIDERS = ['xai', 'openai', 'gemini'];
     const rawProvider = this.db?.getSetting('aiProvider', 'xai') || 'xai';
     let provider = VALID_PROVIDERS.includes(String(rawProvider).toLowerCase())
       ? String(rawProvider).toLowerCase()
@@ -522,16 +507,9 @@ class Scorer {
 
     let providerCfg = this.providers[provider] || this.providers.xai;
 
-    // "available" differs by transport: cli = session alive; http = has apiKey.
-    const isAvailable = (name) => {
-      const cfg = this.providers[name];
-      if (!cfg) return false;
-      return cfg.transport === 'cli' ? !!this._grokSessionAlive : !!cfg.apiKey;
-    };
+    const isAvailable = (name) => !!this.providers[name]?.apiKey;
 
-    // Auto-fallback chain when the chosen provider isn't available. grokcli
-    // falls back to http providers (xai→openai→gemini); http providers keep
-    // the same xai→openai→gemini chain as before.
+    // Auto-fallback chain when the chosen provider has no key: xai→openai→gemini.
     if (!isAvailable(provider)) {
       const chain = ['xai', 'openai', 'gemini'].filter(p => p !== provider);
       for (const candidate of chain) {
@@ -540,22 +518,16 @@ class Scorer {
     }
 
     const modelSettingKey =
-      provider === 'openai'  ? 'openaiModel' :
-      provider === 'gemini'  ? 'geminiModel' :
-      provider === 'grokcli' ? 'grokcliModel' :
+      provider === 'openai' ? 'openaiModel' :
+      provider === 'gemini' ? 'geminiModel' :
       'xaiModel';
     const model = this.db?.getSetting(modelSettingKey, providerCfg.defaultModel) || providerCfg.defaultModel;
 
     return {
       provider,
-      transport: providerCfg.transport || 'http',
       model,
       apiKey: providerCfg.apiKey,
       baseUrl: providerCfg.baseUrl,
-      bin: providerCfg.bin,
-      cwd: providerCfg.cwd,
-      concurrency: providerCfg.concurrency || 1,
-      timeoutMs: providerCfg.timeoutMs,
       enabled: isAvailable(provider),
     };
   }
@@ -686,7 +658,7 @@ class Scorer {
     this.current = runtime;
 
     if (changed) {
-      this.logger.info(`AI config updated: ${this.current.provider}:${this.current.model} @ ${this.current.transport === 'cli' ? `cli:${this.current.bin || 'grok'}` : this.current.baseUrl}`);
+      this.logger.info(`AI config updated: ${this.current.provider}:${this.current.model} @ ${this.current.baseUrl}`);
     }
 
     if (!this.current.enabled) {
@@ -740,21 +712,11 @@ class Scorer {
     const batches = [];
     for (let i = 0; i < trends.length; i += batchSize) batches.push(trends.slice(i, i + batchSize));
 
-    if (this.current.transport === 'cli') {
-      // CLI is slow (~70-90s/batch) — run with bounded concurrency instead of serially.
-      const batchResultArrays = await runBounded(
-        batches,
-        this.current.concurrency || 4,
-        (batch) => this._scoreBatchWithFallback(batch, metrics, systemPrompt, runtime)
-      );
-      for (const scored of batchResultArrays) stage1Results.push(...scored);
-    } else {
-      for (let bi = 0; bi < batches.length; bi++) {
-        const scored = await this._scoreBatchWithFallback(batches[bi], metrics, systemPrompt, runtime);
-        stage1Results.push(...scored);
-        if (bi + 1 < batches.length) {
-          await new Promise(r => setTimeout(r, 2000));
-        }
+    for (let bi = 0; bi < batches.length; bi++) {
+      const scored = await this._scoreBatchWithFallback(batches[bi], metrics, systemPrompt);
+      stage1Results.push(...scored);
+      if (bi + 1 < batches.length) {
+        await new Promise(r => setTimeout(r, 2000));
       }
     }
 
@@ -889,35 +851,10 @@ class Scorer {
 
   // ─── Stage 1 batch resilience helpers ───────────────────────────────────────
 
-  // One batch with resilience: cli retry → http fallback → heuristic.
-  async _scoreBatchWithFallback(batch, metrics, systemPrompt, rt) {
-    if (rt.transport === 'cli') {
-      for (let attempt = 1; attempt <= 2; attempt++) { // 2 = 1 initial attempt + 1 retry
-        try { return await this._analyzeBatchStage1(batch, metrics, systemPrompt, rt); }
-        catch (e) { this.logger.warn(`[grokcli] batch attempt ${attempt} failed: ${e.message}`); }
-      }
-      const httpRt = this._firstHttpRuntime();
-      if (httpRt) {
-        this.logger.warn('[grokcli] falling back to HTTP provider for this batch');
-        try { return await this._analyzeBatchStage1(batch, metrics, systemPrompt, httpRt); }
-        catch (e) { this.logger.error(`[grokcli] http fallback also failed: ${e.message}`); }
-      }
-      return this._fallback(batch, 'grokcli + http fallback unavailable');
-    }
+  // One batch with resilience: API call → heuristic.
+  async _scoreBatchWithFallback(batch, metrics, systemPrompt) {
     try { return await this._analyzeBatchStage1(batch, metrics, systemPrompt, null); }
     catch (e) { this.logger.error(`Stage 1 batch failed: ${e.message}`); return this._fallback(batch, 'AI unavailable'); }
-  }
-
-  // First http provider that has a key, as a runtime config (for cli fallback).
-  _firstHttpRuntime() {
-    for (const name of ['xai', 'openai', 'gemini']) {
-      const cfg = this.providers[name];
-      if (cfg?.apiKey) {
-        return { provider: name, transport: 'http', model: cfg.defaultModel,
-                 apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, enabled: true };
-      }
-    }
-    return null;
   }
 
   // ─── Stage 1: base scoring via Responses API (no tools) ────────────────────
@@ -1378,10 +1315,6 @@ class Scorer {
       });
     }
 
-    if (runtime.transport === 'cli') {
-      return this._callGrokCli({ input, runtime });
-    }
-
     const body = {
       model: runtime.model,
       input,
@@ -1469,21 +1402,6 @@ class Scorer {
     }
 
     return this._extractResponseData(data);
-  }
-
-  // Bridge: flatten the two-message input into one prompt and run it through
-  // the CLI. Mirrors the sandbox-validated form: system + separator + user.
-  async _callGrokCli({ input, runtime }) {
-    const sys = input.find(m => m.role === 'system')?.content || '';
-    const usr = input.find(m => m.role === 'user')?.content || '';
-    const prompt = `${sys}\n\n=== INPUT ===\n\n${usr}`;
-    return callGrokCli({
-      bin: runtime.bin,
-      prompt,
-      cwd: runtime.cwd,
-      timeoutMs: runtime.timeoutMs,
-      logger: this.logger,
-    });
   }
 
   /**

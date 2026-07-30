@@ -28,35 +28,13 @@ LABEL description="24/7 AI-powered trend monitoring for memecoin narratives"
 WORKDIR /app
 
 # Установить runtime зависимости
-# bash — нужен для установщика Grok CLI (`install.sh | bash`); alpine его не несёт.
-# git — grok-build (coding-агент) спавнит git на старте.
+# curl — healthcheck (`/api/health`). ffmpeg — обработка видео в Stage 0b.
 RUN apk add --no-cache \
     sqlite-dev \
     curl \
     ca-certificates \
     ffmpeg \
-    tini \
-    git \
-    bash
-
-# Optional Grok Build CLI. Default is OFF so normal OSS builds do not execute
-# a remote installer. Enable explicitly with --build-arg INSTALL_GROK_CLI=1.
-ARG GROK_CLI_VERSION=0.2.14
-ARG INSTALL_GROK_CLI=0
-RUN if [ "${INSTALL_GROK_CLI}" = "1" ]; then \
-      if curl -fsSL https://x.ai/cli/install.sh -o /tmp/grok-install.sh \
-        && bash /tmp/grok-install.sh "${GROK_CLI_VERSION}" \
-        && cp -L /root/.grok/bin/grok /usr/local/bin/grok \
-        && chmod 755 /usr/local/bin/grok \
-        && /usr/local/bin/grok --version; then \
-        rm -f /tmp/grok-install.sh; \
-      else \
-        rm -f /tmp/grok-install.sh; \
-        echo "WARN: Grok CLI install failed (x.ai unreachable?) — grokcli provider will be unavailable; scoring falls back to API."; \
-      fi; \
-    else \
-      echo "Skipping optional Grok CLI install (INSTALL_GROK_CLI=0)"; \
-    fi
+    tini
 
 # node:20-alpine already has user 'node' (uid/gid 1000) - use it directly
 

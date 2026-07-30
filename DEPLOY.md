@@ -730,9 +730,6 @@ docker compose logs catalyst | grep -iE "oom|heap"
 
 ## 14. Future hardening (not blocking for v1)
 
-- **Optional Grok CLI provider** — normal Docker builds skip the external Grok
-  installer. To use `grokcli`, build with `INSTALL_GROK_CLI=1` and authenticate
-  inside the container volume: `docker compose exec catalyst grok login --device-auth`.
 - **Telegram webhook** — drops alert latency from 3-5s polling to ~instant
 - **Redis** for `_authVerifyAttempts`, `_authInitiateAttempts`,
   `_streamTickets`, `_manualAnalysisHits` — if/when running multiple processes
