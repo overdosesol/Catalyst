@@ -22,6 +22,7 @@ import {
 } from '../analysis/preset-config.js';
 import { runManualAnalysis } from '../analysis/manual-analysis.js';
 import { withTelegramRetry } from '../notifications/telegram-retry.js';
+import { parseRequestTarget } from '../utils/url-safety.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -972,7 +973,17 @@ class AdminServer {
 
   // ── Request Router ──────────────────────────────────────────────────────────
   async _handle(req, res) {
-    const url = new URL('http://x' + req.url);
+    const url = parseRequestTarget(req.url);
+    if (!url) {
+      // Same guard as the dashboard router. Loopback-only, so this is about
+      // answering 400 rather than 500 — nothing here reads the origin, only
+      // pathname and searchParams, so the shared helper is a drop-in.
+      const shown = String(req.url).replace(/[^\x20-\x7E]/g, '').slice(0, 120);
+      this.logger.warn(`Admin: malformed request target rejected: ${shown}`);
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Bad Request');
+      return;
+    }
     const path = url.pathname;
     const method = req.method;
 

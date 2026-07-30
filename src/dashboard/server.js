@@ -24,6 +24,7 @@ import { fileURLToPath } from 'url';
 import { timingSafeEqual, createHash, randomBytes } from 'crypto';
 import net from 'net';
 import { UserRateLimiter } from '../utils/rate-limiter.js';
+import { parseRequestTarget } from '../utils/url-safety.js';
 import {
   buildRedditPreviewFromTrendRow,
   extractRedditPostId,
@@ -594,7 +595,9 @@ class DashboardServer {
       this.logger.warn('DASHBOARD_API_KEY is not set — API requests will be rejected');
     }
 
-    this.server = http.createServer((req, res) => this._handle(req, res));
+    this.server = http.createServer((req, res) => {
+      this._handle(req, res).catch(err => this._failRequest(res, err));
+    });
 
     this.server.listen(this.config.port, this.config.host, () => {
       this.logger.info(`Dashboard running at http://${this.config.host}:${this.config.port}`);
@@ -655,8 +658,41 @@ class DashboardServer {
 
   // ── Router ──────────────────────────────────────────────────────────────────
 
+  /**
+   * Last resort for an error that escaped `_handle`. The router is async, so
+   * without this the throw becomes an unhandled rejection: the client waits on
+   * a socket nobody will ever answer, and the process-wide handler pages the
+   * operator as if the app had crashed. Answering 500 keeps a single bad
+   * request a single bad request.
+   *
+   * Once headers are out the response is already in flight and cannot be
+   * rewritten — dropping the socket is the only honest signal left.
+   */
+  _failRequest(res, err) {
+    this.logger.error(`Dashboard request failed: ${err?.message || err}`, { stack: err?.stack });
+    try {
+      if (res.headersSent) { res.destroy(); return; }
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'Internal server error' }));
+    } catch { /* socket already gone */ }
+  }
+
   async _handle(req, res) {
-    const url    = new URL(req.url, `http://localhost`);
+    const url = parseRequestTarget(req.url);
+    if (!url) {
+      // Scanner and proxy-probe noise: a request target `new URL()` refuses to
+      // parse (`//`, `/\`, `http://host:99999/`, …). Before this guard the
+      // throw escaped an async handler as an unhandled rejection — the socket
+      // hung with no response and the crash reporter paged the operator about
+      // a port scan. Log the target so the next odd shape is identifiable;
+      // printable ASCII only and clipped, since it is attacker-controlled and
+      // lands in a line-oriented log file.
+      const shown = String(req.url).replace(/[^\x20-\x7E]/g, '').slice(0, 120);
+      this.logger.warn(`Dashboard: malformed request target rejected: ${shown}`);
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Bad Request');
+      return;
+    }
     const path   = url.pathname;
     const method = req.method;
 

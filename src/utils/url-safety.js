@@ -46,6 +46,36 @@ export function safeUrl(url) {
 }
 
 /**
+ * Parse an incoming HTTP request target (`req.url`) into a URL object.
+ * Returns null when the target is missing, not a string, or unparseable.
+ *
+ * `new URL(req.url, base)` throws on request targets that llhttp happily
+ * accepts and nginx forwards verbatim — `//`, `/\`, `//%`, `http://h:99999/`,
+ * bare `http://`, unterminated IPv6 literals. Port scanners and proxy probes
+ * send those at any public HTTP port, so a router that parses without a guard
+ * throws on the first line of every request. In an async handler that throw
+ * becomes an unhandled rejection, the socket hangs with no response, and the
+ * crash reporter pages the operator about a scanner.
+ *
+ * The base is fixed: routers only read `pathname` and `searchParams`, and an
+ * absolute-form target carries its own origin anyway.
+ *
+ * Server-side only — the browser SPA never sees a raw request target, so this
+ * one is deliberately NOT part of the inline duplicate set described above.
+ *
+ * @param {*} target - req.url, or any value
+ * @returns {URL|null}
+ */
+export function parseRequestTarget(target) {
+  if (!target || typeof target !== 'string') return null;
+  try {
+    return new URL(target, 'http://localhost');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Combined: validate protocol AND escape for HTML attribute.
  * Returns escaped URL string if valid http(s), or the literal '#' fallback.
  *
