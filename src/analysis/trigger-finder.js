@@ -2,9 +2,12 @@
  * TriggerFinder — on-demand "what's driving this trend RIGHT NOW" lookup.
  *
  * Triggered by user action (Telegram button or dashboard click), NOT by the
- * automatic scoring pipeline. Uses Grok reasoning (`grok-4-1-fast-reasoning`)
- * + xAI's `x_search` tool to read live X discussion and extract the catalyst
- * event behind a trend.
+ * automatic scoring pipeline. Uses Grok reasoning + xAI's `x_search` tool to
+ * read live X discussion and extract the catalyst event behind a trend.
+ *
+ * Reasoning used to be selected by picking a `-reasoning` model id. Since that
+ * family was retired the model is `grok-4.3`, where reasoning is a request
+ * parameter — see REASONING_EFFORT below.
  *
  * Result is cached in the `trends` table (`trigger_text`, `trigger_sources`,
  * `trigger_confidence`) and shared across all users — only the FIRST click
@@ -22,9 +25,17 @@
  *      things `non-reasoning` can't do reliably from a single x_search batch
  */
 
+import { DEFAULT_MODELS } from './model-registry.js';
 import { TRIGGER_SYSTEM_PROMPT, buildTriggerPrompt } from './prompts.js';
 
-const DEFAULT_MODEL = 'grok-4-1-fast-reasoning';
+const DEFAULT_MODEL = DEFAULT_MODELS.triggerFinder;
+
+// Reasoning was previously selected by the model id (`grok-4-1-fast-reasoning`).
+// On grok-4.3 it is a request parameter, so it has to be asked for or the
+// feature quietly degrades to whatever the model defaults to. 'low' is the
+// conservative starting point — the retired id was a full reasoning model, so
+// if trigger quality reads worse than it used to, this is the knob to raise.
+const REASONING_EFFORT = 'low';
 const DEFAULT_BASE_URL = 'https://api.x.ai/v1';
 
 class TriggerFinder {
@@ -137,7 +148,7 @@ class TriggerFinder {
   //   3. Keeps trigger-finder.js self-contained / removable as one file
 
   async _callResponsesAPI({ input, tools }) {
-    const body = { model: this.model, input };
+    const body = { model: this.model, input, reasoning: { effort: REASONING_EFFORT } };
     if (tools && tools.length > 0) body.tools = tools;
 
     const response = await fetch(`${this.baseUrl}/responses`, {

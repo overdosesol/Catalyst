@@ -21,6 +21,7 @@ import {
   mergeOverrideBlobs,
 } from '../analysis/preset-config.js';
 import { runManualAnalysis } from '../analysis/manual-analysis.js';
+import { DEFAULT_MODELS, listModelsForProvider } from '../analysis/model-registry.js';
 import { withTelegramRetry } from '../notifications/telegram-retry.js';
 import { parseRequestTarget } from '../utils/url-safety.js';
 
@@ -598,12 +599,12 @@ class AdminServer {
     const rawProvider = (this.db.getSetting('aiProvider', 'xai') || 'xai').toLowerCase();
     const provider = VALID_PROVIDERS.includes(rawProvider) ? rawProvider : 'xai';
 
-    const xaiModel    = this.db.getSetting('xaiModel',    process.env.XAI_MODEL    || 'grok-4-1-fast-non-reasoning');
-    const openaiModel = this.db.getSetting('openaiModel', process.env.OPENAI_MODEL || 'gpt-5.4-mini');
+    const xaiModel    = this.db.getSetting('xaiModel',    process.env.XAI_MODEL    || DEFAULT_MODELS.stage1Xai);
+    const openaiModel = this.db.getSetting('openaiModel', process.env.OPENAI_MODEL || DEFAULT_MODELS.stage1OpenAI);
     // Gemini Stage 1: routes through Google's OpenAI-compat layer
     // (/v1beta/openai/chat/completions). Reuses GOOGLE_AI_API_KEY (same key
     // used by Stage 0b captioner) so a single Google key powers both stages.
-    const geminiModel = this.db.getSetting('geminiModel', process.env.GEMINI_STAGE1_MODEL || 'gemini-3.1-flash-lite');
+    const geminiModel = this.db.getSetting('geminiModel', process.env.GEMINI_STAGE1_MODEL || DEFAULT_MODELS.stage1Gemini);
 
     const stage2Enabled = String(this.db.getSetting('aiStage2Enabled', '1')) !== '0';
     const deepReasoningEnabled = String(this.db.getSetting('deepReasoningEnabled', '0')) !== '0';
@@ -671,26 +672,13 @@ class AdminServer {
     const p = String(provider || '').toLowerCase();
     if (!['xai', 'openai', 'gemini'].includes(p)) throw new Error('Invalid provider');
 
-    // Curated model sets for cleaner admin UX
+    // Curated model sets come from the registry: live models carrying the
+    // `stage1` role. Hand-written lists are what let three retired grok ids sit
+    // in this selector for two months after xAI pulled them.
     const curated = {
-      xai: [
-        'grok-4-1-fast-reasoning',
-        'grok-4-1-fast-non-reasoning',
-        'grok-4-fast-non-reasoning',
-        'grok-4.20-0309-reasoning',
-        'grok-4.20-0309-non-reasoning',
-        'grok-3-mini',
-      ],
-      openai: ['gpt-4.1-mini', 'gpt-4.1', 'gpt-4o-mini', 'gpt-4o', 'gpt-5-mini', 'gpt-5'],
-      // Gemini list is hardcoded — Google's OpenAI-compat /v1beta/openai/models
-      // endpoint exposes hundreds of internal-only IDs that confuse the UI.
-      // These are the four variants we actually want to expose for Stage 1.
-      gemini: [
-        'gemini-3.1-flash-lite',
-        'gemini-3.1-flash-lite-preview',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
-      ],
+      xai:    listModelsForProvider('xai'),
+      openai: listModelsForProvider('openai'),
+      gemini: listModelsForProvider('gemini'),
     };
 
     // Gemini: skip the live /models GET — return the curated list directly so
@@ -730,19 +718,13 @@ class AdminServer {
         ? payload.data.map(m => m.id).filter(Boolean).sort((a, b) => a.localeCompare(b))
         : [];
 
-      // xAI: keep only Grok models, but not the whole list
-      const providerTop = p === 'xai'
-        ? available.filter(m => m.startsWith('grok-') && m !== 'grok-4-1').slice(0, 12)
-        : curated[p].filter(m => available.includes(m));
-
-      let models;
-      if (p === 'xai') {
-        const merged = [...providerTop, ...curated[p]];
-        models = [...new Set(merged)];
-      } else {
-        models = providerTop.length > 0 ? providerTop : curated[p];
-      }
-      return { provider: p, models };
+      // Intersect the registry with what the account actually exposes. The
+      // live call is a liveness check, not a source of options: a raw grok-*
+      // filter would offer image and video models for trend scoring, and the
+      // xai branch used to union the curated list back in, which is exactly
+      // how retired ids survived in the dropdown.
+      const models = curated[p].filter(m => available.includes(m));
+      return { provider: p, models: models.length > 0 ? models : curated[p] };
     } catch (e) {
       if (p === 'xai') {
         return { provider: p, models: curated[p] };
@@ -5044,7 +5026,7 @@ function BotPage() {
   const [plans, setPlans] = useState([]);
   const [broadcasts, setBroadcasts] = useState([]);
   const [aiCfg, setAiCfg] = useState(null);
-  const [aiDraft, setAiDraft] = useState({ provider: 'xai', model: 'grok-4-1-fast-non-reasoning', stage2Enabled: true, deepReasoningEnabled: false, stage2ReasoningModel: '', escalationReserve: 2 });
+  const [aiDraft, setAiDraft] = useState({ provider: 'xai', model: '${DEFAULT_MODELS.stage1Xai}', stage2Enabled: true, deepReasoningEnabled: false, stage2ReasoningModel: '', escalationReserve: 2 });
   const [aiModels, setAiModels] = useState({ xai: [], openai: [], gemini: [] });
   const [aiModelsError, setAiModelsError] = useState('');
   const [editedPlans, setEditedPlans] = useState({});
@@ -5262,9 +5244,9 @@ function BotPage() {
           value:aiDraft.provider,
           onChange:e=>{
             const next = e.target.value;
-            const dflt = next === 'openai' ? 'gpt-5.4-mini'
-                       : next === 'gemini' ? 'gemini-3.1-flash-lite'
-                       : 'grok-4-1-fast-non-reasoning';
+            const dflt = next === 'openai' ? '${DEFAULT_MODELS.stage1OpenAI}'
+                       : next === 'gemini' ? '${DEFAULT_MODELS.stage1Gemini}'
+                       : '${DEFAULT_MODELS.stage1Xai}';
             setAiDraft(prev=>({ ...prev, provider: next, model: dflt }));
           }
         },
@@ -5284,9 +5266,9 @@ function BotPage() {
         ),
         React.createElement('button',{className:'btn btn-ghost btn-sm',onClick:loadAiModels},'↻ Models'),
         React.createElement('button',{className:'btn btn-ghost btn-sm',onClick:()=>setAiDraft(prev=>{
-          const dflt = prev.provider === 'openai' ? 'gpt-5.4-mini'
-                     : prev.provider === 'gemini' ? 'gemini-3.1-flash-lite'
-                     : 'grok-4-1-fast-non-reasoning';
+          const dflt = prev.provider === 'openai' ? '${DEFAULT_MODELS.stage1OpenAI}'
+                     : prev.provider === 'gemini' ? '${DEFAULT_MODELS.stage1Gemini}'
+                     : '${DEFAULT_MODELS.stage1Xai}';
           return { ...prev, model: dflt };
         })},'Default')
       ),

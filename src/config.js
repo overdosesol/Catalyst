@@ -1,6 +1,8 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+import { DEFAULT_MODELS } from './analysis/model-registry.js';
+
 const apifyApiKey = process.env.APIFY_API_KEY || process.env.APIFY_API || '';
 
 const config = {
@@ -42,7 +44,7 @@ const config = {
   // xAI Grok - AI scoring engine (OpenAI-compatible API)
   openai: {
     apiKey:   process.env.XAI_API_KEY   || process.env.OPENAI_API_KEY || '',
-    model:    process.env.XAI_MODEL     || 'grok-4-1-fast',
+    model:    process.env.XAI_MODEL     || DEFAULT_MODELS.stage1Xai,
     baseUrl:  process.env.XAI_BASE_URL  || 'https://api.x.ai/v1',
   },
 

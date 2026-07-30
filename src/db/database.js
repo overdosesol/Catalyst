@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { replacementFor } from '../analysis/model-registry.js';
 import { PRESET_KEYS, validatePresetOverrides } from '../analysis/preset-config.js';
 import { sqliteCutoff } from '../utils/sqlite-time.js';
 
@@ -293,6 +294,26 @@ class TrendDatabase {
       this.setSetting('feedbackWeightFree',  '0.2');
       this.setSetting('feedbackWeightsRebalancedV2', '1');
       this.logger.info('DB migration: feedback weights rebalanced (admin=5, pro=2.5, test=0.5, free=0.2)');
+    }
+
+    // ── Retired model ids → their live replacement ─────────────────────────
+    // A provider retirement (xAI pulled the whole grok-4-1-fast family on
+    // 2026-05-15) leaves a dead id sitting in `settings`, where it outranks
+    // the code default and fails on the first call. Deliberately NOT behind a
+    // one-time marker like the blocks above: it is three reads, it is
+    // idempotent, and a marker would let a dead id survive if one were ever
+    // written again.
+    //
+    // Only retired ids move. Switching Stage 1 between two working models is
+    // the operator's decision in the admin panel — a deploy must never make
+    // it for them, or a scoring shift becomes impossible to attribute.
+    for (const key of ['xaiModel', 'openaiModel', 'geminiModel']) {
+      const current = this.getSetting(key, null);
+      const replacement = replacementFor(current);
+      if (replacement) {
+        this.setSetting(key, replacement);
+        this.logger.warn(`DB migration: ${key} pointed at retired ${current} → ${replacement}`);
+      }
     }
 
     // ── One-time fold of legacy globals into the per-preset config blob ─────

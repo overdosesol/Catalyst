@@ -7,6 +7,7 @@ import {
   normalizeAlertType,
 } from './prompts.js';
 import { normalizeLifespan } from './lifespan.js';
+import { DEFAULT_MODELS } from './model-registry.js';
 import { getActivePresetConfig } from './preset-config.js';
 
 /**
@@ -425,7 +426,7 @@ class Scorer {
       xai: {
         apiKey: process.env.XAI_API_KEY || '',
         baseUrl: process.env.XAI_BASE_URL || 'https://api.x.ai/v1',
-        defaultModel: process.env.XAI_MODEL || 'grok-4-1-fast-non-reasoning',
+        defaultModel: process.env.XAI_MODEL || DEFAULT_MODELS.stage1Xai,
       },
       openai: {
         apiKey: process.env.OPENAI_API_KEY || '',
@@ -436,7 +437,7 @@ class Scorer {
         // by the Responses API across batches in a 5-min window → real cost ≈ ×1.1.
         // Knowledge cutoff Aug-2025 (vs Jun-2024 on 4.1-mini) materially improves
         // recognition of recent meme/celebrity references.
-        defaultModel: process.env.OPENAI_MODEL || 'gpt-5.4-mini',
+        defaultModel: process.env.OPENAI_MODEL || DEFAULT_MODELS.stage1OpenAI,
       },
       // Gemini through Google's OpenAI-compatibility layer. Uses
       // /v1beta/openai/chat/completions which accepts the standard
@@ -448,7 +449,7 @@ class Scorer {
       gemini: {
         apiKey: process.env.GOOGLE_AI_API_KEY || '',
         baseUrl: process.env.GEMINI_OPENAI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai',
-        defaultModel: process.env.GEMINI_STAGE1_MODEL || 'gemini-3.1-flash-lite',
+        defaultModel: process.env.GEMINI_STAGE1_MODEL || DEFAULT_MODELS.stage1Gemini,
       },
     };
 
@@ -458,7 +459,7 @@ class Scorer {
     // `stage2Threshold` and `stage2MaxCalls` settings. Runtime read per cycle
     // inside scoreTrends() so changes apply without restart.
     this.stage2Threshold = 60;   // memePotential >= this → Stage 2 candidate
-    this.stage2Model = 'grok-4-1-fast-non-reasoning';
+    this.stage2Model = DEFAULT_MODELS.stage2;
     // Cap reduced 6 → 3 (2026-04-29): logs showed cycles rarely hit the cap,
     // so the existing budget was paying for borderline candidates. With cap=3
     // we deep-dive only on the strongest signals; the remaining Stage 2 slots
@@ -767,12 +768,18 @@ class Scorer {
       const reasoningOn    = String(this.db?.getSetting?.('deepReasoningEnabled', '0')) === '1';
       const reasoningModel = (this.db?.getSetting?.('stage2ReasoningModel', '') || '').trim();
       const deepModel      = (reasoningOn && reasoningModel) ? reasoningModel : this.stage2Model;
+      // Deep reasoning used to require naming a second model, which is why the
+      // toggle did nothing while `stage2ReasoningModel` sat empty. On grok-4.3
+      // it is an effort level on the same model: same id, same calibration,
+      // instant rollback. An explicit 'none' matters — see _callResponsesAPI.
+      const deepEffort = reasoningOn ? 'low' : 'none';
       const stage2Cfg = {
         provider: 'xai',
         apiKey: this.providers.xai.apiKey,
         baseUrl: this.providers.xai.baseUrl,
         model: deepModel,
         enabled: !!this.providers.xai.apiKey,
+        reasoningEffort: deepEffort,
       };
 
       if (!stage2Cfg.enabled) {
@@ -1055,6 +1062,7 @@ class Scorer {
       maxToolCalls: this.stage2MaxToolCalls,
       temperature: 0.3,
       runtimeOverride,
+      xaiReasoningEffort: runtimeOverride?.reasoningEffort || 'none',
     });
 
     let result;
@@ -1298,7 +1306,8 @@ class Scorer {
     runtimeOverride = null,
     maxToolCalls = null,
     responseSchema = null,        // { name, schema } → text.format json_schema
-    reasoningEffort = null,       // 'minimal' | 'low' | 'medium' | 'high'
+    reasoningEffort = null,       // 'minimal' | 'low' | 'medium' | 'high' — OpenAI only
+    xaiReasoningEffort = null,    // 'none' | 'low' | 'medium' | 'high' — defaults to 'none'
   }) {
     const runtime = runtimeOverride || this.current;
 
@@ -1341,11 +1350,20 @@ class Scorer {
       };
     }
 
-    // Reasoning effort — only meaningful for reasoning-capable models. We pass
-    // it whenever caller asked for it and provider is OpenAI; for non-reasoning
-    // models the API returns 400 and we fall through to a retry without it
-    // (handled in the catch-block below, same pattern as the temperature retry).
-    if (reasoningEffort && runtime.provider === 'openai') {
+    // Reasoning effort — only meaningful for reasoning-capable models. For
+    // non-reasoning models the API returns 400 and we fall through to a retry
+    // without it (catch-block below, same pattern as the temperature retry).
+    //
+    // The two providers need opposite defaults. OpenAI sends nothing unless
+    // the operator set OPENAI_REASONING_EFFORT. xAI must always be explicit:
+    // grok-4.3 reasons by default, and the retired `-non-reasoning` ids we
+    // used to name were how the pipeline said "don't". Verified live
+    // 2026-07-31 — an "ok" reply costs 109 output tokens with no parameter
+    // and 1 with effort:'none', so staying silent here quietly buys a
+    // thinking budget on every Stage 1 batch and every Stage 2 deep dive.
+    if (runtime.provider === 'xai') {
+      body.reasoning = { effort: xaiReasoningEffort || 'none' };
+    } else if (reasoningEffort && runtime.provider === 'openai') {
       body.reasoning = { effort: reasoningEffort };
     }
 
