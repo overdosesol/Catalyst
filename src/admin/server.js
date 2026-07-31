@@ -22,6 +22,10 @@ import {
 } from '../analysis/preset-config.js';
 import { runManualAnalysis } from '../analysis/manual-analysis.js';
 import { DEFAULT_MODELS, listModelsForProvider } from '../analysis/model-registry.js';
+import {
+  getAgentKey, generateAgentKey, revokeAgentKey,
+  isAgentApiEnabled, setAgentApiEnabled, maskAgentKey,
+} from '../agent/key.js';
 import { withTelegramRetry } from '../notifications/telegram-retry.js';
 import { parseRequestTarget } from '../utils/url-safety.js';
 
@@ -1640,6 +1644,62 @@ class AdminServer {
         const enabled = next !== '0';
         this.logger.info(`[Admin] PreStage nano ${enabled ? 'ENABLED' : 'DISABLED'}`);
         return json(res, 200, { enabled });
+      }
+
+      // ── Agent MCP (read-only доступ для внешних AI-агентов) ───────────────
+      // Всё, что нужно для подключения Hermes, отдаётся одним ответом: адрес,
+      // ключ, готовый YAML и команда туннеля. Ключ живёт в БД (src/agent/key.js),
+      // поэтому выпуск и ротация здесь действуют сразу, без рестарта процесса.
+      //
+      // Ключ отдаётся в открытом виде осознанно: админка слушает только loopback
+      // и уже закрыта более привилегированным X-Admin-Key. Оператору его всё
+      // равно нужно скопировать целиком, а маскировка тут ничего не защищает.
+      if (path === '/api/agent-mcp' && method === 'GET') {
+        const key  = getAgentKey(this.db);
+        const port = this.config?.agent?.port || 8082;
+        return json(res, 200, {
+          listening:   this.config?.agent?.enabled === true,
+          enabled:     isAgentApiEnabled(this.db),
+          hasKey:      !!key,
+          key,
+          port,
+          localPort:   18082,
+          mcpPath:     '/mcp',
+          publicBaseUrl: this.config?.publicBaseUrl || '',
+        });
+      }
+      if (path === '/api/agent-mcp/key' && method === 'POST') {
+        try {
+          const key = generateAgentKey(this.db);
+          // В лог — только маска: полный ключ не должен оседать в логах,
+          // которые читаются шире, чем сама админка.
+          this.logger.info(`[Admin] Agent MCP key re-issued (${maskAgentKey(key)})`);
+          return json(res, 200, { key });
+        } catch (e) {
+          this.logger.error(`[Admin] Failed to issue agent key: ${e.message}`);
+          return json(res, 500, { error: e.message });
+        }
+      }
+      if (path === '/api/agent-mcp/key' && method === 'DELETE') {
+        try {
+          revokeAgentKey(this.db);
+          this.logger.info('[Admin] Agent MCP key revoked');
+          return json(res, 200, { ok: true });
+        } catch (e) {
+          this.logger.error(`[Admin] Failed to revoke agent key: ${e.message}`);
+          return json(res, 500, { error: e.message });
+        }
+      }
+      if (path === '/api/agent-mcp/toggle' && method === 'POST') {
+        try {
+          const next = !isAgentApiEnabled(this.db);
+          setAgentApiEnabled(this.db, next);
+          this.logger.info(`[Admin] Agent MCP ${next ? 'ENABLED' : 'DISABLED'}`);
+          return json(res, 200, { enabled: next });
+        } catch (e) {
+          this.logger.error(`[Admin] Failed to toggle agent API: ${e.message}`);
+          return json(res, 500, { error: e.message });
+        }
       }
 
       // ── Alert Scheduler (per-user FIFO cooldown) ──────────────────────────
@@ -7794,6 +7854,175 @@ function TagRefreshPage() {
   );
 }
 
+// ── Agent MCP page ──────────────────────────────────────────────────────────
+// Одно место, откуда оператор забирает ВСЁ для подключения внешнего AI-агента
+// (Hermes): адрес, ключ, готовый YAML, команду туннеля. Ключ живёт в БД, поэтому
+// выпуск и отзыв действуют сразу, без рестарта процесса.
+//
+// Template-literal traps (см. ExamplesPage / PresetConfigsPage):
+//   1) never use backticks in comments or strings
+//   2) never use \\n / \\t / \\r / \\u / \\x directly - double them
+//   3) never use dollar-brace interpolation - concatenate with plus
+function AgentCopyBtn({ getText, label }) {
+  const h = React.createElement;
+  const [copied, setCopied] = useState(false);
+  const onClick = async () => {
+    const text = typeof getText === 'function' ? getText() : String(getText || '');
+    if (!text) return;
+    try {
+      if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'absolute';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) { /* буфер недоступен - оператор скопирует руками */ }
+  };
+  return h('button', { className: 'btn btn-ghost btn-sm', onClick, type: 'button' },
+    copied ? '✓ скопировано' : (label || '📋 копировать'));
+}
+
+function AgentMcpPage() {
+  const h = React.createElement;
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = () => api('/api/agent-mcp').then(setData).catch(e => setErr(e.message));
+  useEffect(() => { load(); }, []);
+
+  if (err)   return h('div', { className: 'card' }, h('div', { className: 'muted' }, 'Ошибка: ' + err));
+  if (!data) return h('div', { className: 'card' }, h('div', { className: 'muted' }, 'Загрузка...'));
+
+  const issueKey = async () => {
+    if (data.hasKey && !window.confirm('Выпустить новый ключ? Старый перестанет работать немедленно, и Hermes придётся перенастроить.')) return;
+    setBusy(true);
+    try { await api('/api/agent-mcp/key', 'POST'); await load(); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  const revokeKey = async () => {
+    if (!window.confirm('Отозвать ключ? Агент потеряет доступ сразу же.')) return;
+    setBusy(true);
+    try { await api('/api/agent-mcp/key', 'DELETE'); await load(); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  const toggle = async () => {
+    setBusy(true);
+    try { await api('/api/agent-mcp/toggle', 'POST'); await load(); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  // Хост берём из публичного адреса дашборда - он же адрес VPS. Если не задан,
+  // оставляем плейсхолдер: лучше явная дырка, чем правдоподобная выдумка.
+  let host = '<сервер>';
+  try {
+    if (data.publicBaseUrl) host = new URL(data.publicBaseUrl).hostname;
+  } catch (e) { /* оставляем плейсхолдер */ }
+
+  const localUrl  = 'http://127.0.0.1:' + data.localPort + data.mcpPath;
+  const tunnelCmd = 'ssh -N -L ' + data.localPort + ':127.0.0.1:' + data.port + ' root@' + host;
+  const keyOrStub = data.key || '<сначала выпусти ключ>';
+  const yaml = [
+    'mcp_servers:',
+    '  catalyst:',
+    '    url: "' + localUrl + '"',
+    '    headers:',
+    '      Authorization: "Bearer ' + keyOrStub + '"',
+  ].join('\\n');
+
+  const pill = (ok, okText, badText) => h('span', {
+    style: {
+      display: 'inline-block', padding: '2px 10px', borderRadius: 10, fontSize: 11,
+      fontWeight: 600, background: ok ? 'rgba(34,197,94,.15)' : 'rgba(239,68,68,.15)',
+      color: ok ? '#22c55e' : '#ef4444',
+    },
+  }, ok ? okText : badText);
+
+  const mono = {
+    fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+    fontSize: 12, background: 'var(--bg)', border: '1px solid var(--border)',
+    borderRadius: 6, padding: '10px 12px', whiteSpace: 'pre-wrap',
+    wordBreak: 'break-all', margin: 0,
+  };
+
+  const row = (title, body, action) => h('div', { style: { marginBottom: 18 } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 } },
+      h('span', { style: { fontSize: 12, fontWeight: 600, color: 'var(--muted)' } }, title),
+      action || null),
+    body);
+
+  return h('div', null,
+    h('div', { className: 'card' },
+      h('h2', null, '🔌 Agent MCP'),
+      h('p', { className: 'muted', style: { marginTop: 4 } },
+        'Доступ внешних AI-агентов к нарративам. Только чтение — записи нет ни в каком виде. ' +
+        'Документация о том, что такое Catalyst, едет внутри самого сервера: в промпт агента её вставлять не нужно.'),
+
+      h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap', margin: '14px 0 20px' } },
+        pill(data.listening, 'порт слушает', 'порт не поднят'),
+        pill(data.enabled,   'доступ включён', 'доступ выключен'),
+        pill(data.hasKey,    'ключ выпущен',  'ключа нет')),
+
+      !data.listening ? h('div', {
+        style: {
+          padding: '10px 12px', borderRadius: 6, marginBottom: 18, fontSize: 12,
+          background: 'rgba(239,68,68,.1)', border: '1px solid rgba(239,68,68,.3)',
+        },
+      }, 'Слушатель не поднят: в .env нет AGENT_MCP_ENABLED=true. Это единственное, что правится не отсюда — нужен редеплой.') : null,
+
+      row('Ключ', data.hasKey
+        ? h('pre', { style: mono }, data.key)
+        : h('div', { className: 'muted', style: { fontSize: 12 } }, 'Ключ ещё не выпущен — эндпоинт отвечает 401 на всё.'),
+        h('span', { style: { display: 'flex', gap: 6, marginLeft: 'auto' } },
+          data.hasKey ? h(AgentCopyBtn, { getText: () => data.key, label: '📋 ключ' }) : null,
+          h('button', { className: 'btn btn-sm', onClick: issueKey, disabled: busy, type: 'button' },
+            data.hasKey ? '🔄 перевыпустить' : '🔑 выпустить ключ'),
+          data.hasKey ? h('button', { className: 'btn btn-ghost btn-sm', onClick: revokeKey, disabled: busy, type: 'button' }, '🗑 отозвать') : null)),
+
+      row('Конфиг для Hermes', h('pre', { style: mono }, yaml),
+        h('span', { style: { marginLeft: 'auto' } }, h(AgentCopyBtn, { getText: () => yaml, label: '📋 конфиг' }))),
+
+      row('SSH-туннель (запустить до подключения агента)', h('pre', { style: mono }, tunnelCmd),
+        h('span', { style: { marginLeft: 'auto' } }, h(AgentCopyBtn, { getText: () => tunnelCmd, label: '📋 команда' }))),
+
+      row('Рубильник', h('div', { style: { fontSize: 12, color: 'var(--muted)' } },
+        data.enabled
+          ? 'Агент обслуживается. Выключение отдаёт 503 на все запросы, ключ при этом сохраняется.'
+          : 'Все запросы получают 503. Ключ сохранён — включение вернёт доступ мгновенно.'),
+        h('span', { style: { marginLeft: 'auto' } },
+          h('button', { className: 'btn btn-sm', onClick: toggle, disabled: busy, type: 'button' },
+            data.enabled ? '⏸ выключить' : '▶ включить'))),
+
+      h('details', { style: { marginTop: 20 } },
+        h('summary', { style: { cursor: 'pointer', fontSize: 12, color: 'var(--muted)' } }, 'Что агент умеет'),
+        h('ul', { style: { fontSize: 12, color: 'var(--muted)', marginTop: 10, lineHeight: 1.7 } },
+          h('li', null, 'search_narratives — поиск с фильтрами по фазе, типу, категории, источнику и сортировкой'),
+          h('li', null, 'get_narrative — один нарратив целиком: оценки, метрики, объяснение, прогноз'),
+          h('li', null, 'get_narrative_media — картинка, видео, подпись, текст НА изображении и расшифровка речи'),
+          h('li', null, 'list_filter_values — актуальные категории и источники прямо из базы'),
+          h('li', null, 'get_stats — сводка по ленте за окно'))),
+
+      h('details', { style: { marginTop: 10 } },
+        h('summary', { style: { cursor: 'pointer', fontSize: 12, color: 'var(--muted)' } }, 'Когда агент переедет на другой хост'),
+        h('div', { style: { fontSize: 12, color: 'var(--muted)', marginTop: 10, lineHeight: 1.7 } },
+          'Туннель заменяется на nginx-роут /mcp (готовый блок — в DEPLOY.md, раздел 14.5), ' +
+          'а url в конфиге меняется на https://' + host + '/mcp. Ключ при выставлении наружу обязательно перевыпусти этой же кнопкой.'))
+    )
+  );
+}
+
 function App() {
   const [authed, setAuthed] = useState(!!localStorage.getItem('adminKey'));
   const [tab, setTab] = useState('stats');
@@ -7833,9 +8062,10 @@ function App() {
     {id:'users',     icon:'👥', label:'Пользователи'},
     {id:'payments',  icon:'💳', label:'Платежи'},
     {id:'bot',       icon:'🤖', label:'Бот и планы'},
+    {id:'agentmcp',  icon:'🔌', label:'Agent MCP'},
   ];
 
-  const PAGE = {stats:StatsPage, scanners:ScannersPage, presets:PresetConfigsPage, tagrefresh:TagRefreshPage, submit:SubmitPage, decisions:DecisionsPage, examples:ExamplesPage, users:UsersPage, payments:PaymentsPage, bot:BotPage};
+  const PAGE = {stats:StatsPage, scanners:ScannersPage, presets:PresetConfigsPage, tagrefresh:TagRefreshPage, submit:SubmitPage, decisions:DecisionsPage, examples:ExamplesPage, users:UsersPage, payments:PaymentsPage, bot:BotPage, agentmcp:AgentMcpPage};
   const CurrentPage = PAGE[tab];
 
   return React.createElement('div',{className:'layout'},

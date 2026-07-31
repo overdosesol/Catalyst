@@ -70,8 +70,8 @@ ENTRYPOINT ["/sbin/tini", "--"]
 # Запустить приложение
 CMD ["node", "src/index.js"]
 
-# Expose ports
-EXPOSE 8080 8081
+# Expose ports (8082 = agent MCP, read-only; mapped to 127.0.0.1 in compose)
+EXPOSE 8080 8081 8082
 
 # Volume points
 VOLUME ["/data", "/logs"]

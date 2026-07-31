@@ -13,6 +13,7 @@
 
 import http from 'http';
 import { sqliteCutoff } from '../utils/sqlite-time.js';
+import { buildFeedQuery } from '../db/feed-query.js';
 import path from 'path';
 import { LIFESPAN_VALUES, normalizeLifespan } from '../analysis/lifespan.js';
 import { runManualAnalysis, peekManualAnalysisCache } from '../analysis/manual-analysis.js';
@@ -1234,17 +1235,11 @@ class DashboardServer {
 
     const sortParam = url.searchParams.get('sort') || 'rank';
 
-    // Sort modes (no per-user personalization — removed 2026-04-27 along with
-    // the per-category boost. Rank is now the same global ordering for everyone.)
-    // 2026-05-20 R5: dropped the 'virality' UI option (duplicated rank). The
-    // branch below is kept as legacy-tolerance so old shared URLs still resolve
-    // to a sensible ordering instead of falling through to default.
-    let orderBy;
-    if      (sortParam === 'time')      orderBy = 'first_seen_at DESC';
-    else if (sortParam === 'virality')  orderBy = 'score DESC';
-    else if (sortParam === 'meme')      orderBy = "CAST(JSON_EXTRACT(raw_metrics, '$.memePotential') AS INT) DESC";
-    else if (sortParam === 'emergence') orderBy = "CAST(JSON_EXTRACT(raw_metrics, '$.emergenceScore') AS INT) DESC";
-    else                                orderBy = "CAST(JSON_EXTRACT(raw_metrics, '$.rankScore') AS INT) DESC";
+    // Sort modes live in buildFeedQuery (src/db/feed-query.js → SORT_MODES).
+    // No per-user personalization — removed 2026-04-27 along with the
+    // per-category boost. Rank is the same global ordering for everyone.
+    // 'virality' is kept there as legacy-tolerance so old shared URLs still
+    // resolve to a sensible ordering instead of falling through to default.
 
     // Per-user hidden trends — exclude IDs the current user dismissed.
     // chat_id is set after auth middleware; for anonymous (no auth in dev?)
@@ -1272,59 +1267,40 @@ class DashboardServer {
     // brand-new trends the two columns coincide — no regression at 24h.)
     // Cutoff is formatted to match SQLite's stored shape — see sqliteCutoff().
     const cutoff = sqliteCutoff(hours * 3_600_000);
-    let query = `SELECT * FROM trends WHERE last_seen_at > ?`;
-    const params = [cutoff];
 
-    if (hiddenIds.length > 0) {
-      // Use a parameterized IN list — SQLite supports up to 999 params per
-      // statement; with retention=7d a sane user won't accumulate that many.
-      query += ` AND id NOT IN (${hiddenIds.map(() => '?').join(',')})`;
-      params.push(...hiddenIds);
-    }
-    // Favourites-only filter (Pro/Admin). Returns empty when user has no
-    // saves yet — empty IN clause would be a SQL syntax error, so guard it.
-    if (favoritesOnly) {
-      if (favoriteIds.length === 0) {
-        return json(res, 200, { trends: [], total: 0, limit, offset });
-      }
-      query += ` AND id IN (${favoriteIds.map(() => '?').join(',')})`;
-      params.push(...favoriteIds);
-    }
     // Plan-source gate: free is locked to reddit + google_trends. Paid plans
     // see all 5. Mirror of alert-dispatcher's plan_source gate so feed and
-    // alerts agree on what user can see.
+    // alerts agree on what user can see. Computed here, not in the builder —
+    // the builder knows nothing about plans.
+    // NB: this is passed as `sources` and stays INDEPENDENT of the user's own
+    // `source` filter. Intersecting the two would look tidier but an empty
+    // intersection reads as "no filter" downstream, which would hand a free
+    // user the sources their plan locks.
     const planSources = getPlanEntitlements(req.user?.plan_name).sources;
-    if (planSources && planSources.length > 0 && planSources.length < 5) {
-      const placeholders = planSources.map(() => '?').join(',');
-      query += ` AND source IN (${placeholders})`;
-      params.push(...planSources);
-    }
-    if (category)         { query += ` AND category = ?`;                                                                              params.push(category); }
-    if (source)           { query += ` AND source = ?`;                                                                                params.push(source); }
-    if (phaseList.length > 0) {
-      const placeholders = phaseList.map(() => '?').join(',');
-      query += ` AND JSON_EXTRACT(raw_metrics, '$.narrativePhase') IN (${placeholders})`;
-      params.push(...phaseList);
-    }
-    if (minEmergence > 0) { query += ` AND CAST(JSON_EXTRACT(raw_metrics, '$.emergenceScore') AS INT) >= ?`;                           params.push(minEmergence); }
-    if (qRaw) {
-      // Escape SQL LIKE wildcards (%, _, \) so user-typed punctuation is literal.
-      // Sqlite LIKE is case-insensitive for ASCII; Cyrillic case-folding requires
-      // ICU which we don't load — acceptable tradeoff (titles are mostly EN).
-      const like = '%' + qRaw.replace(/[\\%_]/g, c => '\\' + c) + '%';
-      query += ` AND (title LIKE ? ESCAPE '\\' OR original_title LIKE ? ESCAPE '\\' OR ai_explanation LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\')`;
-      params.push(like, like, like, like);
-    }
+    const gatedSources = (planSources && planSources.length > 0 && planSources.length < 5)
+      ? planSources
+      : null;
 
-    query += ` ORDER BY ${orderBy} LIMIT ? OFFSET ?`;
-    params.push(limit, offset);
+    const { sql, params, countSql, countParams } = buildFeedQuery({
+      cutoff,
+      sort:         sortParam,
+      excludeIds:   hiddenIds,
+      // Favourites-only (Pro/Admin). An empty list means "user saved nothing
+      // yet" — the builder turns that into `AND 0` rather than a SQL-invalid
+      // empty IN().
+      onlyIds:      favoritesOnly ? favoriteIds : undefined,
+      sources:      gatedSources,
+      source,
+      category,
+      phase:        phaseList,
+      minEmergence,
+      q:            qRaw,
+      limit,
+      offset,
+    });
 
-    const rows = this.db.db.prepare(query).all(...params);
-
-    // Count with same filters (minus limit/offset)
-    const countParams = params.slice(0, -2);
-    const countQuery = query.replace(/ORDER BY.*$/, '').replace(/^SELECT \*/, 'SELECT COUNT(*) as c');
-    const total = this.db.db.prepare(countQuery).get(...countParams)?.c ?? 0;
+    const rows  = this.db.db.prepare(sql).all(...params);
+    const total = this.db.db.prepare(countSql).get(...countParams)?.c ?? 0;
 
     const userId = String(req.user?.telegram_chat_id || '').trim() || null;
     const trends = rows.map(row => this._formatTrend(row, userId, favoriteIdSet));

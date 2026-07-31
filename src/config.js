@@ -106,6 +106,25 @@ const config = {
     host:     process.env.DASHBOARD_HOST    || '0.0.0.0',
   },
 
+  // Agent MCP - read-only access for external AI agents (Hermes + operator
+  // CLI agents). Binds to loopback ONLY; reachable from outside via an SSH
+  // tunnel, or via an nginx route once the agent moves to another host.
+  // See DEPLOY.md. Off by default - an unset key must never mean "open".
+  agent: {
+    enabled: process.env.AGENT_MCP_ENABLED === 'true',
+    port:    parseInt(process.env.AGENT_MCP_PORT || '8082', 10),
+    // Defaults to loopback so a bare-metal run is safe out of the box.
+    // Under Docker this MUST be 0.0.0.0 (see docker-compose.yml): a published
+    // port forwards to the container's bridge interface, never to its
+    // loopback, so binding 127.0.0.1 inside the container makes the mapped
+    // port unreachable. The loopback guarantee comes from the host-side
+    // binding `127.0.0.1:8082:8082` — same arrangement as the admin panel.
+    host:    process.env.AGENT_MCP_HOST || '127.0.0.1',
+    // NB: the bearer key is NOT here. It lives in the `settings` table so the
+    // operator can mint and rotate it from the admin panel without touching
+    // .env or redeploying. See src/agent/key.js.
+  },
+
   // System settings
   alertThreshold:      parseInt(process.env.ALERT_THRESHOLD       || '60', 10),
   scanIntervalMinutes: parseInt(process.env.SCAN_INTERVAL_MINUTES || '15', 10),
@@ -155,6 +174,8 @@ flag(config.tiktok.enabled && !Object.values(config.apify.tiktokKeys).some(Boole
      'TIKTOK_ENABLED=true but no TikTok actor key (APIFY_API_KEY / APIFY_API_APIDOJO) set');
 flag(config.dashboard.enabled && !config.dashboard.apiKey, 'DASHBOARD_API_KEY not set - legacy header check will fail');
 flag(config.support.botToken && !config.support.groupId, 'SUPPORT_BOT_TOKEN set but SUPPORT_GROUP_ID missing - support bot disabled');
+flag(process.env.CATALYST_AGENT_KEY,
+     'CATALYST_AGENT_KEY is set but no longer read - the agent key now lives in the DB and is managed from the admin panel. Remove it from .env.');
 
 if (warnings.length > 0) {
   console.warn('⚠️  Configuration warnings:');

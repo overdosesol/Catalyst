@@ -17,10 +17,17 @@ services:
       ADMIN_PORT: 8081
       ADMIN_HOST: 0.0.0.0
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      # Agent MCP. 0.0.0.0 inside the container is REQUIRED, not a loosening:
+      # a published port forwards to the container's bridge interface, never to
+      # its loopback. The localhost-only guarantee is the `127.0.0.1:` prefix on
+      # the port mapping below — exactly how the admin panel is protected.
+      AGENT_MCP_PORT: 8082
+      AGENT_MCP_HOST: 0.0.0.0
 
     ports:
       - "127.0.0.1:8080:8080"  # Main Dashboard (only via nginx with TLS)
       - "127.0.0.1:8081:8081"  # Admin Panel (localhost only)
+      - "127.0.0.1:8082:8082"  # Agent MCP, read-only (localhost only)
     
     volumes:
       # Персистентные данные

@@ -26,6 +26,7 @@ import TagRefresher from './refresh/tag-refresher.js';
 import SolanaPayMonitor from './billing/solana-pay.js';
 import DashboardServer from './dashboard/server.js';
 import AdminServer from './admin/server.js';
+import AgentMcpServer from './agent/server.js';
 import { getTranslations } from './i18n/index.js';
 
 const logger = new Logger(config.logLevel);
@@ -471,6 +472,13 @@ const admin = new AdminServer(config, logger, db, telegram.bot, appState, () => 
 });
 admin.start();
 
+// ── Initialize agent MCP (read-only, loopback-only) ─────────────────────────
+// Off unless AGENT_MCP_ENABLED=true. The bearer key lives in the DB and is
+// minted from the admin panel, so a missing key is not a reason to refuse
+// startup: with no key the endpoint simply 401s everything. See DEPLOY.md.
+const agentMcp = new AgentMcpServer(config, logger, db);
+agentMcp.start();
+
 // ── Start Solana Pay monitor ────────────────────────────────────────────────
 solanaMonitor.start(30_000);
 
@@ -845,6 +853,7 @@ async function shutdown(signal) {
     await Promise.allSettled([
       dashboard.stop(10_000),
       admin.stop(10_000),
+      agentMcp.stop(10_000),
     ]);
     db.close();
   } catch (e) {
