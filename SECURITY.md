@@ -35,9 +35,12 @@ and Dependabot alerts on your fork.
 
 ## Current Security Notes
 
-- Dashboard bearer sessions are stored as hashed tokens server-side. The browser
-  keeps the active dashboard token in `sessionStorage` so it is not persisted
-  across browser restarts.
+- Dashboard bearer sessions are stored as hashed tokens server-side, with a
+  30-day sliding expiry that is refreshed on use. The browser keeps the active
+  token in `localStorage`. `sessionStorage` was tried and reverted: it does not
+  meaningfully limit XSS (a script on the page reads either store) and it ended
+  every session when the browser closed. Moving the token to an `HttpOnly`
+  cookie is the real hardening step and is still open.
 - Admin still stores the operator key in browser `localStorage`; the admin panel
   is designed for loopback/SSH-tunnel access only, not direct internet exposure.
 - Production secrets must live in `.env` or a private secret manager, never in

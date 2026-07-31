@@ -7423,19 +7423,29 @@ function useFocusTrap(containerRef, isOpen) {
 // Login is Telegram-bot-only. The bot issues a 6-digit code bound to a session;
 // verifying the code returns a 64-hex bearer token that is attached to every
 // /api/* request. On 401 we clear the token and show the login screen.
+//
+// Storage: localStorage, so the session survives closing the browser — the only
+// bound on a login is the server-side token TTL (30d, sliding). sessionStorage
+// was tried in the OSS hardening pass (cb43587) and reverted: it dies with the
+// tab, which logged the operator out every time the browser closed, and it buys
+// nothing against XSS — a script running on the page reads either store equally
+// well. Real token-theft hardening would be an HttpOnly cookie, not this knob.
 const AUTH_TOKEN_KEY = 'ts_auth_token';
 let AUTH_TOKEN = '';
 try {
-  AUTH_TOKEN = sessionStorage.getItem(AUTH_TOKEN_KEY) || localStorage.getItem(AUTH_TOKEN_KEY) || '';
-  localStorage.removeItem(AUTH_TOKEN_KEY);
+  AUTH_TOKEN = localStorage.getItem(AUTH_TOKEN_KEY) || sessionStorage.getItem(AUTH_TOKEN_KEY) || '';
+  // Carry a session-scoped token from the previous build over to localStorage
+  // so an already-open tab isn't bounced to the login screen once on deploy.
+  if (AUTH_TOKEN) localStorage.setItem(AUTH_TOKEN_KEY, AUTH_TOKEN);
+  sessionStorage.removeItem(AUTH_TOKEN_KEY);
 } catch (e) {}
 const authListeners = new Set();
 function setAuthToken(tok) {
   AUTH_TOKEN = tok || '';
   try {
-    if (AUTH_TOKEN) sessionStorage.setItem(AUTH_TOKEN_KEY, AUTH_TOKEN);
-    else            sessionStorage.removeItem(AUTH_TOKEN_KEY);
-    localStorage.removeItem(AUTH_TOKEN_KEY);
+    if (AUTH_TOKEN) localStorage.setItem(AUTH_TOKEN_KEY, AUTH_TOKEN);
+    else            localStorage.removeItem(AUTH_TOKEN_KEY);
+    sessionStorage.removeItem(AUTH_TOKEN_KEY);
   } catch (e) {}
   authListeners.forEach(fn => { try { fn(AUTH_TOKEN); } catch (e) {} });
 }

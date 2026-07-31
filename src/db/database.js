@@ -14,6 +14,15 @@ function authTokenHash(token) {
   return crypto.createHash('sha256').update(String(token || ''), 'utf8').digest('hex');
 }
 
+// Dashboard bearer-token lifetime. Sliding: an authenticated request pushes the
+// expiry back out to the full window once less than RENEW_BELOW remains, so an
+// operator who opens the dashboard at least monthly is never logged out, while
+// an abandoned token still dies 30 days after its last use. The threshold caps
+// the write rate at one UPDATE per token per (TTL - RENEW_BELOW) days, so this
+// does not turn every API call into a SQLite write.
+const AUTH_TOKEN_TTL_DAYS         = 30;
+const AUTH_TOKEN_RENEW_BELOW_DAYS = 25;
+
 class TrendDatabase {
   constructor(dbPath, logger) {
     this.logger = logger;
@@ -790,7 +799,7 @@ class TrendDatabase {
    * clears the code, returns { token, user }. Constant-time code compare to
    * resist timing attacks. Rate-limiting is the caller's responsibility.
    */
-  verifyAuthCode(sessionId, code, ttlDays = 30) {
+  verifyAuthCode(sessionId, code, ttlDays = AUTH_TOKEN_TTL_DAYS) {
     const s = this.db.prepare(
       `SELECT * FROM auth_sessions WHERE session_id = ?`
     ).get(sessionId);
@@ -818,6 +827,24 @@ class TrendDatabase {
   }
 
   /**
+   * Sliding expiry — push token_expires_at back to the full window once the
+   * remaining life drops below the renew threshold. Best-effort by design: a
+   * failed housekeeping write must never downgrade a valid session to a 401.
+   */
+  _renewAuthToken(hash, expiresAt) {
+    if (!expiresAt) return;
+    const remainingMs = new Date(expiresAt).getTime() - Date.now();
+    if (!Number.isFinite(remainingMs)) return;
+    if (remainingMs > AUTH_TOKEN_RENEW_BELOW_DAYS * 24 * 3600_000) return;
+    const next = new Date(Date.now() + AUTH_TOKEN_TTL_DAYS * 24 * 3600_000).toISOString();
+    try {
+      this.db.prepare(
+        `UPDATE auth_sessions SET token_expires_at = ? WHERE token_hash = ?`
+      ).run(next, hash);
+    } catch { /* never fail auth on a renewal write */ }
+  }
+
+  /**
    * Middleware helper — resolve a bearer token to its owning user row.
    * Returns null for missing/expired/unknown tokens.
    */
@@ -831,6 +858,7 @@ class TrendDatabase {
     ).get(hash);
     if (row) {
       if (row.token_expires_at && new Date(row.token_expires_at).getTime() < Date.now()) return null;
+      this._renewAuthToken(hash, row.token_expires_at);
       return this.getUserByChatId(row.chat_id);
     }
 
@@ -846,6 +874,7 @@ class TrendDatabase {
          SET token_hash = ?, token = NULL
        WHERE session_id = ?
     `).run(hash, legacy.session_id);
+    this._renewAuthToken(hash, legacy.token_expires_at);
     return this.getUserByChatId(legacy.chat_id);
   }
 
