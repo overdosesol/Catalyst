@@ -609,15 +609,54 @@ Each secret has a lifetime. Bundle #17 (2026-06-05) documents the recommended ro
 | `ADMIN_API_KEY` | 90 days or after operator change | local `openssl rand -base64 32` | `curl -H "X-Admin-Key: ..." /admin/api/health` |
 | `DASHBOARD_API_KEY` | 180 days | local `openssl rand -base64 32` | Browser login still works |
 | `HELIUS_API_KEY` | 180 days | https://helius.dev | Solana payment confirmation test |
-| `APIFY_TWEET_SCRAPER_TOKEN` | 180 days | https://console.apify.com/account/integrations | Manual X collection → check log |
-| `APIFY_TRENDS_SCRAPER_TOKEN` | 180 days | same | Manual trends collection |
-| `TIKTOK_*` keys | 180 days | https://console.apify.com | Manual TikTok collection |
+| `APIFY_API_KEY` (legacy name `APIFY_API`) | 180 days | https://console.apify.com → Settings → Integrations | Manual TikTok collection + check `[XTrends]` log |
+| `APIFY_API_KAITO` | 180 days | same | Manual X collection → check log (this is the default X actor) |
+| `APIFY_API_XQUIK` | 180 days | same | Switch actor to `xquik` in admin → manual X collection |
+
+#### Switching the whole Apify account
+
+The three Apify vars above are separate tokens but normally belong to the same
+Apify account, so an account-level problem (suspension, billing block) takes all
+scrapers down at once — X, TikTok and X Trends. Rotate them as one batch.
+
+What does **not** change: every actor we call is a third-party public Store actor
+(`kaitoeasyapi~`, `xquik~`, `clockworks~`, `apidojo~`, `karamelo~`). The account
+does not own them, it only runs them, so actor IDs in `src/collectors/*` stay as
+they are. All calls go through `run-sync-get-dataset-items` — no saved Apify
+tasks, datasets, key-value stores or webhooks are tied to the account either.
+
+Two things that bite on a fresh account, neither of which is a code change:
+
+- **apidojo needs a one-time permission approval** in Apify Console. Until it is
+  granted the actor returns 403 `full-permission-actor-not-approved`. It fails
+  soft (manual TikTok URL analysis silently falls back to oEmbed and Gemini gets
+  no video), so nothing looks broken — it just gets quietly worse. See the
+  comment in `src/analysis/url-resolver.js`.
+- **The actors are paid**, pay-per-result. A fresh account needs a funded balance
+  before any collection works; free credits do not cover real traffic.
+
+Optional per-actor overrides exist and are usually unset — `APIFY_API_CLOCKWORKS`,
+`APIFY_API_APIDOJO`, `APIFY_X_TRENDS_KEY`. If a deployment does set them, they
+carry their own tokens and must be rotated too. Unset, they fall back to
+`APIFY_API_KEY`.
 
 #### Per-key procedure
 
 1. **Generate** new key on the provider side (keep old key active for now)
 2. **Edit `.env`** on VPS: `ssh root@catalyst.example.com "nano /opt/catalyst/.env"` — replace old value with new
-3. **Restart**: `ssh root@catalyst.example.com "cd /opt/catalyst && docker compose restart catalyst"`
+3. **Apply**: `ssh root@catalyst.example.com "cd /opt/catalyst && docker compose up -d"`
+
+   ⚠️ **`docker compose restart` does NOT pick up a changed `.env`.** Env vars are
+   baked into the container when it is created, so `restart` stops and starts the
+   *same* container with the *old* values — the rotation silently does nothing and
+   you keep debugging the old key's errors. `up -d` recreates the container and
+   re-reads `.env`. Data survives: `/data` and `/logs` are named volumes.
+
+   Confirm the new value actually landed inside the container (prints a hash, not
+   the secret):
+   ```bash
+   docker compose exec -T catalyst printenv | grep -E '^APIFY_API_KEY=' | cut -d= -f2- | sha256sum | cut -c1-8
+   ```
 4. **Verify** using the test from the schedule table above
 5. **Revoke old key** on the provider side (only AFTER verification — otherwise risk downtime if new key doesn't work)
 6. **Log** in your private operator notes:
@@ -817,9 +856,19 @@ curl -s -X POST http://127.0.0.1:18082/mcp \
 
 Ничто из этого не требует рестарта: ключ и флаг читаются из БД на каждый запрос.
 
-### 14.5 Когда агент переедет на другой хост
+### 14.5 Вариант «наружу через nginx» — когда агент переедет на другой хост
 
-Добавить в nginx-конфиг сайта и перечитать конфиг:
+**Пока не включено, и это осознанно.** Сейчас агент живёт на машине оператора и
+ходит через SSH-туннель (14.3), поэтому эндпоинт недостижим ни для кого, у кого
+нет SSH-доступа к серверу. Ниже записано, что делать, когда этого станет мало —
+чтобы решение не пришлось принимать заново на бегу.
+
+**Когда переключаться.** Триггер ровно один: агент переезжает на отдельный хост и
+туннель между двумя VPS становится лишним звеном. До этого момента туннель строго
+безопаснее, и менять его не на что.
+
+**Что поменяется.** В nginx-конфиг сайта добавляется location, конфиг
+перечитывается:
 
 ```nginx
 location /mcp {
@@ -832,10 +881,42 @@ location /mcp {
 }
 ```
 
-После этого `url` в конфиге Hermes меняется на `https://<домен>/mcp`, код не
-меняется. **Ключ при выставлении наружу обязательно перевыпустить** кнопкой
-«🔄 перевыпустить» в админке — он перестаёт быть защищённым тем, что доступен
-только через SSH.
+После этого `url` в конфиге агента меняется на `https://<домен>/mcp`. Код Catalyst
+не меняется ни строкой: сервер как слушал loopback, так и слушает, наружу его
+выставляет nginx.
+
+**Чем платим.** Сейчас у эндпоинта две независимые преграды: попасть в сеть (SSH)
+и знать ключ. После переключения остаётся одна — ключ. Утёкший ключ сегодня
+бесполезен без SSH-доступа; после переключения он даёт полный read-доступ ко всем
+нарративам из любой точки интернета.
+
+**Чек-лист переключения:**
+
+| Шаг | Зачем |
+|---|---|
+| Перевыпустить ключ в админке | Старый жил в предположении «до него всё равно не дотянуться». |
+| Ограничить `location /mcp` по IP: `allow <хост агента>; deny all;` | Возвращает вторую преграду почти даром. |
+| Поставить `limit_req` на этот location | Свой лимит у агента есть (120/мин), но он считает уже принятые запросы. |
+| Проверить формат `access_log` | Ключ ездит в заголовке; кастомный формат с заголовками положит его в логи. |
+| Перечитать 14.4 | Рубильник и отзыв ключа становятся единственным быстрым способом закрыть доступ. |
+
+### 14.6 Туннель на машине оператора: он не переживает перезагрузку
+
+`ssh -N -L` из 14.3 — обычный процесс переднего плана. Он умирает от перезагрузки,
+сна и закрытого терминала, и обратно его никто не поднимает. Со стороны агента это
+выглядит как `All connection attempts failed` и читается как «Catalyst сломался»,
+хотя сервер в этот момент жив и отвечает `401` на любой запрос без ключа.
+
+Различать просто: **отказ соединения — это туннель, `401`/`503` — это Catalyst.**
+
+Поэтому на рабочей машине туннель стоит повесить на автозапуск при входе в систему,
+циклом с перезапуском после обрыва: задача планировщика в Windows, user-unit
+systemd или autossh в Linux. Флаги, которые стоит добавить к команде из 14.3:
+
+- `-o ExitOnForwardFailure=yes` — падать сразу, если проброс не встал, вместо
+  живого соединения, в которое агент стучится впустую;
+- `-o ServerAliveInterval=30 -o ServerAliveCountMax=3` — переживать простой,
+  который NAT иначе молча выкидывает.
 
 ---
 
