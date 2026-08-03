@@ -325,15 +325,22 @@ class TwitterCollector extends BaseCollector {
 
     // Media — works for both photos and videos (preview frame)
     // Twitter API v2: tweet.media[].preview_image_url (videos) or .url (photos)
-    // Legacy/Apify: tweet.entities.media[].media_url_https
+    // Legacy/Apify:   tweet.entities.media[].media_url_https
+    // xquik:          tweet.media[].mediaUrl (camelCase, direct pbs.twimg.com link)
     const mediaList = tweet.media?.length ? tweet.media
                     : (tweet.entities?.media || []);
+    // NB: xquik puts the real file in `mediaUrl` and a t.co shortlink in `url`.
+    // A t.co URL inside <img src> serves an HTML redirect page, not an image, so
+    // the preview breaks while everything looks fine in the DB. Hence: prefer the
+    // direct CDN link, and reject t.co no matter which field it arrives in.
+    const isShortlink = (u) => /^https?:\/\/t\.co\//i.test(u);
     const pickUrl = (m) => {
       if (!m) return null;
       const isPhoto = m?.type === 'photo' || !m?.type;
-      return isPhoto
-        ? (m.media_url_https || m.url || m.media_url || m.preview_image_url || null)
-        : (m.preview_image_url || m.media_url_https || m.url || m.media_url || null);
+      const candidates = isPhoto
+        ? [m.media_url_https, m.mediaUrl, m.media_url, m.preview_image_url, m.url]
+        : [m.preview_image_url, m.media_url_https, m.mediaUrl, m.media_url, m.url];
+      return candidates.find(u => u && !isShortlink(u)) || null;
     };
     const upgrade = (u) => {
       if (!u || !/pbs\.twimg\.com\//.test(u)) return u;
@@ -365,7 +372,10 @@ class TwitterCollector extends BaseCollector {
       for (const m of list) {
         const type = m?.type;
         if (type !== 'video' && type !== 'animated_gif') continue;
-        const variants = m.video_info?.variants || m.variants || [];
+        // video_info.variants — Twitter API v2 / legacy shape (kaitoeasyapi);
+        // videoVariants — xquik's camelCase equivalent, same {url, bitrate,
+        // contentType} entries, so the filtering below needs no other change.
+        const variants = m.video_info?.variants || m.variants || m.videoVariants || [];
         const mp4s = variants
           .filter(v => (v.content_type || v.contentType || '').includes('mp4') || /\.mp4(\?|$)/i.test(v.url || ''))
           .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
