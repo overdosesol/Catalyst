@@ -76,12 +76,14 @@ export function collectSubjectNames(trend) {
     for (const n of gNames) push(n, 'gemini');
   }
 
-  // 2) Stage 2 Grok subjectName (single value with strength score)
-  const x = trend.xSearchData;
-  if (x?.subjectName) {
-    // Only trust Grok's name when nameStrength is decent. <30 = guess noise.
-    const strength = Number(x.nameStrength) || 0;
-    if (strength >= 30) push(x.subjectName, 'xsearch');
+  // 2) Stage 1 subjectName (single value with a strength score). Produced by
+  //    Stage 2 until 2026-08-04; the xSearchData path stays as a read fallback
+  //    for trend objects built before the move.
+  const flatName     = trend.subjectName || trend.xSearchData?.subjectName;
+  const flatStrength = Number(trend.nameStrength ?? trend.xSearchData?.nameStrength) || 0;
+  if (flatName) {
+    // Only trust the model's name when strength is decent. <30 = guess noise.
+    if (flatStrength >= 30) push(flatName, 'stage1');
   }
 
   // 3) Nano entityCanonical — text NER fallback. Filter to capitalized

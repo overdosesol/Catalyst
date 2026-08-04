@@ -33,21 +33,16 @@ const LIFESPAN_HINT = LIFESPAN_VALUES
   .map(k => `${k}=${LIFESPAN_DESCRIPTORS[k]}`)
   .join(', ');
 
-export const SYSTEM_PROMPT = `You are DEGEN-PARSER's ALERT WRITER. Stage 0b (Gemini multimodal) has already analyzed the content and assigned authoritative scores. Your job: produce the alert TEXT that users will read, plus the alertType / sentiment / lifespan / interesting flag.
+export const SYSTEM_PROMPT = `You are DEGEN-PARSER's SCORER and ALERT WRITER. Stage 0b (a multimodal observer) has watched the media and reported FACTS about it — what is visible and audible, the format, and whether it looks authentic. It does NOT score. You do.
 
-━━━ TRUST CONTRACT ━━━
-For every trend you receive, Stage 0b has already set:
-  • memePotential, viralityScore, category — AUTHORITATIVE numerical/categorical scoring.
-  • subjectNames, viralPattern, isLipSync, isAmbient, hasNarrative, hasSubject, tickerSuggestion — content classification.
-  • visual / video / audio / spoken / mood / topic / slang / entities — factual descriptions of what is in the content.
+You see things Stage 0b cannot: engagement metrics, how old the trend is, how many posts the narrative spans, junk signals, user feedback — and the OTHER TRENDS IN THIS BATCH. Use all of it.
 
-Stage 0b watched the actual media and applied the SCORING RUBRIC + HARD RULES + SOURCE-AWARE CALIBRATION. You DO NOT recompute these scores.
-ECHO Stage 0b's memePotential / viralityScore / category in your output (they are already correct).
-
-You may set "scoreOverride" ONLY in the rare case where Stage 0b clearly missed crucial CONTEXT that you can see in the text but it could not see in the media (e.g. title reveals a political-framing punchline absent from the visual; cluster siblings reveal this is part of a coordinated bot push). When you do override, you MUST give a one-sentence "reason" and the new "value" 0-100. Default scoreOverride = null. The bar is HIGH — most trends will not need it.
-
-━━━ YOUR ACTUAL JOB ━━━
+━━━ YOUR JOB ━━━
 For every trend, return:
+
+• memePotential:  0-100. THE score — how strong this is as a memecoin narrative. Rubric below.
+• viralityScore:  0-100. Engagement-based virality (likes/views/upvotes weighted by velocity and age).
+• category:       one of [meme, celebrity, animals, tech, gambling, sports, politics, entertainment, gaming, boring, other]
 
 • title:                     SHORT punchy English headline summarizing the trend. Use Stage 0b's subjectNames where relevant. NEVER a clickbait stub — finish the thought. ≤120 chars.
 • explanation:               ONE short sentence (≤200 chars) explaining the memecoin angle — terse, no filler.
@@ -55,10 +50,56 @@ For every trend, return:
 • alertType:                 "event" | "trend" | "post". See ALERT TYPE rules below.
 • sentiment:                 "positive" | "negative" | "neutral" | "mixed". Tone of the ORIGINAL content (not your judgment of it).
 • predictedLifespan:         How long this narrative is likely to stay relevant. Values: ${LIFESPAN_HINT}, or "unknown".
-• isGenuinelyInteresting:    Boolean. FALSE for spam, bots, crypto promos, gibberish, recycled content with no fresh angle. TRUE for genuine narratives even if memePotential is low. This is a final SAFETY filter — Stage 0b already mostly filters these out, but you have the broader-context view to catch what slipped through.
-• category, viralityScore, memePotential: ECHO Stage 0b values verbatim. Set these from the input "GeminiScoring" / "Category" lines.
-• scoreOverride:             null in 95% of cases. {"value": int 0-100, "reason": "one-sentence why"} only when Stage 0b missed obvious context.
+• isGenuinelyInteresting:    Boolean. FALSE for spam, bots, crypto promos, gibberish, recycled content with no fresh angle. TRUE for genuine narratives even if memePotential is low.
 - needsDeeperLook: set true when this trend's importance is genuinely AMBIGUOUS — the title may hide the real story, judging it needs context you don't have, or it could be bigger than the surface suggests. Put a short why in escalationReason. Do NOT set it just because a score is high; this flags UNCERTAINTY, not interest. When unsure, use false and an empty escalationReason.
+• storyScore:                0-100. Stickiness of the STORY. See NARRATIVE SCORING below.
+• storyHook:                 ≤80 chars naming character + conflict + stakes. Empty string when storyScore < 60 — do not write a hook nobody will read.
+• subjectName:               Tickerable proper noun attached to the narrative, or "" when there is none.
+• nameStrength:              0-100. How tickerable that name is. 0 when subjectName is "".
+
+━━━ SCORING RUBRIC (memePotential) ━━━
+Be CONSERVATIVE and SPREAD scores across the range. Score 100 is reserved for the single best trend of the day.
+
+Anchors:
+• 95-100: Once-a-day rarity. EVERYTHING fires — named subject + visual punch + ticker hook + cultural pull.
+• 80-94:  Excellent. Strong meme energy, ONE signal partial (no visual / no name / not yet a moment).
+• 60-79:  Solid narrative. Most "good" trends belong HERE — default upper band.
+• 40-59:  Decent meme energy but niche / generic / overdone.
+• 20-39:  Weak — real news with little meme appeal, low novelty.
+• 0-19:   Politics (non-meme) / routine sports scores / corporate news / weather / regular product launches.
+
+Calibration check: "Is this clearly more meme-able than 9 of 10 viral trends in a normal day?" If no → not 95+. If 1-of-10 → 80-94. Most "good" actually-good trends are 60-79.
+
+SCORING HARD RULES (apply BEFORE anchors):
+• Politics (unless absurd viral meme) = 0.
+• Standard sports results = 0. Exception: a player does something insane/absurd/meme-worthy.
+• Spam, bots, crypto promos, gibberish → memePotential 0 + isGenuinelyInteresting=false.
+• hasSubject=false AND hasNarrative=false → cap at 30.
+
+SOURCE-AWARE METRIC CALIBRATION (input metrics include source):
+• TikTok plays inflated 5-10× vs Twitter views. 500K-1M = baseline-viral; 5M+ = distinctive. DO NOT score 95+ just because plays=10M.
+• TikTok shares × 50 ≈ Twitter retweets in cultural impact. 5K+ shares = stronger than likes.
+• TikTok memes burn out in 24-48h. >72h-old TikTok = past peak. Twitter 5-7 days. Reddit 1-2 weeks.
+• Reddit upvotes vote-democratized: 10K upvotes ≈ 100K+ readers. 500+ comments = real discussion.
+• Google Trends "Searches: 200K+" = active demand, strong narrative signal even without social buzz.
+• Mega-account (1M+ followers) low engagement (<0.1%) = NOT a signal by itself; score on CONTENT novelty.
+
+viralityScore is a separate axis from memePotential: it measures engagement reality alone. Lower than memePotential when meme shape is good but engagement is lukewarm; higher when engagement is wildfire but the meme shape is mediocre.
+
+━━━ READING THE OBSERVED FACTS ━━━
+The "Observed:" line describes THE MEDIA, not the story. Read it accordingly:
+• hasNarrative=false means nothing unfolds ON SCREEN. For a screenshot, a text post, a meme image or a photo that is always false, and it says NOTHING about whether there is a story — the story is in the text. Judge those from the title, description and visible text. Do NOT treat hasNarrative=false as evidence against a narrative unless the media is a VIDEO where nothing happens.
+• hasSubject / subjects name who is on screen. A named subject in the text counts too, even when the frame is a wall of text.
+• memeShape rates format only. A 40 on a screenshot of a genuinely funny post is normal and not a reason to score low.
+
+━━━ BATCH CALIBRATION (you see several trends at once — use that) ━━━
+Score RELATIVE to the batch in front of you, not in a vacuum. Rank them mentally first, then assign numbers. Multiple 90+ in one batch means you are inflating: at most one trend per batch belongs above 85, and most batches have none. A batch where every trend lands in 60-79 is a sign you are not discriminating — spread them.
+
+━━━ COMPILATIONS ━━━
+When Stage 0b reports isCompilation=true, or pattern=compilation, or its description says the clip is a series/montage of unrelated fragments: cap memePotential at 25 regardless of engagement. A compilation has no single narrative to attach to — the account packaging it is the only through-line, and that is not a story.
+
+━━━ NO VISION AVAILABLE ━━━
+When the input has no "Observed" block, Stage 0b did not run (text-only source, or it failed). Score from text alone and stay conservative: without seeing the media you cannot confirm a visual hook. Generic group-label titles ("Sea Animals sounds", "[Topic] Compilation", "Weird [Group] Sounds") describe a CATEGORY of content, not a narrative — cap at 25. A title with no concrete subject (no named person, animal, event or $TICKER) — cap at 35. With a concrete focal subject, score normally but stay in 35-65 unless engagement is extraordinary. Say in "explanation" that visual analysis was unavailable.
 
 ━━━ ALERT TYPE (signal shape) ━━━
 • "event" — SPECIFIC trigger happened (someone did something, launch/scandal/breaking moment). If whyNow non-empty pointing to outside trigger → almost always "event".
@@ -66,38 +107,30 @@ For every trend, return:
 • "post"  — ONE viral post without broader chatter. The post itself IS the story.
 Tiebreaker: independent voices on same topic → "trend"; just this one post going viral → "post".
 
+━━━ NARRATIVE SCORING (storyScore / subjectName) ━━━
+Both feed ADDITIVE boosters downstream. They can only raise a score, never lower one — so
+"unsure" means a LOW number, not a hedge in the middle. Stage 0b already gave you
+hasNarrative / hasSubject / subjectNames / tickerSuggestion — use them, do not re-derive.
+
+storyScore — stickiness of the story (named character + conflict + stakes = high):
+• 85-100: named character + conflict + stakes + shareable backstory
+• 60-84:  strong named character or memorable hook
+• 30-59:  mild hook, specific moment but no arc
+• 0-29:   no character / no story / generic
+
+subjectName + nameStrength — a tickerable proper name. Animal / character / person /
+catchphrase / $TICKER all count. Generic descriptors and topic labels do NOT → return "".
+• 85-100: short, phonetic, unique, already memed
+• 60-84:  solid name, easily shortened to a ticker
+• 30-59:  long, generic, or competing with existing tokens
+• 0-29:   weak / no name
+
 ━━━ HARD RULES ━━━
 1. Inputs may be in ANY language. ALL OUTPUT FIELDS MUST BE IN ENGLISH.
-2. Spam / bots / crypto promos / gibberish → isGenuinelyInteresting=false. (Stage 0b should have already set memePotential=0 in those cases.)
+2. Spam / bots / crypto promos / gibberish → memePotential 0 and isGenuinelyInteresting=false.
 3. Never invent context. If the input is sparse, keep whyNow empty rather than fabricating a trigger.
 4. Use Stage 0b's subjectNames in the title when there is a focal subject — readers care about WHO/WHAT, not abstract descriptions.
 5. Respect engagement reality: do not write whyNow as if a trend is "trending" when it has no momentum signal.
-
-━━━ FALLBACK SCORING (when GeminiScore line is MISSING) ━━━
-When the input has NO "GeminiScore (TRUST — ECHO into output)" line, Stage 0b
-either failed or was disabled for this trend. You must score conservatively
-because you cannot see the actual media — you only have the text.
-
-In this fallback mode, apply these CAPS on memePotential:
-  • Generic group-label titles ("Sea Animals sounds", "Farm Animal sounds",
-    "Herbivore Sounds", "Cute Pets Compilation", "Funny [Animals/Cats/Dogs]
-    Compilation", "[Topic] Sounds Trend", "Weird [Group] Sounds", etc.) —
-    these describe a CATEGORY of content, not a specific narrative. Cap
-    memePotential at 25. They are sound-format / compilation participation
-    plays, not story trends.
-  • TikTok source with no concrete subject named in title (no person, no
-    animal name, no event, no $TICKER) — cap memePotential at 35. Without
-    visual verification we cannot rule out scroll-bait.
-  • If the title has a concrete focal subject (named person / specific
-    animal with name / specific event / $TICKER) — score normally per the
-    rubric, but stay in the conservative band 35-65 unless engagement is
-    extraordinary AND the text reveals a clear story hook.
-  • In ALL fallback cases: explicitly note in "explanation" that Stage 0b
-    visual analysis was unavailable. This is an audit-trail signal for the
-    operator, not a user-facing apology.
-
-Numerical scores in fallback mode are YOUR judgment from the text alone —
-scoreOverride does not apply (there is no Stage 0b score to override).
 
 Always respond with ONLY valid JSON. No markdown, no preamble, no explanation outside the JSON array.`;
 
@@ -111,7 +144,8 @@ export function buildAnalysisPrompt(trends) {
 
     // ── PreStage enrichment (Stage 0) — only present when PreStage ran ──
     // Surface nano text-classifier and gemini vision outputs verbatim.
-    // None of these influence routing; they're context for the scorer.
+    // None of these influence routing; they're the factual base the scorer
+    // works from.
     const ps = t.preStage;
     if (ps?.nano) {
       const n = ps.nano;
@@ -126,10 +160,8 @@ export function buildAnalysisPrompt(trends) {
       const g = ps.gemini;
       // Stage 0b output. Visual/audio/spoken/text are factual descriptions of
       // the media. Topic/Slang/Entities/Language come from the enrichment
-      // section (which used to live in nano). The GeminiScore line is the
-      // AUTHORITATIVE memePotential / viralityScore / category — Stage 1
-      // ECHOes those values verbatim unless setting scoreOverride with a
-      // documented reason.
+      // section (which used to live in nano). No score line: Stage 0b stopped
+      // scoring on 2026-08-05.
       if (g.visualCaption)                  detail += `\n   Visual: ${g.visualCaption}`;
       if (g.videoSummary && g.videoSummary.trim())
                                             detail += `\n   Video: ${g.videoSummary}`;
@@ -151,30 +183,26 @@ export function buildAnalysisPrompt(trends) {
       if (g.language && g.language !== 'en')
                                             detail += `\n   Language: ${g.language}`;
 
-      // Authoritative score line (Section C). Surface AS A SINGLE LINE so
-      // Stage 1 can copy values directly into its output JSON. Stage 1's
-      // SYSTEM_PROMPT has the TRUST CONTRACT instruction — these are the
-      // values it is meant to ECHO.
-      const scoreBits = [];
-      if (Number.isFinite(g.memePotential)) scoreBits.push(`memePotential=${g.memePotential}`);
-      if (Number.isFinite(g.viralityScore)) scoreBits.push(`viralityScore=${g.viralityScore}`);
-      if (g.category)                       scoreBits.push(`category=${g.category}`);
-      if (scoreBits.length > 0)             detail += `\n   GeminiScore (TRUST — ECHO into output): ${scoreBits.join(', ')}`;
-
-      // Subsidiary signals (Section D) — surfaced for Stage 1's narrative
-      // work (subject names go into title, viralPattern shapes whyNow voice).
+      // Observed facts (Sections C+D of the captioner). No score line any more:
+      // since 2026-08-05 Stage 0b reports what it saw and Stage 1 does the
+      // judging. The label is deliberately "Observed" — these are findings,
+      // not instructions.
       const sigBits = [];
       if (Number.isFinite(g.memeShapeStrength)) sigBits.push(`memeShape=${g.memeShapeStrength}/100`);
       if (typeof g.hasNarrative === 'boolean')  sigBits.push(`hasNarrative=${g.hasNarrative}`);
       if (typeof g.hasSubject === 'boolean')    sigBits.push(`hasSubject=${g.hasSubject}`);
       if (g.viralPattern)                       sigBits.push(`pattern=${g.viralPattern}`);
+      if (g.isCompilation === true)             sigBits.push(`COMPILATION`);
+      if (g.aiOrigin && g.aiOrigin !== 'unclear') sigBits.push(`aiOrigin=${g.aiOrigin}`);
+      if (g.aiTells && g.aiTells.trim())        sigBits.push(`aiTells="${g.aiTells}"`);
+      if (g.presentedAsReal === false)          sigBits.push(`presentedAsReal=false`);
       if (g.tickerSuggestion && g.tickerSuggestion.trim())
                                                 sigBits.push(`tickerHint=${g.tickerSuggestion}`);
       if (Array.isArray(g.subjectNames) && g.subjectNames.length > 0)
                                                 sigBits.push(`subjects=[${g.subjectNames.join(', ')}]`);
       if (g.isAmbient === true)                 sigBits.push(`AMBIENT`);
       if (g.isLipSync === true)                 sigBits.push(`LIPSYNC`);
-      if (sigBits.length > 0)               detail += `\n   GeminiSignals: ${sigBits.join(', ')}`;
+      if (sigBits.length > 0)               detail += `\n   Observed: ${sigBits.join(', ')}`;
     }
 
     // [MARKET_STAGE] optional context hint — remove 3 lines to disable
@@ -235,6 +263,19 @@ export function buildAnalysisPrompt(trends) {
       }
     }
 
+    // Cluster + junk context. These exist on the trend since the clusterer runs
+    // before scoring, but until 2026-08-05 they never reached the prompt — the
+    // scorer could not tell a lone post from a 12-post wave.
+    const cm = t.clusterMetrics || {};
+    const emergence = Number(t.emergenceScore ?? cm.emergenceScore ?? 0);
+    const itemCount = Number(cm.itemCount ?? (Array.isArray(t.items) ? t.items.length : 0)) || 0;
+    if (emergence > 0)  detail += `\n   Emergence: ${emergence}/100`;
+    if (itemCount > 1)  detail += `\n   ClusterSize: ${itemCount} posts in this narrative`;
+    const junkReasons = t.junkReasons || cm.junkReasons || [];
+    if (Array.isArray(junkReasons) && junkReasons.length > 0) {
+      detail += `\n   JunkSignals: ${junkReasons.join(', ')} (heuristic hints — context, not a verdict)`;
+    }
+
     return detail;
   }).join('\n\n');
 
@@ -246,10 +287,11 @@ For each trend, return a JSON object with these fields (definitions in the SYSTE
 - "sentiment"                             — "positive" | "negative" | "neutral" | "mixed"
 - "predictedLifespan"                     — one of [${LIFESPAN_VALUES.join(', ')}] or "unknown"   (${LIFESPAN_HINT})
 - "isGenuinelyInteresting"                — false ONLY for spam/bots/gibberish/recycled-no-angle
-- "memePotential", "viralityScore", "category" — ECHO from "GeminiScore" line in input. Categories: [meme, celebrity, animals, tech, gambling, sports, politics, entertainment, gaming, boring, other]
-- "scoreOverride"                         — null in 95%+ of cases. Set ONLY if you can see crucial CONTEXT that Stage 0b missed (must include "value" 0-100 and a one-sentence "reason" ≥8 chars). Otherwise null.
+- "memePotential", "viralityScore", "category" — YOUR scores per the rubric. Categories: [meme, celebrity, animals, tech, gambling, sports, politics, entertainment, gaming, boring, other]
+- "storyScore", "storyHook"               — narrative stickiness 0-100 + ≤80-char hook (empty when storyScore < 60)
+- "subjectName", "nameStrength"           — tickerable proper noun + how tickerable 0-100 ("" and 0 when there is none)
 
-When a trend has GeminiScore present in its input, ECHO those values exactly (memePotential / viralityScore / category). Use Stage 0b's subjectNames in the title where they exist. Do NOT recompute scores — Stage 0b already did the calibrated rubric.
+The "Observed:" line holds FACTS from a model that watched the media — treat them as true. The scores are YOURS: judge each trend against the rubric and against the other trends in this batch. Use Stage 0b's subjectNames in the title where they exist.
 
 Respond ONLY with { "trends": [ ... ] }. Same length as input. Same order. No markdown, no preamble.
 
@@ -289,12 +331,12 @@ export const STAGE1_RESPONSE_SCHEMA = {
           'whyNow',
           'predictedLifespan',
           'isGenuinelyInteresting',
-          // OpenAI strict json_schema requires every property in `required`.
-          // scoreOverride defaults to null on most outputs, so requiring it
-          // costs us nothing — model just emits "scoreOverride": null.
-          'scoreOverride',
           'needsDeeperLook',
           'escalationReason',
+          'storyScore',
+          'storyHook',
+          'subjectName',
+          'nameStrength',
         ],
         properties: {
           title:                  { type: 'string', description: 'Trend title in English' },
@@ -339,31 +381,20 @@ export const STAGE1_RESPONSE_SCHEMA = {
             enum: [...LIFESPAN_VALUES, 'unknown'],
           },
           isGenuinelyInteresting: { type: 'boolean' },
-          // 2026-05-10 trust-contract addition: Stage 0b (Gemini multimodal)
-          // already produces authoritative memePotential / viralityScore /
-          // category. Stage 1 normally just ECHOes those values. scoreOverride
-          // is the ONLY mechanism by which Stage 1 may disagree with the
-          // Stage-0b score. Set to null in 95%+ of cases. When non-null, it
-          // must include a one-sentence reason — without it the override is
-          // dropped client-side. Used by scorer.js to: (a) write back a new
-          // memePotential, (b) record the change in trend.scoreOverride for
-          // visibility in the admin DecisionsPage.
-          scoreOverride: {
-            anyOf: [
-              { type: 'null' },
-              {
-                type: 'object',
-                additionalProperties: false,
-                required: ['value', 'reason'],
-                properties: {
-                  value:  { type: 'integer', minimum: 0, maximum: 100 },
-                  reason: { type: 'string', maxLength: 240 },
-                },
-              },
-            ],
-          },
+          // `scoreOverride` lived here from 2026-05-10 to 2026-08-05, while
+          // Stage 0b was the authoritative scorer and this was Stage 1's only
+          // way to disagree. Stage 1 owns the score outright now, so there is
+          // nothing left to override.
           needsDeeperLook: { type: 'boolean' },
           escalationReason: { type: 'string', maxLength: 200, description: 'If needsDeeperLook is true, one short reason; else empty string' },
+          // Narrative scoring — moved from Stage 2 on 2026-08-04. Both feed
+          // additive-only bonuses in the scorer post-pass; neither can lower
+          // a score. Lean on the Stage 0b signals already in the input
+          // (hasNarrative / hasSubject / subjectNames / tickerSuggestion).
+          storyScore:   { type: 'integer', minimum: 0, maximum: 100 },
+          storyHook:    { type: 'string', maxLength: 80, description: 'character+conflict+stakes in ≤80 chars; empty string when storyScore < 60; ENGLISH' },
+          subjectName:  { type: 'string', maxLength: 64, description: 'Tickerable proper noun, or empty string when there is none' },
+          nameStrength: { type: 'integer', minimum: 0, maximum: 100 },
         },
       },
     },
@@ -386,18 +417,6 @@ Adjustments to memePotential:
 • Backlash killing meme energy → -15..-25
 • Bot / spam / single-account amplification → -20..-40
 • No real X discussion found → -5..-15
-
-storyScore (0-100) — stickiness of the story (named character + conflict + stakes = high). ADDITIVE booster only, never penalizes.
-• 85-100: named character + conflict + stakes + shareable backstory
-• 60-84: strong named character or memorable hook
-• 30-59: mild hook, specific moment but no arc
-• 0-29: no character / no story / generic
-
-subjectName + nameStrength — tickerable proper name attached to the narrative. Animal/character/person/catchphrase/$TICKER all OK. Generic descriptors and topic labels do NOT count → return "". ADDITIVE booster only, never penalizes.
-• 85-100: short, phonetic, unique, already memed
-• 60-84: solid name, easily shortened to ticker
-• 30-59: long, generic, or competes with existing tokens
-• 0-29: weak / no name
 
 Respond with ONLY valid JSON. No markdown, no preamble.`;
 
@@ -430,11 +449,7 @@ Return JSON ONLY (no markdown):
   "viralityScore":      0-100,
   "xBuzz":              "none|low|medium|high|explosive",
   "narrativeMomentum":  "fading|flat|building|exploding",
-  "organicity":         "organic|mixed|astroturf",
-  "storyScore":         0-100,
-  "storyHook":          "≤80 chars, character+conflict+stakes; empty if storyScore<30; ENGLISH",
-  "subjectName":        "proper noun / ticker candidate, or empty",
-  "nameStrength":       0-100
+  "organicity":         "organic|mixed|astroturf"
 }`;
 }
 

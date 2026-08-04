@@ -204,6 +204,13 @@ export const PRESET_FIELD_RANGES = Object.freeze({
 //
 // Σ POSITIVE weight invariant (alerts.weights and cluster.* both):
 //   general/animals/culture/celebrities/events all = 1.00 exactly.
+//
+// alertThreshold sits 5 points lower across every preset than it did before
+// 2026-08-05. Not a policy change — the scale moved under it. Once Stage 1
+// started scoring for itself instead of echoing Stage 0b, measured alertScore
+// on the golden set dropped by a median of 6 points, so the old numbers were
+// silently letting through fewer alerts. These defaults only apply where the
+// admin UI has not written its own value: settings.presetConfigs wins.
 
 export const DEFAULT_PRESET_CONFIGS = Object.freeze({
   general: {
@@ -279,7 +286,7 @@ export const DEFAULT_PRESET_CONFIGS = Object.freeze({
       noMemeShapePenalty: 20, noContentPenalty: 12, safeOverrideDivisor: 3, memeShapeBoost: 10,
     },
     alerts: {
-      thresholds: { alertThreshold: 60, minScoreToSave: 0, maxAlertsPerCycle: 5, alertHardJunkStop: 70 },
+      thresholds: { alertThreshold: 55, minScoreToSave: 0, maxAlertsPerCycle: 5, alertHardJunkStop: 70 },
       // feedback 0.10→0.15 (в curated mix юзер-голоса важнее raw виральности),
       // компенсация: viral 0.20→0.15. Σ = 1.00.
       weights:    { weightMemePotential: 0.45, weightVirality: 0.15, weightEmergence: 0.20, weightTwitter: 0.05, weightFeedback: 0.15, weightJunk: 0.50 },
@@ -336,7 +343,7 @@ export const DEFAULT_PRESET_CONFIGS = Object.freeze({
       noMemeShapePenalty: 15, noContentPenalty: 15, safeOverrideDivisor: 3, memeShapeBoost: 14,
     },
     alerts: {
-      thresholds: { alertThreshold: 55, minScoreToSave: 0, maxAlertsPerCycle: 5, alertHardJunkStop: 70 },
+      thresholds: { alertThreshold: 50, minScoreToSave: 0, maxAlertsPerCycle: 5, alertHardJunkStop: 70 },
       weights:    { weightMemePotential: 0.45, weightVirality: 0.20, weightEmergence: 0.15, weightTwitter: 0.05, weightFeedback: 0.15, weightJunk: 0.40 },
       stale:      { staleDecayPerHour: 2, staleDecayGraceHours: 24, staleDecayCap: 30 },
     },
@@ -412,7 +419,7 @@ export const DEFAULT_PRESET_CONFIGS = Object.freeze({
       noMemeShapePenalty: 25, noContentPenalty: 12, safeOverrideDivisor: 3, memeShapeBoost: 12,
     },
     alerts: {
-      thresholds: { alertThreshold: 60, minScoreToSave: 10, maxAlertsPerCycle: 5, alertHardJunkStop: 75 },
+      thresholds: { alertThreshold: 55, minScoreToSave: 10, maxAlertsPerCycle: 5, alertHardJunkStop: 75 },
       weights:    { weightMemePotential: 0.45, weightVirality: 0.25, weightEmergence: 0.10, weightTwitter: 0.15, weightFeedback: 0.05, weightJunk: 0.50 },
       // 4-day life: 48h grace (мем разгорается без штрафа) + 48h decay at 1pt/hr.
       stale:      { staleDecayPerHour: 1, staleDecayGraceHours: 48, staleDecayCap: 48 },
@@ -469,7 +476,7 @@ export const DEFAULT_PRESET_CONFIGS = Object.freeze({
       noMemeShapePenalty: 25, noContentPenalty: 10, safeOverrideDivisor: 3, memeShapeBoost: 10,
     },
     alerts: {
-      thresholds: { alertThreshold: 70, minScoreToSave: 0, maxAlertsPerCycle: 5, alertHardJunkStop: 70 },
+      thresholds: { alertThreshold: 65, minScoreToSave: 0, maxAlertsPerCycle: 5, alertHardJunkStop: 70 },
       // meme/viral в этом пресете — основные сигналы (рекалибровка под AI-judgment +
       // organic engagement). Cross-platform spread в emergence убран на уровне
       // clusterer'а 4 мая (single-source velocity/breakout остались) — поэтому
@@ -527,7 +534,7 @@ export const DEFAULT_PRESET_CONFIGS = Object.freeze({
       noMemeShapePenalty: 10, noContentPenalty: 0, safeOverrideDivisor: 2, memeShapeBoost: 4,
     },
     alerts: {
-      thresholds: { alertThreshold: 60, minScoreToSave: 0, maxAlertsPerCycle: 5, alertHardJunkStop: 75 },
+      thresholds: { alertThreshold: 55, minScoreToSave: 0, maxAlertsPerCycle: 5, alertHardJunkStop: 75 },
       weights:    { weightMemePotential: 0.10, weightVirality: 0.30, weightEmergence: 0.35, weightTwitter: 0.15, weightFeedback: 0.10, weightJunk: 0.30 },
       stale:      { staleDecayPerHour: 5, staleDecayGraceHours: 6, staleDecayCap: 60 },
     },

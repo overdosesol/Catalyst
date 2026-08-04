@@ -79,7 +79,12 @@ const RE_CELEB_NOISE = /\b(attends\b|spotted\s+at\b|steps\s+out\b|red\s+carpet|g
 const RE_ANIMAL = /\b(dog|dogs|cat|cats|frog|hamster|goat|goats|bear|bears|monkey|monkeys|fish|shark|penguin|bird|birds|duck|ducks|turtle|snail|rat|rats|mouse|mice|horse|horses|wolf|wolves|fox|foxes|shiba|doge|pepe|parrot|crab|crabs|chicken|chickens|cow|cows|pig|pigs|piglet|capybara|otter|otters|raccoon|raccoons|deer|bunny|bunnies|rabbit|rabbits|squirrel|seal|seals|whale|dolphin|lizard|gecko|axolotl|hedgehog|corgi|labrador|poodle|chihuahua|ferret|sloth|alpaca|llama|flamingo|pelican|pigeon|crow|raven|jellyfish|lobster|shrimp)\b/i;
 
 // Meme-shape signals — absurdity / weirdness
-const RE_ABSURD = /\b(weird|bizarre|strange|cursed|surreal|absurd|random|unexpected|accidentally|mistakenly|glitch|glitches|bug\b|bugs\b|fail\b|fails\b|malfunction|goes\s+wrong|nobody\s+expected|unbelievable|unhinged|deranged|feral|chaotic|ai\s+fail|ai\s+generated|hallucinate|hallucination|deepfake|confused|mistook|by\s+mistake|out\s+of\s+nowhere|nobody\s+asked|unprompted|drunk|sleepwalking|escaped|on\s+the\s+loose|broke\s+into|trespassing|accidentally\s+sent|wrong\s+number)\b/i;
+//
+// NB (2026-08-05): AI-origin words were removed from this set. They used to
+// count as "absurdity", which handed generated content a safe-override divisor
+// AND a memeShapeBoost — the system rewarded a clip for admitting it was fake.
+// Authenticity is judged by Stage 0b's aiOrigin field, not by keyword.
+const RE_ABSURD = /\b(weird|bizarre|strange|cursed|surreal|absurd|random|unexpected|accidentally|mistakenly|glitch|glitches|bug\b|bugs\b|fail\b|fails\b|malfunction|goes\s+wrong|nobody\s+expected|unbelievable|unhinged|deranged|feral|chaotic|confused|mistook|by\s+mistake|out\s+of\s+nowhere|nobody\s+asked|unprompted|drunk|sleepwalking|escaped|on\s+the\s+loose|broke\s+into|trespassing|accidentally\s+sent|wrong\s+number)\b/i;
 
 // Meme-shape signals — visual / internet meme culture
 const RE_MEME = /\b(meme|memes|meme-able|goes\s+viral|went\s+viral|going\s+viral|viral\s+moment|reaction\s+meme|meme\s+template|based\b|cringe\b|wholesome\b|cursed\s+image|greentext|copypasta|wojak|chad\b|npc\b|ratio\b|ratioed\b|skill\s+issue|touch\s+grass|rent\s+free|no\s+cap|bussin|slay\b|iconic\b|understood\s+the\s+assignment|main\s+character|villain\s+era|this\s+is\s+fine)\b/i;

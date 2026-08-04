@@ -263,14 +263,12 @@ export async function dispatchAlerts({ trends, deps, source = 'scan' }) {
           // preStage was deserialized from raw_metrics back into the metrics
           // namespace.
           preStage: trend.preStage || trend.metrics?.preStage || null,
-          // Score-source audit trail (2026-05-10 trust-contract). scoreSource
-          // tells the admin which stage produced the final memePotential
-          // ('stage0b_gemini' | 'stage1_override' | 'stage1_fallback'); the
-          // override record carries from/to/reason when Stage 1 disagreed with
-          // Stage 0b. Used by DecisionsPage to render a small audit chip so
+          // Score-source audit trail. Since the 2026-08-05 roles swap every
+          // score comes from Stage 1; scoreSource records whether it had
+          // Stage 0b's eyes ('stage1') or scored text-blind
+          // ('stage1_no_vision'). DecisionsPage renders it as a small chip so
           // calibration drift is visible at a glance.
           scoreSource:   trend.scoreSource   || null,
-          scoreOverride: trend.scoreOverride || null,
           memePotential: trend.memePotential ?? null,
           // Deep Escalation path tag (in-memory from scorer.selectDeepDiveCandidates):
           // 'escalation' = under-scored / needsDeeperLook second-chance into Stage 2;

@@ -1190,7 +1190,8 @@ class TrendDatabase {
       // top-level fields on the trend object. Saves the scorer a re-derivation.
       const { memePotential: _m, adoptionScore, emergenceScore, narrativePhase, rankScore,
               marketStage, junkPenalty, junkReasons, alertScore, alertBreakdown,
-              alertType: _at, storyScore, storyHook, preStage, ...rawMetricsOnly } = meta;
+              alertType: _at, storyScore, storyHook, subjectName, nameStrength,
+              preStage, ...rawMetricsOnly } = meta;
 
       out.push({
         _dbId:           row.id,
@@ -1530,8 +1531,15 @@ class TrendDatabase {
       // alertType also lives in raw_metrics so _hydrateTrendFromDb can read
       // it from the legacy/raw blob path (admin manual-submit hydration).
       alertType:      trend.alertType       ?? null,
-      storyScore:     trend.xSearchData?.storyScore ?? 0,
-      storyHook:      trend.xSearchData?.storyHook  ?? '',
+      // Narrative fields — produced by Stage 1 since 2026-08-04 (were Stage 2).
+      // xSearchData stays as a read fallback for in-flight objects built by
+      // older code paths. subjectName/nameStrength are persisted for the first
+      // time here: Stage 1 now produces them for every trend, so
+      // collectSubjectNames can build aliases after a DB reload too.
+      storyScore:     trend.storyScore   ?? trend.xSearchData?.storyScore ?? 0,
+      storyHook:      trend.storyHook    ?? trend.xSearchData?.storyHook  ?? '',
+      subjectName:    trend.subjectName  ?? trend.xSearchData?.subjectName ?? '',
+      nameStrength:   trend.nameStrength ?? trend.xSearchData?.nameStrength ?? 0,
       // PreStage enrichment — persisted so re-scoring or admin SubmitPage
       // displays the same data that Stage 1 saw, without re-paying for
       // nano/gemini calls. null when PreStage didn't run or both failed.

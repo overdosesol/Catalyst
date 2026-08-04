@@ -8,6 +8,11 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 data/avatars/
+# Offline scoring-replay workspace: prod snapshot, curated golden fixtures and
+# run results. All of it is raw scraped content (post text, URLs, author
+# handles) and this repo is public — it never gets version-controlled. Unit
+# tests use synthetic fixtures instead.
+data/golden/
 logs/
 
 # Local assistant/operator state (not for version control)

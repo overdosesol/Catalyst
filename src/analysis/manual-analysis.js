@@ -274,7 +274,7 @@ export async function runManualAnalysis({ scorer, db, url, clusterer = null, sav
   // Re-derive pipeline trace so the UI can show "Stage 2 skipped because
   // memePotential 35 < threshold 60" without the orchestrator keeping
   // any pipeline-internal state.
-  const stage2Threshold = parseInt(db.getSetting?.('stage2Threshold', '60'), 10) || 60;
+  const stage2Threshold = parseInt(db.getSetting?.('stage2Threshold', '50'), 10) || 50;
   const stage1Ran = typeof trend.memePotential === 'number';
   const stage2Ran = !!trend.xSearchData;
   let stage2SkipReason = null;

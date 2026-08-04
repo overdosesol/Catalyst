@@ -126,7 +126,10 @@ const config = {
   },
 
   // System settings
-  alertThreshold:      parseInt(process.env.ALERT_THRESHOLD       || '60', 10),
+  // Global fallback for presets that carry no threshold of their own. Lowered
+  // 60 → 55 on 2026-08-05 alongside the per-preset defaults: Stage 1 became the
+  // scorer and the alertScore scale shifted down with it.
+  alertThreshold:      parseInt(process.env.ALERT_THRESHOLD       || '55', 10),
   scanIntervalMinutes: parseInt(process.env.SCAN_INTERVAL_MINUTES || '15', 10),
   logLevel:            process.env.LOG_LEVEL || 'info',
 

@@ -320,6 +320,158 @@ export function computeAlertScore(trend, w = DEFAULT_ALERT_WEIGHTS) {
   };
 }
 
+// ─── Narrative bonuses: story hook + subject name ────────────────────────────
+//
+// Moved out of _stage2DeepDive 2026-08-04. Both bonuses judge CONTENT, not live
+// X discussion — which makes Stage 1 the right place to produce them: it sees
+// description, Gemini visual analysis, metrics and cluster context, while the
+// Stage 2 prompt only ever received title + source + a truncated explanation.
+//
+// Runs in the post-pass for EVERY trend, AFTER Stage 2 has finalized
+// memePotential. Ordering is load-bearing: Stage 2 overwrites memePotential
+// with its own number, so applying the bonus any earlier would silently erase
+// it. Running last also means the bonus can never be applied twice.
+//
+// headroomScale is capped at 1. Uncapped, the multiplier exceeds 1 below
+// meme=50 and AMPLIFIES the bonus instead of damping it — a trend at 10 with
+// both scores maxed reached 50 instead of 35. That was acceptable while Stage 2
+// only ran on escalations (deliberately picked as under-scored); across the
+// whole population it turns an "additive booster" into a multiplier.
+const STORY_BONUS_GATE  = 60;
+const STORY_BONUS_MAX   = 15;
+const STORY_BONUS_SLOPE = 0.4;
+const NAME_BONUS_GATE   = 60;
+const NAME_BONUS_MAX    = 10;
+const NAME_BONUS_SLOPE  = 0.25;
+
+function _headroomScale(meme) {
+  return Math.min(1, Math.max(0, (100 - meme) / 50));
+}
+
+/**
+ * Apply the story and subject-name bonuses to `trend.memePotential` in place.
+ * Additive only — neither bonus can lower a score. Idempotent: the presence of
+ * `storyBonus` / `nameBonus` marks a trend as already processed.
+ */
+export function applyNarrativeBonuses(trend, logger = null) {
+  if (!trend) return;
+
+  const storyScore = Math.max(0, Math.min(100, Number(trend.storyScore) || 0));
+  if (!trend.storyBonus && storyScore >= STORY_BONUS_GATE) {
+    const bonus = Math.min(STORY_BONUS_MAX,
+      Math.round((storyScore - STORY_BONUS_GATE) * STORY_BONUS_SLOPE));
+    if (bonus > 0) {
+      const before = Number(trend.memePotential) || 0;
+      trend.memePotential = Math.min(100, Math.round(before + bonus * _headroomScale(before)));
+      trend.storyBonus = { storyScore, bonus, memeBefore: before, memeAfter: trend.memePotential };
+      logger?.info?.(
+        `Story bonus "${trend.title}": +${bonus} ` +
+        `(storyScore=${storyScore}) meme ${before}→${trend.memePotential}`
+      );
+    }
+  }
+
+  const subjectName  = typeof trend.subjectName === 'string' ? trend.subjectName : '';
+  const nameStrength = Math.max(0, Math.min(100, Number(trend.nameStrength) || 0));
+  if (!trend.nameBonus && subjectName && nameStrength >= NAME_BONUS_GATE) {
+    const bonus = Math.min(NAME_BONUS_MAX,
+      Math.round((nameStrength - NAME_BONUS_GATE) * NAME_BONUS_SLOPE));
+    if (bonus > 0) {
+      const before = Number(trend.memePotential) || 0;
+      trend.memePotential = Math.min(100, Math.round(before + bonus * _headroomScale(before)));
+      trend.nameBonus = { subjectName, nameStrength, bonus, memeBefore: before, memeAfter: trend.memePotential };
+      logger?.info?.(
+        `Name bonus "${trend.title}": +${bonus} ` +
+        `(subject="${subjectName}", strength=${nameStrength}) meme ${before}→${trend.memePotential}`
+      );
+    }
+  }
+}
+
+/**
+ * Recompute every score derived from memePotential. Must run after any stage
+ * that mutates it, otherwise `adoptionScore` — literally an alias — disagrees
+ * with its source and rankScore sorts on a stale number.
+ */
+function recomputeDerivedScores(trend, alertWeights) {
+  const emergence = trend.emergenceScore ?? trend.clusterMetrics?.emergenceScore ?? 0;
+  trend.adoptionScore  = trend.memePotential;
+  trend.narrativePhase = narrativePhase(emergence, trend.adoptionScore);
+  trend.rankScore      = narrativeRankScore(emergence, trend.adoptionScore);
+  const probe = computeAlertScore(trend, alertWeights);
+  trend.alertScore     = probe.alertScore;
+  trend.alertBreakdown = probe.breakdown;
+}
+
+/**
+ * Final pass over every trend once all AI stages have finished.
+ *
+ * Order is deliberate: additive bonuses first, then the text-only multiplier
+ * (a multiplier applied before the bonus would scale the bonus too), then a
+ * single recompute of everything derived from memePotential.
+ *
+ * Each trend is isolated — one throwing must not abort the batch.
+ */
+export function runPostPass(trends, alertWeights, logger = null) {
+  for (const t of trends) {
+    try { applyNarrativeBonuses(t, logger); }
+    catch (e) { logger?.warn?.(`narrative bonuses threw for "${t?.title}": ${e.message}`); }
+    try { applyTextOnlyMultiplier(t, logger); }
+    catch (e) { logger?.warn?.(`textOnly multiplier threw for "${t?.title}": ${e.message}`); }
+    try { recomputeDerivedScores(t, alertWeights); }
+    catch (e) { logger?.warn?.(`score recompute threw for "${t?.title}": ${e.message}`); }
+  }
+  return trends;
+}
+
+// Category taxonomy — moved here from gemini-captioner.js on 2026-08-05
+// together with scoring itself. Single source of truth for the 11 buckets.
+export const CATEGORY_VALUES = new Set([
+  'meme', 'celebrity', 'animals', 'tech', 'gambling',
+  'sports', 'politics', 'entertainment', 'gaming', 'boring', 'other',
+]);
+
+const clamp100 = v => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
+
+/**
+ * Resolve the final scores from a Stage 1 answer.
+ *
+ * Since 2026-08-05 Stage 1 IS the scorer: Stage 0b reports facts only and its
+ * legacy numeric fields (if a stale row still carries them) are ignored on
+ * purpose. `scoreSource` records whether vision was available, which is the
+ * axis worth auditing now that the trust contract is gone.
+ */
+export function resolveScores(answer, trend) {
+  const a = answer || {};
+  const hadVision = !!trend?.preStage?.gemini;
+  const rawCat = String(a.category || '').trim().toLowerCase();
+  return {
+    memePotential: clamp100(a.memePotential),
+    viralityScore: clamp100(a.viralityScore),
+    category:      CATEGORY_VALUES.has(rawCat) ? rawCat : 'other',
+    scoreSource:   hadVision ? 'stage1' : 'stage1_no_vision',
+  };
+}
+
+/**
+ * Parse + clamp the four narrative fields off a raw Stage 1 model answer.
+ * Clamps carried over verbatim from the Stage 2 implementation they replace.
+ * Kept separate from _analyzeBatchStage1 so it is directly testable — that
+ * method needs a live API response to exercise.
+ */
+export function normalizeNarrativeFields(raw) {
+  const a = raw || {};
+  const storyScore  = Math.max(0, Math.min(100, Math.round(Number(a.storyScore) || 0)));
+  const rawName     = typeof a.subjectName === 'string' ? a.subjectName.trim() : '';
+  const subjectName = rawName.length > 64 ? rawName.slice(0, 64) : rawName;
+  const nameStrength = subjectName
+    ? Math.max(0, Math.min(100, Math.round(Number(a.nameStrength) || 0)))
+    : 0;
+  const rawHook  = typeof a.storyHook === 'string' ? a.storyHook.trim() : '';
+  const storyHook = rawHook.length > 80 ? rawHook.slice(0, 80) : rawHook;
+  return { storyScore, storyHook, subjectName, nameStrength };
+}
+
 // ─── Deep-escalation detection (Stage 1 → Stage 2 second-chance) ───────────
 // Conservative seed thresholds. Runtime-overridable via settings in scoreTrends.
 export const DEFAULT_ESCALATION_THRESHOLDS = {
@@ -458,7 +610,10 @@ class Scorer {
     // Stage 2 gates — default values; can be overridden in admin UI via
     // `stage2Threshold` and `stage2MaxCalls` settings. Runtime read per cycle
     // inside scoreTrends() so changes apply without restart.
-    this.stage2Threshold = 60;   // memePotential >= this → Stage 2 candidate
+    // memePotential >= this → Stage 2 candidate. Lowered 60 → 50 on 2026-08-05:
+    // this gate reads memePotential directly, and that scale dropped ~12 points
+    // when Stage 1 took over scoring (measured on the golden set).
+    this.stage2Threshold = 50;
     this.stage2Model = DEFAULT_MODELS.stage2;
     // Cap reduced 6 → 3 (2026-04-29): logs showed cycles rarely hit the cap,
     // so the existing budget was paying for borderline candidates. With cap=3
@@ -491,6 +646,17 @@ class Scorer {
     this.openaiReasoningEffort = ['minimal', 'low', 'medium', 'high'].includes(rawEffort)
       ? rawEffort
       : null;
+
+    // Stage 1 sampling temperature. Was a hardcoded 0.25 while Stage 1 merely
+    // echoed Stage 0b's numbers — sampling noise could not reach the score.
+    // Once Stage 1 became the scorer (2026-08-05) the same fixture started
+    // swinging up to 49 points between identical passes; measured on the
+    // golden set, temperature 0 cuts the average spread from 13.5 to 4.6, so
+    // 0 is the default now. Override via env when experimenting.
+    const rawTemp = Number(process.env.STAGE1_TEMPERATURE);
+    this.stage1Temperature = Number.isFinite(rawTemp) && rawTemp >= 0 && rawTemp <= 2
+      ? rawTemp
+      : 0;
 
     if (!this.current.enabled) {
       this.logger.warn('AI API key not set for selected provider — AI scoring disabled, using heuristics');
@@ -845,13 +1011,12 @@ class Scorer {
       deepReasoning:     String(this.db?.getSetting?.('deepReasoningEnabled', '0')) === '1',
     };
 
-    // ── Post-pass: text-only meme/viral multiplier ─────────────────────────
+    // ── Post-pass: narrative bonuses → text-only multiplier → recompute ────
     // Runs for every trend (Stage 1 + Stage 2) AFTER all AI stages have
-    // finalized memePotential/score. See applyTextOnlyMultiplier docblock.
-    for (const t of stage1Results) {
-      try { applyTextOnlyMultiplier(t, this.logger); }
-      catch (e) { this.logger?.warn?.(`textOnly multiplier threw for "${t?.title}": ${e.message}`); }
-    }
+    // finalized memePotential/score. The story/name bonuses live here rather
+    // than in Stage 2 so they still apply when x_search is toggled off, and
+    // so they can only ever be applied once. See runPostPass docblock.
+    runPostPass(stage1Results, loadAlertWeights(this.db), this.logger);
 
     return stage1Results;
   }
@@ -887,7 +1052,7 @@ class Scorer {
         { role: 'system', content: sysMsg  },
         { role: 'user',   content: prompt  },
       ],
-      temperature: 0.25,
+      temperature: this.stage1Temperature,
       responseSchema: {
         name: 'trend_analyses',
         schema: STAGE1_RESPONSE_SCHEMA,
@@ -928,53 +1093,15 @@ class Scorer {
       const originalEnTitle = trend.originalTitle || trend.title;
       const aiEnTitle       = a.title || originalEnTitle;
 
-      // ── Score-source resolution (2026-05-10 trust-contract) ─────────────
-      // Priority order:
-      //   1. Stage 1 scoreOverride (rare, must include reason)
-      //   2. Stage 0b (preStage.gemini) — authoritative when present
-      //   3. Stage 1 echo / fallback (preStage absent OR Gemini didn't score)
-      //
-      // We use Number.isFinite to distinguish "Gemini scored 0" (legitimate
-      // — see baseball case) from "Gemini didn't return the field" (null/
-      // undefined). The captioner's clampInt(..., null) emits null when the
-      // model omits the field.
-      const g = trend.preStage?.gemini || null;
-      const geminiHasMeme    = g && Number.isFinite(g.memePotential);
-      const geminiHasViral   = g && Number.isFinite(g.viralityScore);
-      const geminiHasCat     = g && typeof g.category === 'string' && g.category.length > 0;
-
-      // Score-override path: Stage 1 explicitly disagrees with Stage 0b.
-      // Validate shape strictly — bad payloads are dropped silently. The
-      // override is recorded as `trend.scoreOverride` so the admin
-      // DecisionsPage can flag it visually.
-      let scoreOverrideRecord = null;
-      let overrideValue = null;
-      if (a.scoreOverride && typeof a.scoreOverride === 'object'
-          && Number.isFinite(a.scoreOverride.value)
-          && typeof a.scoreOverride.reason === 'string'
-          && a.scoreOverride.reason.trim().length >= 8) {
-        const clamped = Math.max(0, Math.min(100, Math.round(a.scoreOverride.value)));
-        const fromVal = geminiHasMeme ? g.memePotential : (Number(a.memePotential) || 0);
-        scoreOverrideRecord = {
-          from:   fromVal,
-          to:     clamped,
-          reason: a.scoreOverride.reason.trim().slice(0, 240),
-          stage:  'stage1',
-        };
-        overrideValue = clamped;
-      }
-
-      const adoption =
-        overrideValue !== null ? overrideValue
-        : geminiHasMeme         ? g.memePotential
-        : (Number(a.memePotential) || 0);
-
-      const viralityForAlert =
-        geminiHasViral ? g.viralityScore
-        : (Number(a.viralityScore) || this._heuristicScore(trend));
-
-      // category: trust Gemini when present, else fall back to Stage 1, else 'other'.
-      const categoryFinal = geminiHasCat ? g.category : (a.category || 'other');
+      // ── Scores (2026-08-05: Stage 1 is the scorer) ───────────────────────
+      // The trust contract is gone — whatever Stage 1 answered stands, and a
+      // stale Stage 0b number on an old row is ignored rather than preferred.
+      // Provider failure is handled upstream by _fallback, so a zero here
+      // means the model scored it zero.
+      const resolved = resolveScores(a, trend);
+      const adoption         = resolved.memePotential;
+      const viralityForAlert = resolved.viralityScore;
+      const categoryFinal    = resolved.category;
 
       const emergence = trend.clusterMetrics?.emergenceScore ?? 0;
       const phase     = narrativePhase(emergence, adoption);
@@ -1022,13 +1149,15 @@ class Scorer {
         // appear from non-strict providers get folded back to bare keywords.
         predictedLifespan:normalizeLifespan(a.predictedLifespan) || 'unknown',
         isGenuinelyInteresting: a.isGenuinelyInteresting ?? true,
-        // Source-of-truth audit fields. scoreSource lets DecisionsPage show
-        // which stage produced the final memePotential. scoreOverride is the
-        // full record (from/to/reason/stage) when Stage 1 disagreed with 0b.
-        scoreSource:    overrideValue !== null ? 'stage1_override'
-                       : geminiHasMeme         ? 'stage0b_gemini'
-                       :                          'stage1_fallback',
-        scoreOverride:  scoreOverrideRecord,
+        // Audit field. Every score now comes from Stage 1; what varies is
+        // whether it had Stage 0b's eyes ('stage1') or scored text-blind
+        // ('stage1_no_vision'). DecisionsPage renders it as a chip.
+        scoreSource:    resolved.scoreSource,
+        // Narrative fields — moved here from Stage 2 on 2026-08-04 so they
+        // survive `aiStage2Enabled=0`. Consumed by applyNarrativeBonuses in
+        // the post-pass, not applied here (Stage 2 may still overwrite
+        // memePotential after this point).
+        ...normalizeNarrativeFields(a),
       };
     });
   }
@@ -1087,27 +1216,17 @@ class Scorer {
       trend.score = Math.max(0, Math.min(100, result.viralityScore));
     }
 
-    // Store Stage 2 metadata (narrative-focused — no coin search)
+    // Store Stage 2 metadata. Narrative fields (storyScore / storyHook /
+    // subjectName / nameStrength) moved to Stage 1 on 2026-08-04 — they judge
+    // content, not live X discussion, and Stage 1 sees far more of the content.
+    // What remains here genuinely requires x_search.
     // Removed 2026-04-27: `xSentiment` (never consumed downstream) and
     // `adjustment` (only read by market-stage.js which is feature-flagged off
-    // and depended on the now-deleted existingCoins field). storyHook capped
-    // 80 chars — Grok was returning 100-150 char prose, output token waste.
-    const storyScore = Math.max(0, Math.min(100, Number(result.storyScore) || 0));
-    const rawSubjectName = typeof result.subjectName === 'string' ? result.subjectName.trim() : '';
-    const subjectName = rawSubjectName.length > 64 ? rawSubjectName.slice(0, 64) : rawSubjectName;
-    const nameStrength = subjectName
-      ? Math.max(0, Math.min(100, Number(result.nameStrength) || 0))
-      : 0;
-    const rawStoryHook = typeof result.storyHook === 'string' ? result.storyHook.trim() : '';
-    const storyHook = rawStoryHook.length > 80 ? rawStoryHook.slice(0, 80) : rawStoryHook;
+    // and depended on the now-deleted existingCoins field).
     trend.xSearchData = {
       xBuzz:              result.xBuzz              || 'unknown',
       narrativeMomentum:  result.narrativeMomentum  || 'unknown',
       organicity:         result.organicity         || 'unknown',
-      storyScore,
-      storyHook,
-      subjectName,
-      nameStrength,
     };
 
     // ── Stage 2 authority: apply penalties based on live X narrative signals ──
@@ -1154,66 +1273,10 @@ class Scorer {
       );
     }
 
-    // Story-hook booster — additive only, never penalizes.
-    // Generic cute-pet posts (low storyScore) stay where they are; narratives
-    // with real character + conflict + stakes (Punch monkey, Peanut squirrel)
-    // get a bump that lets them clear the alert bar on softer raw virality.
-    if (storyScore >= 60) {
-      const storyBonus = Math.min(15, Math.round((storyScore - 60) * 0.4));
-      if (storyBonus > 0) {
-        const beforeMeme = trend.memePotential;
-        // Soft cap: bonus eats remaining headroom rather than hard-clipping at 100.
-        // Reserves 100 for trends that already scored ~100 in Stage 1.
-        // meme=70 +15 → ~79; meme=85 +15 → ~90; meme=95 +15 → ~96.
-        const headroomScale = Math.max(0, (100 - beforeMeme) / 50);
-        trend.memePotential = Math.min(100, Math.round(beforeMeme + storyBonus * headroomScale));
-        trend.stage2StoryBonus = {
-          storyScore,
-          bonus: storyBonus,
-          memeBefore: beforeMeme,
-          memeAfter:  trend.memePotential,
-        };
-        this.logger.info(
-          `Stage 2 story bonus "${trend.title}": +${storyBonus} ` +
-          `(storyScore=${storyScore}) meme ${beforeMeme}→${trend.memePotential}`
-        );
-      }
-    }
-
-    // Subject-name / ticker-candidate booster — additive only, never penalizes.
-    // If Grok spotted a clean proper name attached to the narrative (Peanut,
-    // Moo Deng, Hawk Tuah, $BONK) and rated it tickerable, we bump memePotential
-    // a little. Trends without a name get subjectName="" and nameStrength=0 —
-    // they simply don't receive the bonus. No penalty path.
-    // Formula mirrors stage2StoryBonus: threshold 60, max +10, slope 0.25.
-    if (subjectName && nameStrength >= 60) {
-      const nameBonus = Math.min(10, Math.round((nameStrength - 60) * 0.25));
-      if (nameBonus > 0) {
-        const beforeMeme = trend.memePotential;
-        // Same soft cap as storyBonus — diminishing returns near 100.
-        const headroomScale = Math.max(0, (100 - beforeMeme) / 50);
-        trend.memePotential = Math.min(100, Math.round(beforeMeme + nameBonus * headroomScale));
-        trend.stage2NameBonus = {
-          subjectName,
-          nameStrength,
-          bonus: nameBonus,
-          memeBefore: beforeMeme,
-          memeAfter:  trend.memePotential,
-        };
-        this.logger.info(
-          `Stage 2 name bonus "${trend.title}": +${nameBonus} ` +
-          `(subject="${subjectName}", strength=${nameStrength}) meme ${beforeMeme}→${trend.memePotential}`
-        );
-      }
-    }
-
-    // Recalculate adoption + phase after Stage 2 adjustments
-    trend.adoptionScore  = trend.memePotential;
-    trend.narrativePhase = narrativePhase(trend.emergenceScore ?? 0, trend.adoptionScore);
-    trend.rankScore      = narrativeRankScore(trend.emergenceScore ?? 0, trend.adoptionScore);
-    const alertProbe2 = computeAlertScore(trend, loadAlertWeights(this.db));
-    trend.alertScore     = alertProbe2.alertScore;
-    trend.alertBreakdown = alertProbe2.breakdown;
+    // NB: adoptionScore / narrativePhase / rankScore / alertScore are NOT
+    // recomputed here. That moved to recomputeDerivedScores in the post-pass
+    // (2026-08-04) so it runs for every trend, not just Stage 2 ones — and so
+    // it lands after the narrative bonuses rather than before them.
 
     // [MARKET_STAGE] optional patch — remove 1 line to disable
     if (process.env.MARKET_STAGE_DETECTION === '1') applyStage2MarketPatch(trend, result);
@@ -1221,7 +1284,7 @@ class Scorer {
     this.logger.info(
       `Stage 2 "${trend.title}": meme ${oldMeme}→${trend.memePotential}, ` +
       `viral ${oldViral}→${trend.score}, buzz: ${trend.xSearchData.xBuzz}, ` +
-      `story: ${storyScore}, phase: ${trend.narrativePhase}`
+      `momentum: ${trend.xSearchData.narrativeMomentum}`
     );
 
     return { inputTokens, outputTokens };

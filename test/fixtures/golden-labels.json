@@ -1,0 +1,74 @@
+{
+  "_readme": [
+    "Curated golden-set labels: trend id → golden classes + why.",
+    "This file is COMMITTED on purpose — it holds the human judgement, not the content.",
+    "The scraped material itself (titles, captions, URLs, author handles) stays in",
+    "data/golden/ under .gitignore because this repository is public.",
+    "scripts/golden/curate.mjs joins these labels with the local snapshot to build",
+    "data/golden/fixtures.json. Notes describe the SIGNAL, never retell the post.",
+    "Labels are arrays: classes are not mutually exclusive (16041 is both)."
+  ],
+  "_source": "production snapshot 2026-07-31..2026-08-04, curated 2026-08-04",
+  "labels": {
+    "16041": {
+      "classes": ["compilation", "ai_fake"],
+      "note": "Owner-identified. Gemini set viralPattern=compilation AND described it as 'a series of humorous dog clips' — then scored 70, alertScore 69, alert fired. Owner also reports generation artefacts (unnatural motion of people, animals, furniture) that no text field captured. Primary acceptance case for the whole refactor."
+    },
+    "16016": {
+      "classes": ["compilation"],
+      "note": "Caption opens with 'A compilation features various dogs' — pattern field said animal_action, so only the wording betrays it. Scored 65."
+    },
+    "16014": {
+      "classes": ["compilation"],
+      "note": "viralPattern=compilation, caption 'a compilation of funny dog moments'. Scored 45 — below alert floor but still far above the 25 ceiling."
+    },
+    "16006": {
+      "classes": ["compilation"],
+      "note": "Multi-clip cut ('transitions to different scenes of dogs') that production already scored 25. Control for the opposite error: the fix must not push correctly-handled compilations lower or destabilise them."
+    },
+
+    "16066": {
+      "classes": ["ai_slop", "generic_animal"],
+      "note": "Owner-identified. Generated but never pretends to be real — kittens walking upright holding paws is impossible on its face, so nobody is deceived; the AI rule must NOT crush it to zero. It must also not sit at 87: owner's verdict is that the visual is weak and overdone once you stop counting 'unusual' as merit. Dual label encodes exactly that — floor from ai_slop, ceiling from generic_animal. Gemini narrated the impossible action verbatim without concluding anything."
+    },
+    "15861": {
+      "classes": ["ai_slop"],
+      "note": "Caption itself says 'An AI-generated image' — fan-art meme for a fandom, presented as art, not as evidence. Scored 65. Second negative control for the AI rule."
+    },
+
+    "16153": { "classes": ["generic_animal"], "note": "No unique subject: a cat with an annoyed expression. Interchangeable with thousands. Production scored 76." },
+    "16049": { "classes": ["generic_animal"], "note": "No unique subject, no event: a dog sits and waits. Production scored 74." },
+    "16058": { "classes": ["generic_animal"], "note": "Generic pet-wakes-owner format, no named subject, no arc. Production scored 68." },
+    "15932": { "classes": ["generic_animal"], "note": "Puppy in a vest; mild framing but no distinct identity or story beyond the caption. Production scored 68." },
+    "15261": { "classes": ["generic_animal"], "note": "Celebrity-adopts-pet news. Attention is borrowed from the celebrity, not from the animal. Production scored 65." },
+
+    "16070": { "classes": ["good"], "note": "Distinct visual identity plus an absurd specific scene; instantly recognisable image. Production scored 88 — high score is earned." },
+    "16158": {
+      "classes": ["ai_fake"],
+      "note": "Owner-identified as 100% generated, presented as a real filmed moment. Initially mislabelled 'good' here — it reads as the textbook legitimate case (named subject, caught-in-the-act beat, cultural echo) and production scored 82. That is exactly why it matters: a well-made fake scores high BECAUSE it satisfies every quality signal the rubric asks for. Second acceptance case alongside 16041."
+    },
+    "16117": { "classes": ["good"], "note": "Specific improbable-but-real scene with clear stakes and a memorable image. Production scored 79." },
+    "16065": { "classes": ["good"], "note": "Recognisable pop-culture template plus a replicable format. Production scored 77." },
+    "16144": { "classes": ["good"], "note": "Unique visual hook that is inherently shareable and remixable. Production scored 77." },
+    "16075": { "classes": ["good"], "note": "Self-defeating premise with a named protagonist — classic internet-culture shape. Production scored 80." },
+    "16068": { "classes": ["good"], "note": "Absurd but concrete personal quest with a named subject and a specific year. Production scored 78." },
+    "16156": { "classes": ["good"], "note": "Satirical escalation around a public figure; fandom-native humour. Production scored 77." },
+    "15277": { "classes": ["good"], "note": "Multi-panel format meme with an established remix template. Production scored 75." },
+    "15348": { "classes": ["good"], "note": "Quotable line from a known comic persona — travels as text alone. Production scored 75." },
+    "15482": { "classes": ["good"], "note": "Narrative thread with a genuine twist; story survives retelling. Production scored 75." },
+    "15586": { "classes": ["good"], "note": "Mundane-to-shocking pivot in one post — strong retell value. Production scored 75." },
+
+    "15876": { "classes": ["junk"], "note": "Industry-history news item, no meme shape. Correctly scored 25 — regression guard." },
+    "16084": { "classes": ["junk"], "note": "Infrastructure news, zero meme shape. Correctly scored 25 — regression guard." },
+    "16089": { "classes": ["junk"], "note": "Local protest news. Correctly scored 25 — regression guard." },
+    "15774": { "classes": ["junk"], "note": "Routine show-cancellation PR statement. Correctly scored 20 — regression guard." },
+    "15382": { "classes": ["junk"], "note": "Routine red-carpet celebrity moment — exactly what celeb-noise filtering targets, yet production scored 55." },
+
+    "16130": { "classes": ["text_only"], "note": "google_trends, no media at all; production scored 82 purely from a search-interest signal. Tests the no-vision path against over-confidence." },
+    "15495": { "classes": ["text_only"], "note": "google_trends box-office item, scored 50. Mid-band no-vision behaviour." },
+    "15587": { "classes": ["text_only"], "note": "google_trends wrestling-buzz item, scored 40." },
+    "16115": { "classes": ["text_only"], "note": "google_trends lottery item, scored 30 — recurring, low narrative value." },
+    "16037": { "classes": ["text_only"], "note": "x_trends roster transaction, scored 20. Correct low score without vision." },
+    "15991": { "classes": ["text_only"], "note": "x_trends roster transaction, scored 15. Floor-level case: proves a low score is allowed, which is why text_only has no lower bound." }
+  }
+}

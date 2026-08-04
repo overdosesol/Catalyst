@@ -38,7 +38,7 @@
  *     // ── Mood / quick tags ──────────────────────────────────────────────
  *     mood:             "Short emotional tone tag",
  *
- *     // ── Scoring signals (Gemini is now a downstream voter, not just a captioner) ─
+ *     // ── Format signals (facts about shape, not a verdict on quality) ──
  *     memeShapeStrength: 0-100,   // how meme-shaped the visual+audio is (animal,
  *                                  //   absurd, character, viral aesthetic, hook)
  *     hasNarrative:      boolean, // is there a story arc / something happens?
@@ -61,6 +61,12 @@
  *                                  //   (satisfying / ASMR / tutorial / process /
  *                                  //   aesthetic vibe) without narrative arc.
  *
+ *     // ── Authenticity & packaging (added 2026-08-05) ────────────────────
+ *     aiOrigin:         "real" | "likely_ai" | "obvious_ai" | "unclear",
+ *     aiTells:          string,  // the concrete artefact(s) seen, '' if none
+ *     presentedAsReal:  boolean, // framed as real footage vs openly stylised
+ *     isCompilation:    boolean, // cut of unrelated fragments, no through-line
+ *
  *     // ── Meta ───────────────────────────────────────────────────────────
  *     mediaType:        "image" | "video",
  *     videoDurationSec: number | null,
@@ -72,7 +78,8 @@
  * audio/narrative/lipsync/ambient fields are forced to safe defaults:
  *   audioSummary='', spokenText='', isLipSync=false, isAmbient=false,
  *   hasNarrative=false.
- * Other scoring fields the model still answers from the still image.
+ * The remaining fields the model still answers from the still image, with
+ * aiOrigin leaning on "unclear" more often — a frame carries fewer tells.
  */
 
 import { spawn } from 'child_process';
@@ -81,13 +88,11 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 
-const VISION_SYSTEM_PROMPT = `You are a MULTIMODAL ANALYZER + AUTHORITATIVE SCORER for a memecoin trend system.
-
-You watch and listen to image/video content (or read title+description for text-only trends), enrich raw text with structured metadata, AND score the trend's memecoin potential. Your scoring is GROUND TRUTH — the next stage trusts your numbers and writes the alert text.
+const VISION_SYSTEM_PROMPT = `You are a MULTIMODAL OBSERVER for a trend-analysis system. You watch and listen to image/video content and report FACTS about it: what is visible, what is audible, what format it is, and whether it looks authentic. You do NOT score, rank or judge how interesting the trend is — a later stage does that, using your facts plus context you cannot see (engagement, cluster size, the other trends in this batch).
 
 For VIDEO inputs you MUST analyze BOTH visual and audio tracks. Audio is often where the narrative lives. First 30 seconds only.
 For IMAGE inputs: describe the still image; audio fields = ''.
-For TEXT-ONLY inputs (no media URL was passed): score from title + description + clusterSiblings; visual/audio fields = ''.
+For TEXT-ONLY inputs (no media URL was passed): work from title + description only; visual/audio fields = ''.
 
 Return these fields in 4 sections:
 
@@ -105,50 +110,9 @@ Return these fields in 4 sections:
 - "slangDecoded":    1-2 sentences explaining non-obvious slang/abbreviations/hashtag references. Empty string if all clear.
 - "language":        ISO 639-1 code of the primary language. Default "en" when unsure.
 
-━━━ SECTION C — AUTHORITATIVE SCORING (you set these — Stage 1 trusts them) ━━━
+━━━ SECTION C — FORMAT SIGNALS (used by downstream gates and UI) ━━━
 
-C1. "memePotential" — Integer 0-100. AUTHORITATIVE memecoin-narrative score.
-
-    Be CONSERVATIVE and SPREAD scores across the range. Score 100 is reserved for the single best trend of the day. If you would give 90+ to multiple trends in one batch, you are too generous.
-
-    Anchors:
-    • 95-100: Once-a-day rarity. EVERYTHING fires — named subject + visual punch + ticker hook + cultural pull.
-    • 80-94:  Excellent. Strong meme energy, ONE signal partial (no visual / no name / not yet a moment).
-    • 60-79:  Solid narrative. Most "good" trends belong HERE — default upper band.
-    • 40-59:  Decent meme energy but niche / generic / overdone.
-    • 20-39:  Weak — real news with little meme appeal, low novelty.
-    • 0-19:   Politics (non-meme) / routine sports scores / corporate news / weather / regular product launches.
-
-    Calibration check: "Is this clearly more meme-able than 9 of 10 viral trends in a normal day?" If no → not 95+. If 1-of-10 → 80-94. Most "good" actually-good trends are 60-79.
-
-    HARD RULES (apply BEFORE anchors):
-    • Politics (unless absurd viral meme) = 0.
-    • Standard sports results = 0. Exception: a player does something insane/absurd/meme-worthy.
-    • Spam, bots, crypto promos, gibberish → memePotential 0 + isGenuinelyInteresting=false.
-    • viralPattern in {satisfying, asmr, tutorial, process, aesthetic, dance_challenge, outfit_transition, sound_format} → cap memePotential at 25 regardless of engagement.
-    • isLipSync=true → cap at 15.
-    • hasSubject=false AND hasNarrative=false → cap at 30.
-
-    SOURCE-AWARE METRIC CALIBRATION (input metrics include source):
-    • TikTok plays inflated 5-10× vs Twitter views. 500K-1M = baseline-viral; 5M+ = distinctive. DO NOT score 95+ just because plays=10M.
-    • TikTok shares × 50 ≈ Twitter retweets in cultural impact. 5K+ shares = stronger than likes.
-    • TikTok memes burn out in 24-48h. >72h-old TikTok = past peak. Twitter 5-7 days. Reddit 1-2 weeks.
-    • Reddit upvotes vote-democratized: 10K upvotes ≈ 100K+ readers. 500+ comments = real discussion.
-    • Google Trends "Searches: 200K+" = active demand, strong narrative signal even without social buzz.
-    • Mega-account (1M+ followers) low engagement (<0.1%) = NOT a signal by itself; score on CONTENT novelty.
-
-    For TEXT-ONLY input: same anchors, but downweight uncertainty (without visual/audio confirmation, lean conservative).
-
-C2. "viralityScore" — Integer 0-100. Engagement-based virality (likes/retweets/views/upvotes weighted by velocity).
-    Lower than memePotential when meme shape is good but engagement lukewarm.
-    Higher when engagement is wildfire but meme shape is mediocre.
-
-C3. "category" — One of:
-    "meme" | "celebrity" | "animals" | "tech" | "gambling" | "sports" | "politics" | "entertainment" | "gaming" | "boring" | "other"
-
-━━━ SECTION D — SUBSIDIARY SIGNALS (also set — used by downstream gates and UI) ━━━
-
-- "memeShapeStrength": Integer 0-100. How meme-coin-shaped the FORMAT is — character + audio hook + visual aesthetic. Independent of memePotential (which weighs context too). Used by TikTok quality gate. Most content 30-60.
+- "memeShapeStrength": Integer 0-100. How meme-coin-shaped the FORMAT is — character + audio hook + visual aesthetic. This rates SHAPE, not how interesting the trend is; a later stage judges that. Used by the TikTok quality gate. Most content 30-60.
 - "hasNarrative":      Boolean. TRUE if something happens with a beginning/middle/end. FALSE for static repetition, generic dancing without plot, gameplay loops, slideshows.
 - "hasSubject":        Boolean. TRUE if there is a CLEAR FOCAL SUBJECT (specific person/animal/character/object). FALSE for crowd shots, abstract visuals, generic landscapes.
 - "viralPattern":      One of: "character" | "reaction" | "pov_skit" | "compilation" | "sound_format" | "dance_challenge" | "outfit_transition" | "gameplay" | "animal_action" | "event" | "satisfying" | "asmr" | "tutorial" | "process" | "aesthetic" | "other". Pick dominant. Ambient/sound-format group (auto-rejected on TikTok):
@@ -167,6 +131,20 @@ C3. "category" — One of:
                        • SKIP generic platform/country/big-tech (TikTok, YouTube, USA, Apple, Google) — context, not subjects.
                        • SKIP if no proper-noun subject (abstract concept, generic crowd). Empty array OK.
                        • Cap each name 32 chars. Cap array 4.
+
+━━━ SECTION D — AUTHENTICITY & PACKAGING ━━━
+
+- "aiOrigin":        One of "real" | "likely_ai" | "obvious_ai" | "unclear". Judge by ARTEFACTS you can actually see, never by "too good to be true":
+                     • unnatural motion — limbs, tails or furniture drifting, sliding or morphing between frames
+                     • anatomy that changes across the clip (extra/missing fingers, paws, ears)
+                     • impossible camera continuity, objects appearing or vanishing at cuts
+                     • physically wrong light, shadows or reflections
+                     • warped text on signs/labels; generator watermarks
+                     • synthetic voice with no breathing, or lips out of sync with speech
+                     If you are NOT confident, answer "unclear". Unclear is a correct, unpunished answer — a wrong "likely_ai" is worse than an honest "unclear". For TEXT-ONLY input (no media): always "unclear" — you cannot judge footage you did not see.
+- "aiTells":         ≤120 chars naming the concrete artefact(s) you saw. '' when aiOrigin is "real" or "unclear".
+- "presentedAsReal": Boolean. TRUE when the clip is framed as real footage of a real event (documentary/news/handheld/"caught on camera" look). FALSE for openly stylised work: animation, 3D cartoons, brainrot aesthetics, obvious parody or sketch. A generated clip that fools nobody is FALSE.
+- "isCompilation":   Boolean. TRUE when the video is a cut of UNRELATED fragments — different subjects, different scenes, no through-line; aggregator watermark; episode counter ("#5"); "best of" packaging. FALSE for a single continuous episode, and FALSE for a multi-scene but coherent story about the same subject.
 
 ━━━ FILTER FLAGS ━━━
 - "isLipSync":       Boolean. TRUE for ANY sound-trend participation — videos where the creator follows a trending audio/format rather than telling their own story.
@@ -193,7 +171,8 @@ C3. "category" — One of:
 - ONLY valid JSON. No markdown, no preamble, no explanation outside the JSON object.
 - Every text field a COMPLETE thought ending with proper punctuation. Never cut mid-sentence/word.
 - All text fields in English (translate spoken content; keep original only for meme-relevant gibberish quoted in spokenText).
-- For TEXT-ONLY input (no media URL): visual/audio/spoken fields = ''. Score from text + metadata.`;
+- For TEXT-ONLY input (no media URL): visual/audio/spoken fields = '', aiOrigin = "unclear".
+- Report only what the media shows. Never guess at popularity, importance or how "good" the trend is — that is not your job.`;
 
 const GOOGLE_RESPONSE_SCHEMA = {
   type: 'object',
@@ -212,13 +191,8 @@ const GOOGLE_RESPONSE_SCHEMA = {
     slangDecoded:      { type: 'string' },
     language:          { type: 'string' },
 
-    // SECTION C — authoritative scoring (Stage 1 trusts these unless it has a
-    // documented reason to override via scoreOverride)
-    memePotential:     { type: 'integer' },
-    viralityScore:     { type: 'integer' },
-    category:          { type: 'string' },
-
-    // SECTION D — subsidiary signals + filter flags
+    // SECTION C — format signals (2026-08-05: scoring fields removed from here;
+    // Stage 1 owns memePotential / viralityScore / category now)
     memeShapeStrength: { type: 'integer' },
     hasNarrative:      { type: 'boolean' },
     hasSubject:        { type: 'boolean' },
@@ -227,6 +201,12 @@ const GOOGLE_RESPONSE_SCHEMA = {
     subjectNames:      { type: 'array', items: { type: 'string' } },
     isLipSync:         { type: 'boolean' },
     isAmbient:         { type: 'boolean' },
+
+    // SECTION D — authenticity & packaging (added 2026-08-05)
+    aiOrigin:          { type: 'string' },
+    aiTells:           { type: 'string' },
+    presentedAsReal:   { type: 'boolean' },
+    isCompilation:     { type: 'boolean' },
   },
   // Required list deliberately tiny (4 fields) — same defensive choice as
   // before the 2026-05-09 expansion. Making the whole 18-field schema
@@ -234,7 +214,7 @@ const GOOGLE_RESPONSE_SCHEMA = {
   // to null and downstream gates lost their input). Now any field except
   // the basic 4 may be omitted; the parser applies safe defaults for the
   // rest (clampInt fallback=0, false for booleans, '' for strings, [] for
-  // arrays, normalizeViralPattern → 'other', normalizeCategory → 'other').
+  // arrays, normalizeViralPattern → 'other', normalizeAiOrigin → 'unclear').
   required: ['visualCaption', 'visibleText', 'videoSummary', 'mood'],
 };
 
@@ -272,19 +252,14 @@ function normalizeViralPattern(v) {
   return VIRAL_PATTERN_VALUES.has(s) ? s : 'other';
 }
 
-// Stage 0b authoritative-scoring category enum. Mirrors the 11-category
-// taxonomy used in scorer / dashboard / admin (last reshuffled 2026-05-08).
-// If Gemini emits something off-list (it occasionally invents new buckets),
-// we fall back to 'other' so downstream code never sees an unknown category.
-const CATEGORY_VALUES = new Set([
-  'meme', 'celebrity', 'animals', 'tech', 'gambling',
-  'sports', 'politics', 'entertainment', 'gaming',
-  'boring', 'other',
-]);
+// Authenticity axis. Deliberately 4 values, not a boolean: "unclear" must be a
+// first-class answer, because a forced real/fake choice on ambiguous footage
+// produces confident garbage. Nothing penalises `unclear`.
+export const AI_ORIGIN_VALUES = new Set(['real', 'likely_ai', 'obvious_ai', 'unclear']);
 
-function normalizeCategory(v) {
-  const s = String(v || '').trim().toLowerCase().replace(/\s+/g, '_').replace(/-+/g, '_');
-  return CATEGORY_VALUES.has(s) ? s : 'other';
+export function normalizeAiOrigin(v) {
+  const s = String(v || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return AI_ORIGIN_VALUES.has(s) ? s : 'unclear';
 }
 
 // Code-side blacklist of names Gemini should not return as subject. Catches
@@ -326,9 +301,10 @@ function normalizeEntityList(arr) {
 }
 
 // Compact human-readable engagement summary for Stage 0b context.
-// Consumed by _buildContextString — Gemini needs source + metrics for the
-// SOURCE-AWARE METRIC CALIBRATION block in VISION_SYSTEM_PROMPT (TikTok plays
-// inflation, mega-account engagement-rate rule, etc.). Outputs e.g.:
+// Consumed by _buildContextString. Since 2026-08-05 these numbers no longer
+// feed a scoring rule here — Stage 0b does not score. They stay because they
+// disambiguate WHAT is being watched (a 10M-play TikTok and a 200-upvote
+// Reddit post get described differently). Outputs e.g.:
 //   "views=2.3M, likes=19K, shares=1.6K, comments=287"
 // Empty string when no useful metrics. Same number-pretty rules as the rest
 // of the codebase.
@@ -355,11 +331,10 @@ function _summarizeEngagement(metrics) {
   return parts.join(', ');
 }
 
-// Build the user-message context block that gives Gemini everything Stage 1
-// would normally see for scoring: source, engagement metrics, description,
-// cluster siblings. Without this block Gemini scores blind on the title +
-// media — and the SOURCE-AWARE METRIC CALIBRATION rules in the system
-// prompt have nothing to calibrate against.
+// Build the user-message context block: source, engagement metrics,
+// description. It orients the observer (who posted this, on which platform,
+// what the caption claims) so the description names the right subject — it is
+// NOT scoring input, since 2026-08-05 Stage 0b reports facts only.
 function _buildContextString(trend) {
   const lines = [];
   const title = String(trend.title || '').trim().slice(0, 200);
@@ -384,13 +359,9 @@ function _buildContextString(trend) {
   const description = String(trend.description || '').trim();
   if (description) lines.push(`Description: ${description.slice(0, 600)}`);
 
-  if (Array.isArray(trend.clusterSiblingTitles) && trend.clusterSiblingTitles.length > 0) {
-    const sibs = trend.clusterSiblingTitles
-      .slice(0, 5)
-      .map(s => `"${String(s || '').slice(0, 140)}"`)
-      .join(' | ');
-    lines.push(`RelatedPosts: ${sibs}`);
-  }
+  // No cluster context here on purpose: PreStage runs BEFORE the clusterer
+  // (index.js), so clusterSiblingTitles is always empty at this point. Cluster
+  // signals are given to Stage 1 instead, which runs after routing.
 
   return lines.join('\n');
 }
@@ -795,8 +766,8 @@ export class GeminiCaptioner {
 
     const ctx = _buildContextString(trend);
     const userText = kind === 'video'
-      ? `${ctx}\n\nWatch AND LISTEN to this video — analyze BOTH visual and audio tracks. Focus on the FIRST 30 SECONDS ONLY. Transcribe spoken words verbatim into spokenText. Describe sounds/music in audioSummary. Return ALL fields per the schema (sections A/B/C/D in the system prompt — describe + enrichment + authoritative scoring + subsidiary signals). Apply HARD RULES and SOURCE-AWARE METRIC CALIBRATION using the metrics above.`
-      : `${ctx}\n\nDescribe this image and score it. For a static image: videoSummary='', audioSummary='', spokenText='', hasNarrative=false, isLipSync=false, isAmbient=false. Score memePotential / viralityScore / category from visual + title + metrics context. Return ALL fields per the schema (sections A/B/C/D).`;
+      ? `${ctx}\n\nWatch AND LISTEN to this video — analyze BOTH visual and audio tracks. Focus on the FIRST 30 SECONDS ONLY. Transcribe spoken words verbatim into spokenText. Describe sounds/music in audioSummary. Check for generation artefacts and report aiOrigin honestly. Return ALL fields per the schema (sections A/B/C/D in the system prompt — describe + enrichment + format signals + authenticity). Report facts only; do NOT score the trend.`
+      : `${ctx}\n\nDescribe this image. For a static image: videoSummary='', audioSummary='', spokenText='', hasNarrative=false, isLipSync=false, isAmbient=false, isCompilation=false. Return ALL fields per the schema (sections A/B/C/D). Report facts only; do NOT score the trend.`;
 
     const apiUrl = `${this.googleBaseUrl}/models/${this.googleModel}:generateContent?key=${encodeURIComponent(this.googleKey)}`;
     const body = {
@@ -939,12 +910,7 @@ export class GeminiCaptioner {
         slangDecoded:      String(parsed.slangDecoded  || '').trim().slice(0, 400),
         language:          String(parsed.language      || '').trim().toLowerCase().slice(0, 5),
 
-        // Section C — authoritative scoring (Stage 1 trusts unless override)
-        memePotential:     clampInt(parsed.memePotential, 0, 100, null),
-        viralityScore:     clampInt(parsed.viralityScore, 0, 100, null),
-        category:          parsed.category != null ? normalizeCategory(parsed.category) : null,
-
-        // Section D — subsidiary signals
+        // Section C — format signals
         memeShapeStrength: clampInt(parsed.memeShapeStrength, 0, 100, 0),
         hasNarrative:      parsed.hasNarrative === true,
         hasSubject:        parsed.hasSubject === true,
@@ -956,6 +922,14 @@ export class GeminiCaptioner {
         // accidentally hard-skips a legitimate trend).
         isLipSync:         parsed.isLipSync === true,
         isAmbient:         parsed.isAmbient === true,
+
+        // Section D — authenticity & packaging. `presentedAsReal` defaults to
+        // true: a missing field means the model did not flag stylisation, and
+        // the safe reading of that silence is "framed as real footage".
+        aiOrigin:          normalizeAiOrigin(parsed.aiOrigin),
+        aiTells:           String(parsed.aiTells || '').trim().slice(0, 120),
+        presentedAsReal:   parsed.presentedAsReal !== false,
+        isCompilation:     parsed.isCompilation === true,
       };
     } catch (e) {
       this.logger?.warn?.(`[GeminiCaptioner] Google ${kind} call failed: ${e.message}`);
@@ -975,7 +949,7 @@ export class GeminiCaptioner {
         {
           role: 'user',
           content: [
-            { type: 'text', text: `${ctx}\n\nDescribe this image and score it. For a static image: videoSummary='', audioSummary='', spokenText='', hasNarrative=false, isLipSync=false, isAmbient=false. Score memePotential / viralityScore / category from visual + title + metrics context. Return ALL fields per the schema (sections A/B/C/D).` },
+            { type: 'text', text: `${ctx}\n\nDescribe this image. For a static image: videoSummary='', audioSummary='', spokenText='', hasNarrative=false, isLipSync=false, isAmbient=false, isCompilation=false. Return ALL fields per the schema (sections A/B/C/D — describe, enrichment, format signals, authenticity). Do NOT score the trend.` },
             { type: 'image_url', image_url: { url: imageUrl } },
           ],
         },
@@ -1045,19 +1019,20 @@ export class GeminiCaptioner {
           slangDecoded:      String(parsed.slangDecoded || '').trim().slice(0, 400),
           language:          String(parsed.language     || '').trim().toLowerCase().slice(0, 5),
 
-          // Section C — authoritative scoring. Possible from a still image,
-          // though calibration will be looser without audio/motion. Null
-          // signals downstream "Gemini didn't score this — fall back to Stage 1".
-          memePotential:     clampInt(parsed.memePotential, 0, 100, null),
-          viralityScore:     clampInt(parsed.viralityScore, 0, 100, null),
-          category:          parsed.category != null ? normalizeCategory(parsed.category) : null,
-
-          // Section D — subsidiary signals
+          // Section C — format signals
           memeShapeStrength: clampInt(parsed.memeShapeStrength, 0, 100, 0),
           hasSubject:        parsed.hasSubject === true,
           viralPattern:      normalizeViralPattern(parsed.viralPattern),
           tickerSuggestion:  String(parsed.tickerSuggestion || '').trim().slice(0, 16),
           subjectNames:      normalizeSubjectNames(parsed.subjectNames),
+
+          // Section D — authenticity & packaging. A still frame carries fewer
+          // tells than motion (no morphing limbs, no lip-sync drift), so this
+          // path leans on "unclear" more often — which is the correct answer.
+          aiOrigin:          normalizeAiOrigin(parsed.aiOrigin),
+          aiTells:           String(parsed.aiTells || '').trim().slice(0, 120),
+          presentedAsReal:   parsed.presentedAsReal !== false,
+          isCompilation:     parsed.isCompilation === true,
         };
       } finally {
         clearTimeout(timer);

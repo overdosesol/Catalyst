@@ -4561,34 +4561,31 @@ function DecisionsPage() {
                 d.alertScore != null && h('span', null,
                   'score: ', h('b', null, d.alertScore), ' / ', d.threshold
                 ),
-                // Score-source chip (2026-05-10 trust-contract). Tells the
-                // admin at a glance which stage produced the final
-                // memePotential. Hover reveals the override reason when Stage
-                // 1 disagreed with Stage 0b.
+                // Score-source chip. Since the 2026-08-05 roles swap every
+                // score comes from Stage 1 and this says whether it had
+                // Stage 0b's eyes. The three legacy keys stay in the map so
+                // trends scored before the swap still render a chip instead
+                // of silently dropping one.
                 d.scoreSource && (() => {
                   const map = {
-                    stage0b_gemini: { icon: '🌟', label: 'Gemini',   color: '#00b894', bg: 'rgba(0,184,148,.10)', tip: 'memePotential от Stage 0b (Gemini multimodal) — authoritative' },
-                    stage1_override:{ icon: '🔄', label: 'Override', color: '#fdcb6e', bg: 'rgba(253,203,110,.12)', tip: 'Stage 1 переписал Gemini score' },
-                    stage1_fallback:{ icon: '🤖', label: 'Stage1',   color: '#74b9ff', bg: 'rgba(116,185,255,.10)', tip: 'Stage 1 сам скорил — Gemini не вернул memePotential (text-only тренд или fallback)' },
+                    stage1:          { icon: '🎯', label: 'Stage 1',    color: '#00b894', bg: 'rgba(0,184,148,.10)', tip: 'Stage 1 скорил, видя факты от Stage 0b (визуал+аудио)' },
+                    stage1_no_vision:{ icon: '📝', label: 'Без визуала', color: '#74b9ff', bg: 'rgba(116,185,255,.10)', tip: 'Stage 1 скорил вслепую — Stage 0b не отработал (text-only источник или сбой). Действуют консервативные капы' },
+                    // Legacy (до 2026-08-05, когда скорил Stage 0b):
+                    stage0b_gemini:  { icon: '🌟', label: 'Gemini',     color: '#636e72', bg: 'rgba(99,110,114,.10)', tip: 'Legacy: скор от Stage 0b по старому trust-контракту' },
+                    stage1_override: { icon: '🔄', label: 'Override',   color: '#636e72', bg: 'rgba(99,110,114,.10)', tip: 'Legacy: Stage 1 переписывал скор Stage 0b' },
+                    stage1_fallback: { icon: '🤖', label: 'Stage1',     color: '#636e72', bg: 'rgba(99,110,114,.10)', tip: 'Legacy: Stage 1 скорил сам, потому что Stage 0b не вернул memePotential' },
                   };
                   const m = map[d.scoreSource];
                   if (!m) return null;
-                  const ov = d.scoreOverride;
-                  const lbl = (d.scoreSource === 'stage1_override' && ov)
-                    ? (m.icon + ' ' + m.label + ' ' + ov.from + '→' + ov.to)
-                    : (m.icon + ' ' + m.label);
-                  const tipText = (d.scoreSource === 'stage1_override' && ov)
-                    ? (m.tip + '\\n' + ov.from + ' → ' + ov.to + '\\n' + (ov.reason || ''))
-                    : m.tip;
                   return h('span', {
-                    title: tipText,
+                    title: m.tip,
                     style: {
                       fontSize: 11, padding: '2px 7px', borderRadius: 4,
                       color: m.color, background: m.bg,
                       border: '1px solid ' + m.color + '33',
                       fontWeight: 600,
                     }
-                  }, lbl);
+                  }, m.icon + ' ' + m.label);
                 })(),
                 // Deep Escalation badge — did this trend go through Stage 2, and how.
                 d.deepDiveReason && (() => {
@@ -4645,11 +4642,6 @@ function DecisionsPage() {
               ),
               // Row 5: full math panel (when expanded)
               d.breakdown && isOpen && MathPanel(d),
-              // Row 5b: Stage 1 score-override detail block (when expanded
-              // AND Stage 1 disagreed with Stage 0b). Shows from→to + reason
-              // verbatim so admins can spot Stage 1 overstepping its mandate.
-              isOpen && d.scoreSource === 'stage1_override' && d.scoreOverride &&
-                DecisionScoreOverrideBlock(d.scoreOverride),
               // Row 6: Stage 0 PreStage block (Gemini visual+audio + chips + nano)
               // — only when expanded. If preStage is null/empty (legacy trend
               // scored before PreStage was wired, or text-only trend with no
@@ -4662,50 +4654,10 @@ function DecisionsPage() {
   );
 }
 
-// ── DecisionScoreOverrideBlock — Stage 1 override detail card ──────────────
-// Rendered ONLY when Stage 1 disagreed with Stage 0b (scoreSource ===
-// 'stage1_override'). Shows the from/to delta + the reason Stage 1 gave
-// verbatim. The 2026-05-10 trust-contract makes Stage 0b authoritative; this
-// block exists so admins can audit the rare override path and catch a Stage 1
-// model that's overreaching its mandate (delta too big, reason too vague,
-// override on every trend, etc).
-function DecisionScoreOverrideBlock(ov) {
-  const h = React.createElement;
-  if (!ov || !Number.isFinite(ov.from) || !Number.isFinite(ov.to)) return null;
-  const delta = ov.to - ov.from;
-  const sign = delta > 0 ? '+' : '';
-  const direction = delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat';
-  const arrowColor = delta > 0 ? '#00b894' : delta < 0 ? '#ff7675' : 'var(--text2)';
-  return h('div', {
-    style: {
-      marginTop: 10, padding: '10px 14px',
-      background: 'rgba(253,203,110,.06)',
-      border: '1px solid rgba(253,203,110,.30)',
-      borderRadius: 8,
-      fontSize: 12, lineHeight: 1.5, color: 'var(--text)',
-    }
-  },
-    h('div', { style: { fontSize: 10, fontWeight: 700, color: 'var(--text2)', marginBottom: 6, letterSpacing: '.4px' } },
-      '🔄 STAGE 1 SCORE OVERRIDE'),
-    h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' } },
-      h('span', { style: { fontSize: 11, color: 'var(--text2)' } }, 'Gemini'),
-      h('span', { style: { fontWeight: 700 } }, ov.from),
-      h('span', { style: { fontSize: 14, color: arrowColor } }, '→'),
-      h('span', { style: { fontWeight: 700 } }, ov.to),
-      h('span', {
-        style: {
-          fontSize: 10, padding: '1px 7px', borderRadius: 4,
-          background: arrowColor + '22', color: arrowColor, fontWeight: 700,
-        }
-      }, sign + delta + ' (' + direction + ')'),
-      h('span', { style: { fontSize: 11, color: 'var(--text2)' } }, '· Stage 1 (' + (ov.stage || 'stage1') + ')')
-    ),
-    h('div', { style: { fontSize: 12, color: 'var(--text)', fontStyle: 'italic' } },
-      h('span', { style: { color: 'var(--text2)', fontStyle: 'normal' } }, 'Reason: '),
-      '"' + (ov.reason || '(no reason given — should not happen, validation should have dropped this)') + '"'
-    )
-  );
-}
+// DecisionScoreOverrideBlock lived here until 2026-08-05. It rendered the
+// from→to delta when Stage 1 overrode Stage 0b's score. The roles swap gave
+// Stage 1 the score outright, so nothing writes an override record any more
+// and the card had no data source left.
 
 // ── DecisionPreStageBlock — Stage 0 PreStage card for DecisionsPage ────────
 // Mirrors the block ManualResultCard shows for manual-analyzed trends, but
@@ -4821,23 +4773,26 @@ function DecisionPreStageBlock(d) {
           h('span', { style: { color: 'var(--text2)', fontStyle: 'normal' } }, 'Slang: '),
           g.slangDecoded
         ),
-      // Section C (authoritative scoring) — these are the values Stage 1
-      // ECHOes by default. Highlighted differently from the subsidiary
-      // signals so it's obvious which numbers carry weight.
+      // Legacy Stage 0b scores. Only trends analysed before the 2026-08-05
+      // roles swap carry these fields; new records have no scoring block here
+      // at all, so the whole row disappears on its own. Kept (greyed, tagged)
+      // instead of deleted so old decisions stay readable.
       (Number.isFinite(g.memePotential) || Number.isFinite(g.viralityScore) || g.category) &&
-        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 } },
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8, alignItems: 'center' } },
+          h('span', { style: { fontSize: 9, color: 'var(--text2)', letterSpacing: '.3px' } }, 'LEGACY 0b:'),
           Number.isFinite(g.memePotential) &&
-            h('span', { className: 'sp-chip', style: { fontSize: 10, fontWeight: 700, color: '#00b894', borderColor: 'rgba(0,184,148,.4)' } },
+            h('span', { className: 'sp-chip', style: { fontSize: 10, color: '#636e72' } },
               '🎯 memePotential ' + g.memePotential + '/100'),
           Number.isFinite(g.viralityScore) &&
-            h('span', { className: 'sp-chip', style: { fontSize: 10, fontWeight: 700, color: '#00b894', borderColor: 'rgba(0,184,148,.4)' } },
+            h('span', { className: 'sp-chip', style: { fontSize: 10, color: '#636e72' } },
               '🔥 viralityScore ' + g.viralityScore + '/100'),
           g.category &&
-            h('span', { className: 'sp-chip', style: { fontSize: 10, fontWeight: 700, color: '#00b894', borderColor: 'rgba(0,184,148,.4)' } },
+            h('span', { className: 'sp-chip', style: { fontSize: 10, color: '#636e72' } },
               '📂 ' + g.category)
         ),
-      // Section D (subsidiary signals) — meme shape, narrative, subject, viralPattern,
-      // tickerSuggestion, subjectNames, lipsync, ambient flags.
+      // Format + authenticity signals — meme shape, narrative, subject,
+      // viralPattern, tickerSuggestion, subjectNames, lipsync, ambient,
+      // compilation, aiOrigin.
       (Number.isFinite(g.memeShapeStrength)
           || typeof g.hasNarrative === 'boolean'
           || typeof g.hasSubject === 'boolean'
@@ -4845,7 +4800,9 @@ function DecisionPreStageBlock(d) {
           || (g.tickerSuggestion && g.tickerSuggestion.trim())
           || (Array.isArray(g.subjectNames) && g.subjectNames.length > 0)
           || g.isLipSync
-          || g.isAmbient) &&
+          || g.isAmbient
+          || g.isCompilation
+          || (g.aiOrigin && g.aiOrigin !== 'unclear')) &&
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6, marginBottom: 4 } },
           Number.isFinite(g.memeShapeStrength) &&
             h('span', { className: 'sp-chip', style: { fontSize: 10 } }, '🎯 memeShape ' + g.memeShapeStrength + '/100'),
@@ -4864,7 +4821,15 @@ function DecisionPreStageBlock(d) {
           g.isLipSync &&
             h('span', { className: 'sp-chip', style: { fontSize: 10, color: '#ff7675' } }, '🎤 lip-sync'),
           g.isAmbient &&
-            h('span', { className: 'sp-chip', style: { fontSize: 10, color: '#ff7675' } }, '😴 ambient')
+            h('span', { className: 'sp-chip', style: { fontSize: 10, color: '#ff7675' } }, '😴 ambient'),
+          g.isCompilation === true &&
+            h('span', { className: 'sp-chip', style: { fontSize: 10, color: '#ff7675' } }, '🎞 compilation'),
+          g.aiOrigin && g.aiOrigin !== 'unclear' &&
+            h('span', {
+              className: 'sp-chip',
+              style: { fontSize: 10, color: g.aiOrigin === 'real' ? 'var(--text2)' : '#fdcb6e' },
+              title: g.aiTells || '',
+            }, '🤖 ' + g.aiOrigin + (g.presentedAsReal === false ? ' (stylised)' : ''))
         ),
       // Mood + language footer
       h('div', { style: { display: 'flex', gap: 12, marginTop: 4, flexWrap: 'wrap' } },
@@ -5892,7 +5857,7 @@ function ManualResultCard({ result, comment, setComment, onAlertSent }) {
         t.viralityScore != null && spTile('⚡ Virality', t.viralityScore),
         (t.storyScore || 0) > 0 && spTile('📖 Story', t.storyScore),
         (t.junkPenalty || 0) > 0 && spTile('🗑 Junk',  t.junkPenalty, 'bad'),
-        t.stage2NameBonus && spTile('🏷 Name str.', t.stage2NameBonus.nameStrength || 0)
+        (t.nameStrength || 0) > 0 && spTile('🏷 Name str.', t.nameStrength)
       ),
 
       // ── SCORE BARS ─────────────────────────────────────────────────────
@@ -6031,16 +5996,19 @@ function ManualResultCard({ result, comment, setComment, onAlertSent }) {
                 React.createElement('span', { style: { color: 'var(--text2)' } }, 'Текст в кадре: '),
                 React.createElement('span', { style: { fontStyle: 'italic' } }, '"' + t.preStage.gemini.visibleText + '"')
               ),
-            // Scoring signals row — Gemini's own voting (memeShape, hasNarrative,
-            // hasSubject, viralPattern, tickerSuggestion). Shown as compact chips
-            // so the admin can see Gemini's prior at a glance.
+            // Observation row — what Stage 0b saw (memeShape, hasNarrative,
+            // hasSubject, viralPattern, tickerSuggestion, compilation, AI
+            // origin). Facts, not a score: since 2026-08-05 Stage 0b does not
+            // vote on how good the trend is.
             (Number.isFinite(t.preStage.gemini.memeShapeStrength)
                 || typeof t.preStage.gemini.hasNarrative === 'boolean'
                 || typeof t.preStage.gemini.hasSubject === 'boolean'
                 || t.preStage.gemini.viralPattern
                 || (t.preStage.gemini.tickerSuggestion && t.preStage.gemini.tickerSuggestion.trim())
                 || t.preStage.gemini.isLipSync
-                || t.preStage.gemini.isAmbient) &&
+                || t.preStage.gemini.isAmbient
+                || t.preStage.gemini.isCompilation
+                || (t.preStage.gemini.aiOrigin && t.preStage.gemini.aiOrigin !== 'unclear')) &&
               React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6, marginBottom: 4 } },
                 Number.isFinite(t.preStage.gemini.memeShapeStrength) &&
                   React.createElement('span', { className: 'sp-chip', style: { fontSize: 10 } }, '🎯 memeShape ' + t.preStage.gemini.memeShapeStrength + '/100'),
@@ -6059,29 +6027,47 @@ function ManualResultCard({ result, comment, setComment, onAlertSent }) {
                 t.preStage.gemini.isLipSync &&
                   React.createElement('span', { className: 'sp-chip', style: { fontSize: 10, color: '#ff7675' } }, '🎤 lip-sync'),
                 t.preStage.gemini.isAmbient &&
-                  React.createElement('span', { className: 'sp-chip', style: { fontSize: 10, color: '#ff7675' } }, '😴 ambient')
+                  React.createElement('span', { className: 'sp-chip', style: { fontSize: 10, color: '#ff7675' } }, '😴 ambient'),
+                t.preStage.gemini.isCompilation === true &&
+                  React.createElement('span', { className: 'sp-chip', style: { fontSize: 10, color: '#ff7675' } }, '🎞 compilation'),
+                t.preStage.gemini.aiOrigin && t.preStage.gemini.aiOrigin !== 'unclear' &&
+                  React.createElement('span', {
+                    className: 'sp-chip',
+                    style: { fontSize: 10, color: t.preStage.gemini.aiOrigin === 'real' ? 'var(--text2)' : '#fdcb6e' },
+                    title: t.preStage.gemini.aiTells || '',
+                  }, '🤖 ' + t.preStage.gemini.aiOrigin + (t.preStage.gemini.presentedAsReal === false ? ' (stylised)' : ''))
               ),
             t.preStage.gemini.mood && React.createElement('span', { style: { fontSize: 11, color: 'var(--text2)' } }, 'mood: ' + t.preStage.gemini.mood)
           )
         ),
 
       // ── COLLAPSIBLE: Stage 2 deep-dive (only when scorer ran x_search) ─
-      t.xSearchData && (t.xSearchData.xBuzz || t.xSearchData.narrativeMomentum || t.xSearchData.organicity || t.xSearchData.subjectName) &&
+      // Strictly x_search output. Bonuses moved out on 2026-08-04 — they apply
+      // to every trend now, so nesting them here hid them whenever Stage 2 was
+      // toggled off. Same bug had been hiding textOnlyPenalty all along.
+      t.xSearchData && (t.xSearchData.xBuzz || t.xSearchData.narrativeMomentum || t.xSearchData.organicity) &&
         React.createElement(Collapsible, { title: '🔍 Stage 2 (Grok deep-dive)', accent: 'stage2', defaultOpen: true },
           React.createElement('div', { className: 'sp-metric-row', style: { marginBottom: 8, fontFamily: 'inherit' } },
             React.createElement('span', null, 'X Buzz: ', React.createElement('b', null, t.xSearchData.xBuzz || 'unknown')),
             React.createElement('span', null, 'Импульс: ', React.createElement('b', null, t.xSearchData.narrativeMomentum || 'unknown')),
             React.createElement('span', null, 'Органичность: ', React.createElement('b', null, t.xSearchData.organicity || 'unknown'))
           ),
-          t.xSearchData.subjectName && React.createElement('div', { style: { fontSize: 12, color: 'var(--text2)' } },
-            '🏷 Subject: ', React.createElement('b', { style: { color: 'var(--text)' } }, '"' + t.xSearchData.subjectName + '"'),
-            ' · strength ', React.createElement('b', { style: { color: 'var(--text)' } }, t.xSearchData.nameStrength)
+          t.stage2Penalty && t.stage2Penalty.multiplier < 1 && React.createElement('div', { style: { fontSize: 11, color: 'var(--text2)', marginTop: 8 } },
+            '⛔ Penalty ×' + t.stage2Penalty.multiplier.toFixed(2) + (t.stage2Penalty.reasons?.length ? ' (' + t.stage2Penalty.reasons.join(', ') + ')' : '')
+          )
+        ),
+
+      // ── COLLAPSIBLE: Score adjustments (every trend, no Stage 2 needed) ─
+      (t.subjectName || t.storyBonus || t.nameBonus || t.textOnlyPenalty) &&
+        React.createElement(Collapsible, { title: '⚖️ Корректировки скора', defaultOpen: true },
+          t.subjectName && React.createElement('div', { style: { fontSize: 12, color: 'var(--text2)', marginBottom: 8 } },
+            '🏷 Subject: ', React.createElement('b', { style: { color: 'var(--text)' } }, '"' + t.subjectName + '"'),
+            ' · strength ', React.createElement('b', { style: { color: 'var(--text)' } }, t.nameStrength || 0)
           ),
-          (t.stage2Penalty || t.stage2StoryBonus || t.stage2NameBonus || t.textOnlyPenalty) && React.createElement('div', { style: { fontSize: 11, color: 'var(--text2)', marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(56,189,248,.18)' } },
-            t.stage2Penalty && t.stage2Penalty.multiplier < 1 && React.createElement('div', null, '⛔ Penalty ×' + t.stage2Penalty.multiplier.toFixed(2) + (t.stage2Penalty.reasons?.length ? ' (' + t.stage2Penalty.reasons.join(', ') + ')' : '')),
-            t.textOnlyPenalty && t.textOnlyPenalty.multiplier < 1 && React.createElement('div', null, '📝 Text-only ×' + t.textOnlyPenalty.multiplier.toFixed(2) + ' — meme ' + t.textOnlyPenalty.memeBefore + '→' + t.textOnlyPenalty.memeAfter + ', viral ' + t.textOnlyPenalty.viralBefore + '→' + t.textOnlyPenalty.viralAfter),
-            t.stage2StoryBonus && t.stage2StoryBonus.bonus > 0 && React.createElement('div', null, '📖 Story bonus +' + t.stage2StoryBonus.bonus + ' (story score ' + t.stage2StoryBonus.storyScore + ')'),
-            t.stage2NameBonus  && t.stage2NameBonus.bonus  > 0 && React.createElement('div', null, '🏷 Name bonus +'  + t.stage2NameBonus.bonus  + ' (strength '   + t.stage2NameBonus.nameStrength + ')')
+          React.createElement('div', { style: { fontSize: 11, color: 'var(--text2)' } },
+            t.storyBonus && t.storyBonus.bonus > 0 && React.createElement('div', null, '📖 Story bonus +' + t.storyBonus.bonus + ' (story score ' + t.storyBonus.storyScore + ') — meme ' + t.storyBonus.memeBefore + '→' + t.storyBonus.memeAfter),
+            t.nameBonus && t.nameBonus.bonus > 0 && React.createElement('div', null, '🏷 Name bonus +' + t.nameBonus.bonus + ' (strength ' + t.nameBonus.nameStrength + ') — meme ' + t.nameBonus.memeBefore + '→' + t.nameBonus.memeAfter),
+            t.textOnlyPenalty && t.textOnlyPenalty.multiplier < 1 && React.createElement('div', null, '📝 Text-only ×' + t.textOnlyPenalty.multiplier.toFixed(2) + ' — meme ' + t.textOnlyPenalty.memeBefore + '→' + t.textOnlyPenalty.memeAfter + ', viral ' + t.textOnlyPenalty.viralBefore + '→' + t.textOnlyPenalty.viralAfter)
           )
         ),
 
@@ -8241,12 +8227,19 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       triggerSources:  (() => { try { return JSON.parse(row.trigger_sources || '[]'); } catch { return []; } })(),
       triggerConfidence: row.trigger_confidence | 0,
       predictedLifespan: row.predicted_lifespan,
-      xSearchData:     metrics.xSearchData || { storyScore: metrics.storyScore || 0, storyHook: metrics.storyHook || '' },
+      // Stage-2-only now. Do NOT synthesise one out of story fields — the
+      // pipeline trace treats a present xSearchData as evidence x_search ran.
+      xSearchData:     metrics.xSearchData || null,
       // Stage 2 deltas — saved per-trend so the SubmitPage history can show
       // the same penalty/bonus chips after page reload.
       stage2Penalty:    metrics.stage2Penalty    || null,
-      stage2StoryBonus: metrics.stage2StoryBonus || null,
-      stage2NameBonus:  metrics.stage2NameBonus  || null,
+      // Neither bonus object is persisted (saveTrend does not list them), so
+      // these read null on the DB-hydration path. The flat fields below are
+      // what actually survives a reload.
+      storyBonus:      metrics.storyBonus      || null,
+      nameBonus:       metrics.nameBonus       || null,
+      subjectName:     metrics.subjectName     || '',
+      nameStrength:    metrics.nameStrength    || 0,
       textOnlyPenalty:  metrics.textOnlyPenalty  || null,
       // Cluster routing inputs (snapshot at scoring time).
       clusterMetrics:   metrics.clusterMetrics   || null,
@@ -8280,8 +8273,8 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       memePotential: trend.memePotential,
       emergenceScore: trend.emergenceScore,
       adoptionScore: trend.adoptionScore,
-      storyScore: trend.xSearchData?.storyScore || trend.storyScore || 0,
-      storyHook: trend.xSearchData?.storyHook || trend.storyHook || '',
+      storyScore: trend.storyScore || trend.xSearchData?.storyScore || 0,
+      storyHook: trend.storyHook || trend.xSearchData?.storyHook || '',
       category: trend.category,
       sentiment: trend.sentiment,
       predictedLifespan: trend.predictedLifespan,
@@ -8297,8 +8290,10 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       junkPenalty: trend.junkPenalty,
       xSearchData: trend.xSearchData || null,
       stage2Penalty: trend.stage2Penalty || null,
-      stage2StoryBonus: trend.stage2StoryBonus || null,
-      stage2NameBonus: trend.stage2NameBonus || null,
+      storyBonus: trend.storyBonus || null,
+      nameBonus: trend.nameBonus || null,
+      subjectName: trend.subjectName || '',
+      nameStrength: trend.nameStrength || 0,
       textOnlyPenalty: trend.textOnlyPenalty || null,
       clusterMetrics: trend.clusterMetrics || null,
       memeShapeSignals: trend.metrics?.memeShapeSignals || trend.memeShapeSignals || null,
@@ -8318,11 +8313,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
   _derivePipelineTrace(trend) {
     const s2Threshold = parseInt(this.db.getSetting?.('stage2Threshold', '60'), 10) || 60;
     const stage1Ran = typeof trend.memePotential === 'number';
+    // storyScore is NOT evidence any more — Stage 1 produces it for every
+    // trend since 2026-08-04. Only the three x_search signals prove Stage 2 ran.
     const stage2Ran = !!trend.xSearchData && (
       typeof trend.xSearchData.xBuzz === 'string' ||
       typeof trend.xSearchData.narrativeMomentum === 'string' ||
-      typeof trend.xSearchData.organicity === 'string' ||
-      (trend.xSearchData.storyScore || 0) > 0
+      typeof trend.xSearchData.organicity === 'string'
     );
     let stage2SkipReason = null;
     if (!stage2Ran) {
