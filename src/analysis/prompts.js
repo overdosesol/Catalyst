@@ -134,6 +134,38 @@ catchphrase / $TICKER all count. Generic descriptors and topic labels do NOT →
 
 Always respond with ONLY valid JSON. No markdown, no preamble, no explanation outside the JSON array.`;
 
+// ─── Narrative-core guidance (2026-08-05) ────────────────────────────────────
+//
+// Spliced into SYSTEM_PROMPT ahead of BATCH CALIBRATION so it sits next to the
+// other "how to read Stage 0b" guidance. Kept as its own constant because it is
+// re-tuned far more often than the rest of the rubric.
+//
+// The last line is load-bearing: without it the model penalises weak core
+// fields AND the code caps the same trend afterwards, punishing it twice for
+// one flaw.
+const NARRATIVE_CORE_BLOCK = `━━━ NARRATIVE CORE ━━━
+Stage 0b also reports whether there is anything here to hold on to. Still observations, not verdicts — but these are the ones that separate a real narrative from a pleasant frame:
+• "Retelling" — the event in one sentence with judgement words stripped out. "Retelling: NONE" means that after removing "cute / funny / weird", nothing was left but a mood or a pose. That is strong evidence there is no story, whatever the engagement says.
+• replaceability — how interchangeable the subject is. 71+ means any member of the category would have produced the same clip: no identity, so nothing an audience can name or come back to.
+• residue — what survives once views are zero and the imagery stops looking unusual. 20 or below means the whole appeal was spectacle.
+• authDependency — whether the interest depends on believing it really happened. It matters together with aiOrigin: a generated clip that needs to be believed is a trap, a generated clip that fools nobody is just a meme.
+50 on any of these means the observer was NOT SURE. Treat it as no signal, never as a negative.
+Do NOT double-punish. Hard caps for the extreme values are applied in code after you. Your job is to score the content honestly; when these fields are weak, simply do not reach for the top bands.`;
+
+/**
+ * Assembled Stage 1 system prompt. Marker miss falls back to appending — losing
+ * the block silently would be worse than misplacing it.
+ * `test/potential-gates.test.mjs` asserts the marker still hits.
+ */
+function composeSystemPrompt() {
+  const marker = '━━━ BATCH CALIBRATION';
+  const at = SYSTEM_PROMPT.indexOf(marker);
+  if (at < 0) return `${SYSTEM_PROMPT}\n\n${NARRATIVE_CORE_BLOCK}`;
+  return `${SYSTEM_PROMPT.slice(0, at)}${NARRATIVE_CORE_BLOCK}\n\n${SYSTEM_PROMPT.slice(at)}`;
+}
+
+export const STAGE1_SYSTEM_PROMPT = composeSystemPrompt();
+
 export function buildAnalysisPrompt(trends) {
   const trendList = trends.map((t, i) => {
     let detail = `${i + 1}. "${t.title}" [Source: ${t.source}]`;
@@ -202,7 +234,27 @@ export function buildAnalysisPrompt(trends) {
                                                 sigBits.push(`subjects=[${g.subjectNames.join(', ')}]`);
       if (g.isAmbient === true)                 sigBits.push(`AMBIENT`);
       if (g.isLipSync === true)                 sigBits.push(`LIPSYNC`);
+
+      // Section E — narrative core (2026-08-05). Absent on records captioned
+      // before that date, hence the Number.isFinite guards.
+      if (Number.isFinite(g.replaceability))
+        sigBits.push(`replaceability=${g.replaceability}/100`);
+      if (Number.isFinite(g.residue))
+        sigBits.push(`residue=${g.residue}/100`);
+      if (Number.isFinite(g.authenticityDependency))
+        sigBits.push(`authDependency=${g.authenticityDependency}/100`);
+
       if (sigBits.length > 0)               detail += `\n   Observed: ${sigBits.join(', ')}`;
+
+      // Retelling gets its own line — it is a sentence, and burying it in a
+      // comma-joined list makes it read as one more flag. `typeof` rather than
+      // a truthiness check: '' is MEANINGFUL here ("no event survived the
+      // judgement-word strip"), undefined only means the record predates it.
+      if (typeof g.retelling === 'string') {
+        detail += g.retelling.trim()
+          ? `\n   Retelling: "${g.retelling.trim()}"`
+          : `\n   Retelling: NONE (nothing but mood or pose once judgement words are stripped)`;
+      }
     }
 
     // [MARKET_STAGE] optional context hint — remove 3 lines to disable
@@ -263,14 +315,17 @@ export function buildAnalysisPrompt(trends) {
       }
     }
 
-    // Cluster + junk context. These exist on the trend since the clusterer runs
-    // before scoring, but until 2026-08-05 they never reached the prompt — the
-    // scorer could not tell a lone post from a 12-post wave.
+    // Junk context.
+    //
+    // Emergence and ClusterSize were added here on 2026-08-05 (stage-roles swap)
+    // and removed again the same day. Do not put them back. Two reasons:
+    //   • Double counting. Emergence is a purely technical number (DB velocity,
+    //     author spread, novelty, breakout, Reddit ideaBoost — clusterer.js).
+    //     Feeding it to the model makes memePotential absorb it, and then
+    //     computeAlertScore adds emergence AGAIN at weight 0.10.
+    //   • ClusterSize is ~always 1 in practice, so the line carried no
+    //     information while still inviting the model to reason about "waves".
     const cm = t.clusterMetrics || {};
-    const emergence = Number(t.emergenceScore ?? cm.emergenceScore ?? 0);
-    const itemCount = Number(cm.itemCount ?? (Array.isArray(t.items) ? t.items.length : 0)) || 0;
-    if (emergence > 0)  detail += `\n   Emergence: ${emergence}/100`;
-    if (itemCount > 1)  detail += `\n   ClusterSize: ${itemCount} posts in this narrative`;
     const junkReasons = t.junkReasons || cm.junkReasons || [];
     if (Array.isArray(junkReasons) && junkReasons.length > 0) {
       detail += `\n   JunkSignals: ${junkReasons.join(', ')} (heuristic hints — context, not a verdict)`;

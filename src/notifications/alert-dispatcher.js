@@ -270,6 +270,10 @@ export async function dispatchAlerts({ trends, deps, source = 'scan' }) {
           // calibration drift is visible at a glance.
           scoreSource:   trend.scoreSource   || null,
           memePotential: trend.memePotential ?? null,
+          // Potential caps (2026-08-05). Without this the Decisions panel shows
+          // a memePotential that silently disagrees with what Stage 1 returned
+          // and there is no way to tell which rule pulled it down.
+          capsApplied:   trend.capsApplied    || null,
           // Deep Escalation path tag (in-memory from scorer.selectDeepDiveCandidates):
           // 'escalation' = under-scored / needsDeeperLook second-chance into Stage 2;
           // 'high_meme'  = normal meme-gate Stage 2; null = no Stage 2 deep-dive.

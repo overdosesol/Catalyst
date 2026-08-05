@@ -4587,6 +4587,27 @@ function DecisionsPage() {
                     }
                   }, m.icon + ' ' + m.label);
                 })(),
+                // Potential cap chip — which rule capped the score and where it
+                // landed. Shown even when the cap changed nothing (the trend was
+                // already below it), because "rule fired, no effect" is exactly
+                // what you want to see while calibrating the thresholds.
+                d.capsApplied && Array.isArray(d.capsApplied.rules) && d.capsApplied.rules.length > 0 && (() => {
+                  const c = d.capsApplied;
+                  const names = c.rules.map(r => r.rule).join(' + ');
+                  const moved = c.memeAfter !== c.memeBefore;
+                  return h('span', {
+                    title: 'Ворота потенциала: ' + names + ' → потолок ' + c.cap
+                         + ' | meme ' + c.memeBefore + '→' + c.memeAfter
+                         + (c.deceptionRisk != null ? ' | deceptionRisk ' + c.deceptionRisk : ''),
+                    style: {
+                      fontSize: 11, padding: '2px 7px', borderRadius: 4,
+                      color: moved ? '#ff7675' : '#636e72',
+                      background: moved ? 'rgba(255,118,117,.10)' : 'rgba(99,110,114,.10)',
+                      border: '1px solid ' + (moved ? '#ff767533' : '#636e7233'),
+                      fontWeight: 600,
+                    }
+                  }, '⛔ ' + names + (moved ? ' ' + c.memeBefore + '→' + c.memeAfter : ' (без эффекта)'));
+                })(),
                 // Deep Escalation badge — did this trend go through Stage 2, and how.
                 d.deepDiveReason && (() => {
                   const map = {
@@ -4831,6 +4852,35 @@ function DecisionPreStageBlock(d) {
               title: g.aiTells || '',
             }, '🤖 ' + g.aiOrigin + (g.presentedAsReal === false ? ' (stylised)' : ''))
         ),
+      // Narrative core (SECTION E, 2026-08-05). Colour marks the values that
+      // actually trip a cap: replaceability 71+, residue 20-.
+      (typeof g.retelling === 'string'
+          || Number.isFinite(g.replaceability)
+          || Number.isFinite(g.residue)) &&
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 } },
+          Number.isFinite(g.replaceability) &&
+            h('span', {
+              className: 'sp-chip',
+              style: { fontSize: 10, color: g.replaceability >= 71 ? '#ff7675' : 'var(--text2)' },
+            }, '♻ replaceable ' + g.replaceability + '/100'),
+          Number.isFinite(g.residue) &&
+            h('span', {
+              className: 'sp-chip',
+              style: { fontSize: 10, color: g.residue <= 20 ? '#ff7675' : 'var(--text2)' },
+            }, '🧩 residue ' + g.residue + '/100'),
+          Number.isFinite(g.authenticityDependency) &&
+            h('span', { className: 'sp-chip', style: { fontSize: 10, color: 'var(--text2)' } },
+              '🪪 authDep ' + g.authenticityDependency + '/100')
+        ),
+      typeof g.retelling === 'string' &&
+        h('div', {
+          style: {
+            fontSize: 11, marginTop: 6,
+            color: g.retelling.trim() ? 'var(--text)' : '#ff7675',
+          },
+        }, g.retelling.trim()
+          ? '📝 ' + g.retelling
+          : '📝 пересказа нет — осталось только настроение или поза'),
       // Mood + language footer
       h('div', { style: { display: 'flex', gap: 12, marginTop: 4, flexWrap: 'wrap' } },
         g.mood && h('span', { style: { fontSize: 11, color: 'var(--text2)' } }, 'mood: ' + g.mood),
@@ -6037,6 +6087,33 @@ function ManualResultCard({ result, comment, setComment, onAlertSent }) {
                     title: t.preStage.gemini.aiTells || '',
                   }, '🤖 ' + t.preStage.gemini.aiOrigin + (t.preStage.gemini.presentedAsReal === false ? ' (stylised)' : ''))
               ),
+            // Narrative core (SECTION E, 2026-08-05) — same chips as the
+            // Decisions panel; red marks the values that trip a cap.
+            (Number.isFinite(t.preStage.gemini.replaceability) || Number.isFinite(t.preStage.gemini.residue)) &&
+              React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 } },
+                Number.isFinite(t.preStage.gemini.replaceability) &&
+                  React.createElement('span', {
+                    className: 'sp-chip',
+                    style: { fontSize: 10, color: t.preStage.gemini.replaceability >= 71 ? '#ff7675' : 'var(--text2)' },
+                  }, '♻ replaceable ' + t.preStage.gemini.replaceability + '/100'),
+                Number.isFinite(t.preStage.gemini.residue) &&
+                  React.createElement('span', {
+                    className: 'sp-chip',
+                    style: { fontSize: 10, color: t.preStage.gemini.residue <= 20 ? '#ff7675' : 'var(--text2)' },
+                  }, '🧩 residue ' + t.preStage.gemini.residue + '/100'),
+                Number.isFinite(t.preStage.gemini.authenticityDependency) &&
+                  React.createElement('span', { className: 'sp-chip', style: { fontSize: 10, color: 'var(--text2)' } },
+                    '🪪 authDep ' + t.preStage.gemini.authenticityDependency + '/100')
+              ),
+            typeof t.preStage.gemini.retelling === 'string' &&
+              React.createElement('div', {
+                style: {
+                  fontSize: 11, marginTop: 6,
+                  color: t.preStage.gemini.retelling.trim() ? 'var(--text)' : '#ff7675',
+                },
+              }, t.preStage.gemini.retelling.trim()
+                ? '📝 ' + t.preStage.gemini.retelling
+                : '📝 пересказа нет — осталось только настроение или поза'),
             t.preStage.gemini.mood && React.createElement('span', { style: { fontSize: 11, color: 'var(--text2)' } }, 'mood: ' + t.preStage.gemini.mood)
           )
         ),
@@ -6058,7 +6135,7 @@ function ManualResultCard({ result, comment, setComment, onAlertSent }) {
         ),
 
       // ── COLLAPSIBLE: Score adjustments (every trend, no Stage 2 needed) ─
-      (t.subjectName || t.storyBonus || t.nameBonus || t.textOnlyPenalty) &&
+      (t.subjectName || t.storyBonus || t.nameBonus || t.textOnlyPenalty || t.capsApplied) &&
         React.createElement(Collapsible, { title: '⚖️ Корректировки скора', defaultOpen: true },
           t.subjectName && React.createElement('div', { style: { fontSize: 12, color: 'var(--text2)', marginBottom: 8 } },
             '🏷 Subject: ', React.createElement('b', { style: { color: 'var(--text)' } }, '"' + t.subjectName + '"'),
@@ -6067,7 +6144,12 @@ function ManualResultCard({ result, comment, setComment, onAlertSent }) {
           React.createElement('div', { style: { fontSize: 11, color: 'var(--text2)' } },
             t.storyBonus && t.storyBonus.bonus > 0 && React.createElement('div', null, '📖 Story bonus +' + t.storyBonus.bonus + ' (story score ' + t.storyBonus.storyScore + ') — meme ' + t.storyBonus.memeBefore + '→' + t.storyBonus.memeAfter),
             t.nameBonus && t.nameBonus.bonus > 0 && React.createElement('div', null, '🏷 Name bonus +' + t.nameBonus.bonus + ' (strength ' + t.nameBonus.nameStrength + ') — meme ' + t.nameBonus.memeBefore + '→' + t.nameBonus.memeAfter),
-            t.textOnlyPenalty && t.textOnlyPenalty.multiplier < 1 && React.createElement('div', null, '📝 Text-only ×' + t.textOnlyPenalty.multiplier.toFixed(2) + ' — meme ' + t.textOnlyPenalty.memeBefore + '→' + t.textOnlyPenalty.memeAfter + ', viral ' + t.textOnlyPenalty.viralBefore + '→' + t.textOnlyPenalty.viralAfter)
+            t.textOnlyPenalty && t.textOnlyPenalty.multiplier < 1 && React.createElement('div', null, '📝 Text-only ×' + t.textOnlyPenalty.multiplier.toFixed(2) + ' — meme ' + t.textOnlyPenalty.memeBefore + '→' + t.textOnlyPenalty.memeAfter + ', viral ' + t.textOnlyPenalty.viralBefore + '→' + t.textOnlyPenalty.viralAfter),
+            t.capsApplied && Array.isArray(t.capsApplied.rules) && t.capsApplied.rules.length > 0 &&
+              React.createElement('div', { style: { color: t.capsApplied.memeAfter !== t.capsApplied.memeBefore ? '#ff7675' : 'var(--text2)' } },
+                '⛔ Ворота: ' + t.capsApplied.rules.map(r => r.rule).join(' + ')
+                + ' → потолок ' + t.capsApplied.cap
+                + ' — meme ' + t.capsApplied.memeBefore + '→' + t.capsApplied.memeAfter)
           )
         ),
 
@@ -8241,6 +8323,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       subjectName:     metrics.subjectName     || '',
       nameStrength:    metrics.nameStrength    || 0,
       textOnlyPenalty:  metrics.textOnlyPenalty  || null,
+      capsApplied:      metrics.capsApplied      || null,
       // Cluster routing inputs (snapshot at scoring time).
       clusterMetrics:   metrics.clusterMetrics   || null,
       // Stage 1 viralityScore lives in raw_metrics for non-current rows; the
@@ -8295,6 +8378,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       subjectName: trend.subjectName || '',
       nameStrength: trend.nameStrength || 0,
       textOnlyPenalty: trend.textOnlyPenalty || null,
+      capsApplied: trend.capsApplied || null,
       clusterMetrics: trend.clusterMetrics || null,
       memeShapeSignals: trend.metrics?.memeShapeSignals || trend.memeShapeSignals || null,
       junkReasons: trend.clusterMetrics?.junkReasons || trend.metrics?.junkReasons || trend.junkReasons || [],

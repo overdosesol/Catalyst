@@ -1,5 +1,5 @@
 import {
-  SYSTEM_PROMPT,
+  STAGE1_SYSTEM_PROMPT,
   buildAnalysisPrompt,
   STAGE1_RESPONSE_SCHEMA,
   STAGE2_SYSTEM_PROMPT,
@@ -388,6 +388,124 @@ export function applyNarrativeBonuses(trend, logger = null) {
   }
 }
 
+// ─── Potential gates: deception risk + hard caps (2026-08-05) ───────────────
+//
+// Why caps live in CODE and not in the prompt: the only cap we had before this
+// ("compilation → 25") was an instruction in SYSTEM_PROMPT, and the golden-set
+// run measured it catching 3 of 4 compilations on gemini-3.6-flash but only 2
+// of 4 on flash-lite. A rule that depends on the model's mood is not a rule.
+//
+// Caps hit `memePotential` only. `viralityScore` is an honest measurement of
+// engagement and stays untouched — capping it would make the dashboard lie
+// about how much attention something actually got.
+
+// aiOrigin → how much weight its claim carries. `unclear` is deliberately low
+// (0.25): honest uncertainty must not be punished like a detected fake.
+const ORIGIN_FACTOR = { real: 0, unclear: 0.25, likely_ai: 0.7, obvious_ai: 1.0 };
+
+// Risk at or above this trips the deception cap. 0.45 sits just under the
+// "likely_ai + presented as real + dependency 70" case (0.49) and above the
+// worst honest-uncertainty case ("unclear + real framing + dependency 100" =
+// 0.25), so an honest "I don't know" can never trigger it on its own.
+export const DECEPTION_CAP_RISK = 0.45;
+
+export const POTENTIAL_CAPS = {
+  compilation:   25,
+  deception:     30,
+  no_retelling:  35,
+  spectacle_only: 40,
+  replaceable:   40,
+};
+
+/**
+ * Deception risk from the three authenticity axes (spec §4.4).
+ *
+ * Three axes instead of one "is it AI?" flag, because the honest answer to
+ * "should we punish this?" is different for a generated character with a
+ * catchphrase (no) and a generated rescue video framed as real footage (yes).
+ *
+ *   synthetic likelihood × reality framing × dependence on being believed
+ *
+ * Defaults are neutral, not damning: an absent aiOrigin reads as `unclear` and
+ * an absent dependency as 50.
+ */
+export function computeDeceptionRisk(gemini) {
+  const g = gemini || {};
+  const origin  = ORIGIN_FACTOR[String(g.aiOrigin || 'unclear')] ?? 0.25;
+  const framing = g.presentedAsReal === false ? 0.1 : 1.0;
+  const depRaw  = Number.isFinite(g.authenticityDependency) ? g.authenticityDependency : 50;
+  const dep     = Math.max(0, Math.min(100, depRaw)) / 100;
+  return origin * framing * dep;
+}
+
+/**
+ * Apply the potential caps to `trend.memePotential` in place.
+ *
+ * Not guarded against re-entry on purpose: `Math.min` makes it idempotent, and
+ * if some later stage raises memePotential the cap SHOULD apply again.
+ *
+ * Every cap requires `preStage.gemini` — no vision, no caps. That single guard
+ * implements the text-only exemption from the spec: 6 of 34 golden fixtures are
+ * Reddit text / Google Trends where the story lives in the text, and "no
+ * retelling → 35" would flatten all of them. Those inputs are already handled
+ * by the NO VISION block in the Stage 1 prompt.
+ */
+export function applyPotentialCaps(trend, logger = null) {
+  if (!trend) return;
+  const g = trend.preStage?.gemini;
+  if (!g) return;
+
+  const hits = [];
+  const subjectName = typeof trend.subjectName === 'string' ? trend.subjectName.trim() : '';
+
+  if (g.isCompilation === true) {
+    hits.push({ rule: 'compilation', cap: POTENTIAL_CAPS.compilation });
+  }
+
+  const deceptionRisk = computeDeceptionRisk(g);
+  if (deceptionRisk >= DECEPTION_CAP_RISK) {
+    hits.push({ rule: 'deception', cap: POTENTIAL_CAPS.deception });
+  }
+
+  // '' is a meaningful answer ("nothing survived the judgement-word strip");
+  // undefined means the field was never collected — those must not be capped.
+  if (typeof g.retelling === 'string' && !g.retelling.trim()) {
+    hits.push({ rule: 'no_retelling', cap: POTENTIAL_CAPS.no_retelling });
+  }
+
+  if (Number.isFinite(g.residue) && g.residue <= 20) {
+    hits.push({ rule: 'spectacle_only', cap: POTENTIAL_CAPS.spectacle_only });
+  }
+
+  // Replaceable AND nameless. A replaceable subject that still earned a
+  // tickerable name has something to point at, so the cap would be wrong.
+  if (Number.isFinite(g.replaceability) && g.replaceability >= 71 && !subjectName) {
+    hits.push({ rule: 'replaceable', cap: POTENTIAL_CAPS.replaceable });
+  }
+
+  if (hits.length === 0) return;
+
+  const memeBefore = Number(trend.memePotential) || 0;
+  const cap        = Math.min(...hits.map(h => h.cap)); // strictest wins, never stacked
+  const memeAfter  = Math.min(memeBefore, cap);
+
+  trend.memePotential = memeAfter;
+  trend.capsApplied = {
+    rules: hits,
+    cap,
+    memeBefore,
+    memeAfter,
+    deceptionRisk: Math.round(deceptionRisk * 100) / 100,
+  };
+
+  if (memeAfter !== memeBefore) {
+    logger?.info?.(
+      `Potential cap "${trend.title}": ${hits.map(h => h.rule).join('+')} ` +
+      `→ cap ${cap}, meme ${memeBefore}→${memeAfter}`
+    );
+  }
+}
+
 /**
  * Recompute every score derived from memePotential. Must run after any stage
  * that mutates it, otherwise `adoptionScore` — literally an alias — disagrees
@@ -406,9 +524,12 @@ function recomputeDerivedScores(trend, alertWeights) {
 /**
  * Final pass over every trend once all AI stages have finished.
  *
- * Order is deliberate: additive bonuses first, then the text-only multiplier
- * (a multiplier applied before the bonus would scale the bonus too), then a
- * single recompute of everything derived from memePotential.
+ * Order is deliberate and load-bearing:
+ *   1. additive bonuses  — story + name, up to +25 between them
+ *   2. text-only multiplier — a multiplier before the bonus would scale it too
+ *   3. potential caps    — MUST come after the bonuses, or a +25 story bonus
+ *      lifts a capped trend straight back over its ceiling
+ *   4. one recompute of everything derived from memePotential
  *
  * Each trend is isolated — one throwing must not abort the batch.
  */
@@ -418,6 +539,8 @@ export function runPostPass(trends, alertWeights, logger = null) {
     catch (e) { logger?.warn?.(`narrative bonuses threw for "${t?.title}": ${e.message}`); }
     try { applyTextOnlyMultiplier(t, logger); }
     catch (e) { logger?.warn?.(`textOnly multiplier threw for "${t?.title}": ${e.message}`); }
+    try { applyPotentialCaps(t, logger); }
+    catch (e) { logger?.warn?.(`potential caps threw for "${t?.title}": ${e.message}`); }
     try { recomputeDerivedScores(t, alertWeights); }
     catch (e) { logger?.warn?.(`score recompute threw for "${t?.title}": ${e.message}`); }
   }
@@ -859,7 +982,7 @@ class Scorer {
     // within 5 minutes, so the static + semi-static head almost always caches.
     const examplesContext = this._buildExamplesContext();
     const feedbackContext = this._buildFeedbackContext();
-    const systemPrompt    = SYSTEM_PROMPT + examplesContext + feedbackContext;
+    const systemPrompt    = STAGE1_SYSTEM_PROMPT + examplesContext + feedbackContext;
 
     // ── Stage 1: base scoring ──
     const batchSize = 8;
@@ -1035,7 +1158,7 @@ class Scorer {
     const prompt  = buildAnalysisPrompt(trends);
     // Mirror the assembly order in scoreTrends() when called standalone
     // (e.g. from manual-submit pipeline) so cache prefix stays consistent.
-    const sysMsg  = systemPrompt || (SYSTEM_PROMPT + this._buildExamplesContext() + this._buildFeedbackContext());
+    const sysMsg  = systemPrompt || (STAGE1_SYSTEM_PROMPT + this._buildExamplesContext() + this._buildFeedbackContext());
 
     if (metrics) {
       metrics.stage1Calls += 1;

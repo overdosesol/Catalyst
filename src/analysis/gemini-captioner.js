@@ -174,6 +174,62 @@ Return these fields in 4 sections:
 - For TEXT-ONLY input (no media URL): visual/audio/spoken fields = '', aiOrigin = "unclear".
 - Report only what the media shows. Never guess at popularity, importance or how "good" the trend is — that is not your job.`;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION E — narrative core (2026-08-05).
+//
+// Kept as its own constant rather than inlined into VISION_SYSTEM_PROMPT purely
+// for readability: it is the block that decides whether a clip has anything to
+// hold on to, and it gets re-tuned far more often than the rest of the prompt.
+//
+// `authenticityDependency` is conceptually part of SECTION D (authenticity) but
+// lives here because it was written and calibrated with the other three.
+// ─────────────────────────────────────────────────────────────────────────────
+const VISION_SECTION_E = `━━━ SECTION E — NARRATIVE CORE ━━━
+Three observations about whether there is anything for an audience to hold on to, plus one about authenticity. Still FACTS about the media: you answer "is there something here to point at", never "will this succeed".
+
+- "retelling":     ONE sentence, <=140 chars: a concrete subject + a concrete action or event. BANNED words: cute, funny, weird, viral, amazing, satisfying, adorable, crazy, wholesome, insane, and their synonyms. If removing those words leaves only a mood, a pose or a look, return '' (empty string).
+                   • "A cat looks annoyed at the camera" → '' (that is a pose, not an event)
+                   • "A cat knocks the streamer's mic over for the third time" → keep it
+- "replaceability": Integer 0-100. Swap the subject for a random member of the same category and drop the caption. Does the clip lose the reason to point at THIS one?
+                   • 0-20   unique — has a name, a role, a recognisable line, or a specific event
+                   • 21-45  a concrete episode, performer only partly replaceable
+                   • 46-70  any member of the category would do, small loss
+                   • 71-100 fully replaceable — "any cat / any girl / any sunset" gives the same clip
+- "residue":       Integer 0-100. Imagine views are zero, the imagery no longer looks unusual, and the viewer already knows whether it is real or generated. What is left?
+                   • 0-20   nothing — it was all spectacle, cuteness or impossibility
+                   • 21-45  a weak retellable idea
+                   • 46-70  a concrete episode or character survives
+                   • 71-100 the story works without the visuals at all; told in words it does not fade
+- "authenticityDependency": Integer 0-100. Does the interest depend on believing this really happened?
+                   • 0-20   no — a character, a joke, a format; works even as openly fictional
+                   • 21-45  mostly no
+                   • 46-70  partly — being real adds, but does not carry it
+                   • 71-100 yes — a rescue, an accident, security-camera footage, a record; remove "this really happened" and nothing is left
+
+WHEN UNSURE: answer 50 on every number in this section. 50 is a correct, unpunished answer — a confident wrong number is worse than an honest middle.
+TEXT-ONLY INPUT (no media): replaceability=50, residue=50, authenticityDependency=50. Write "retelling" from the title/description ONLY if it names a concrete subject AND a concrete action; otherwise ''.`;
+
+/**
+ * The observer's system prompt: base sections + SECTION E, spliced ahead of
+ * FILTER FLAGS. Composed once at module load — there is no second variant since
+ * the potential gates became permanent (2026-08-06).
+ *
+ * If the marker ever goes missing the block is appended rather than silently
+ * dropped; `test/potential-gates.test.mjs` asserts it still hits.
+ */
+function composeVisionPrompt() {
+  const counted = VISION_SYSTEM_PROMPT.replace(
+    'Return these fields in 4 sections:',
+    'Return these fields in 5 sections:'
+  );
+  const marker = '━━━ FILTER FLAGS ━━━';
+  const at = counted.indexOf(marker);
+  if (at < 0) return `${counted}\n\n${VISION_SECTION_E}`;
+  return `${counted.slice(0, at)}${VISION_SECTION_E}\n\n${counted.slice(at)}`;
+}
+
+export const VISION_PROMPT = composeVisionPrompt();
+
 const GOOGLE_RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
@@ -207,6 +263,12 @@ const GOOGLE_RESPONSE_SCHEMA = {
     aiTells:           { type: 'string' },
     presentedAsReal:   { type: 'boolean' },
     isCompilation:     { type: 'boolean' },
+
+    // SECTION E — narrative core (added 2026-08-05).
+    retelling:              { type: 'string' },
+    replaceability:         { type: 'integer' },
+    residue:                { type: 'integer' },
+    authenticityDependency: { type: 'integer' },
   },
   // Required list deliberately tiny (4 fields) — same defensive choice as
   // before the 2026-05-09 expansion. Making the whole 18-field schema
@@ -262,6 +324,32 @@ export function normalizeAiOrigin(v) {
   return AI_ORIGIN_VALUES.has(s) ? s : 'unclear';
 }
 
+/**
+ * Parse SECTION E — the narrative-core fields (2026-08-05).
+ *
+ * Neutral default is 50 on every number, never 0. An absent field means the
+ * model stayed silent, which is not evidence that the narrative is weak — and
+ * 50 is the one value that trips no cap in applyPotentialCaps. Defaulting to 0
+ * would quietly cap every trend whose response lost a field. Records captioned
+ * before 2026-08-05 have no SECTION E at all; those are skipped by the caps.
+ */
+export function parseNarrativeCore(parsed = {}) {
+  const out = {
+    replaceability:         clampInt(parsed.replaceability,         0, 100, 50),
+    residue:                clampInt(parsed.residue,                0, 100, 50),
+    authenticityDependency: clampInt(parsed.authenticityDependency, 0, 100, 50),
+  };
+  // `retelling` is the one field where absence and emptiness must NOT collapse
+  // into the same value. '' is a finding ("nothing survived the judgement-word
+  // strip") and caps the score at 35; a missing key just means the model never
+  // answered, which is not evidence of anything. Only set the key when the
+  // model actually returned a string.
+  if (typeof parsed.retelling === 'string') {
+    out.retelling = parsed.retelling.trim().slice(0, 140);
+  }
+  return out;
+}
+
 // Code-side blacklist of names Gemini should not return as subject. Catches
 // the case when the model ignores the prompt rule "skip platform/country/
 // big-tech". Keep lower-case, single-token. Multi-word context names are
@@ -300,42 +388,18 @@ function normalizeEntityList(arr) {
   return out;
 }
 
-// Compact human-readable engagement summary for Stage 0b context.
-// Consumed by _buildContextString. Since 2026-08-05 these numbers no longer
-// feed a scoring rule here — Stage 0b does not score. They stay because they
-// disambiguate WHAT is being watched (a 10M-play TikTok and a 200-upvote
-// Reddit post get described differently). Outputs e.g.:
-//   "views=2.3M, likes=19K, shares=1.6K, comments=287"
-// Empty string when no useful metrics. Same number-pretty rules as the rest
-// of the codebase.
-function _fmtKbig(n) {
-  if (!Number.isFinite(n)) return '';
-  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K';
-  return String(Math.round(n));
-}
-
-function _summarizeEngagement(metrics) {
-  const m = metrics || {};
-  const parts = [];
-  // Order matches what the prompt's source-calibration block references.
-  if (m.views     != null) parts.push(`views=${_fmtKbig(Number(m.views))}`);
-  if (m.plays     != null) parts.push(`plays=${_fmtKbig(Number(m.plays))}`);
-  if (m.likes     != null) parts.push(`likes=${_fmtKbig(Number(m.likes))}`);
-  if (m.shares    != null) parts.push(`shares=${_fmtKbig(Number(m.shares))}`);
-  if (m.retweets  != null) parts.push(`retweets=${_fmtKbig(Number(m.retweets))}`);
-  if (m.comments  != null) parts.push(`comments=${_fmtKbig(Number(m.comments))}`);
-  if (m.upvotes   != null) parts.push(`upvotes=${_fmtKbig(Number(m.upvotes))}`);
-  if (m.searchVolume != null) parts.push(`searches=${_fmtKbig(Number(m.searchVolume))}`);
-  if (m.followers != null) parts.push(`followers=${_fmtKbig(Number(m.followers))}`);
-  return parts.join(', ');
-}
-
-// Build the user-message context block: source, engagement metrics,
-// description. It orients the observer (who posted this, on which platform,
-// what the caption claims) so the description names the right subject — it is
-// NOT scoring input, since 2026-08-05 Stage 0b reports facts only.
-function _buildContextString(trend) {
+// Build the user-message context block: source, author, description. It orients
+// the observer (who posted this, on which platform, what the caption claims) so
+// the description names the right subject. It is NOT scoring input: since
+// 2026-08-05 Stage 0b reports facts only.
+//
+// NB: engagement metrics are deliberately absent. An observer who knows the clip
+// has 2M views describes it differently from one watching blind — that is metric
+// halo, and it let popularity colour the description before anyone started
+// scoring. Engagement belongs to Stage 1, which measures reaction; Stage 0b only
+// reports content. The helper that used to format them (`_summarizeEngagement`)
+// was deleted with the kill switch on 2026-08-06 — do not reintroduce it here.
+export function _buildContextString(trend) {
   const lines = [];
   const title = String(trend.title || '').trim().slice(0, 200);
   if (title) lines.push(`Title: "${title}"`);
@@ -349,8 +413,6 @@ function _buildContextString(trend) {
   if (m.subreddit) lines.push(`Subreddit: r/${String(m.subreddit).slice(0, 32)}`);
   if (m.sourceHashtag) lines.push(`Hashtag: #${String(m.sourceHashtag).slice(0, 32)}`);
 
-  const engagement = _summarizeEngagement(m);
-  if (engagement) lines.push(`Metrics: ${engagement}`);
 
   if (typeof m.ageHours === 'number' && Number.isFinite(m.ageHours)) {
     lines.push(`AgeHours: ${m.ageHours.toFixed(1)}`);
@@ -391,6 +453,7 @@ function normalizeSubjectNames(arr) {
 export class GeminiCaptioner {
   constructor(config, logger) {
     this.logger = logger;
+
 
     // ── Primary: Direct Google AI Studio ────────────────────────────────────
     // Default model bumped 2026-05-09: gemini-2.5-flash → gemini-3.1-flash-lite.
@@ -579,6 +642,7 @@ export class GeminiCaptioner {
 
   /**
    * Caption a batch — concurrency-capped fan-out. Returns array aligned to input.
+   *
    */
   async captionBatch(trends, { concurrency = 4 } = {}) {
     if (!this.enabled || !Array.isArray(trends) || trends.length === 0) {
@@ -766,12 +830,12 @@ export class GeminiCaptioner {
 
     const ctx = _buildContextString(trend);
     const userText = kind === 'video'
-      ? `${ctx}\n\nWatch AND LISTEN to this video — analyze BOTH visual and audio tracks. Focus on the FIRST 30 SECONDS ONLY. Transcribe spoken words verbatim into spokenText. Describe sounds/music in audioSummary. Check for generation artefacts and report aiOrigin honestly. Return ALL fields per the schema (sections A/B/C/D in the system prompt — describe + enrichment + format signals + authenticity). Report facts only; do NOT score the trend.`
-      : `${ctx}\n\nDescribe this image. For a static image: videoSummary='', audioSummary='', spokenText='', hasNarrative=false, isLipSync=false, isAmbient=false, isCompilation=false. Return ALL fields per the schema (sections A/B/C/D). Report facts only; do NOT score the trend.`;
+      ? `${ctx}\n\nWatch AND LISTEN to this video — analyze BOTH visual and audio tracks. Focus on the FIRST 30 SECONDS ONLY. Transcribe spoken words verbatim into spokenText. Describe sounds/music in audioSummary. Check for generation artefacts and report aiOrigin honestly. Return ALL fields per the schema (sections A/B/C/D/E in the system prompt). Report facts only; do NOT score the trend.`
+      : `${ctx}\n\nDescribe this image. For a static image: videoSummary='', audioSummary='', spokenText='', hasNarrative=false, isLipSync=false, isAmbient=false, isCompilation=false. Return ALL fields per the schema (sections A/B/C/D/E). Report facts only; do NOT score the trend.`;
 
     const apiUrl = `${this.googleBaseUrl}/models/${this.googleModel}:generateContent?key=${encodeURIComponent(this.googleKey)}`;
     const body = {
-      systemInstruction: { parts: [{ text: VISION_SYSTEM_PROMPT }] },
+      systemInstruction: { parts: [{ text: VISION_PROMPT }] },
       contents: [{
         parts: [
           { text: userText },
@@ -930,6 +994,11 @@ export class GeminiCaptioner {
         aiTells:           String(parsed.aiTells || '').trim().slice(0, 120),
         presentedAsReal:   parsed.presentedAsReal !== false,
         isCompilation:     parsed.isCompilation === true,
+
+        // Section E — narrative core. Numeric fields default to 50 (neutral),
+        // never 0: silence is not evidence of a weak narrative, and 50 trips no
+        // cap in applyPotentialCaps by design.
+        ...parseNarrativeCore(parsed),
       };
     } catch (e) {
       this.logger?.warn?.(`[GeminiCaptioner] Google ${kind} call failed: ${e.message}`);
@@ -945,11 +1014,11 @@ export class GeminiCaptioner {
     const ctx = _buildContextString(trend);
     const payload = {
       messages: [
-        { role: 'system', content: VISION_SYSTEM_PROMPT },
+        { role: 'system', content: VISION_PROMPT },
         {
           role: 'user',
           content: [
-            { type: 'text', text: `${ctx}\n\nDescribe this image. For a static image: videoSummary='', audioSummary='', spokenText='', hasNarrative=false, isLipSync=false, isAmbient=false, isCompilation=false. Return ALL fields per the schema (sections A/B/C/D — describe, enrichment, format signals, authenticity). Do NOT score the trend.` },
+            { type: 'text', text: `${ctx}\n\nDescribe this image. For a static image: videoSummary='', audioSummary='', spokenText='', hasNarrative=false, isLipSync=false, isAmbient=false, isCompilation=false. Return ALL fields per the schema (sections A/B/C/D/E). Do NOT score the trend.` },
             { type: 'image_url', image_url: { url: imageUrl } },
           ],
         },
@@ -1033,6 +1102,7 @@ export class GeminiCaptioner {
           aiTells:           String(parsed.aiTells || '').trim().slice(0, 120),
           presentedAsReal:   parsed.presentedAsReal !== false,
           isCompilation:     parsed.isCompilation === true,
+          ...parseNarrativeCore(parsed),
         };
       } finally {
         clearTimeout(timer);

@@ -1544,6 +1544,11 @@ class TrendDatabase {
       // displays the same data that Stage 1 saw, without re-paying for
       // nano/gemini calls. null when PreStage didn't run or both failed.
       preStage:       trend.preStage              ?? null,
+      // Potential caps (2026-08-05) — which gate rule capped memePotential and
+      // where it landed. Persisted because the morning "did this make things
+      // worse?" review needs to count cap hits over a whole night, and the
+      // in-memory decisions ring buffer only holds the last few hundred.
+      capsApplied:    trend.capsApplied           ?? null,
     });
 
     // UPSERT: if the trend already exists in DB (re-analysis after window expiry),
