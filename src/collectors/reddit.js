@@ -16,6 +16,16 @@ import { STORY_FAMILIES, PROBE_ROTATION } from '../analysis/story-markers.js';
  *    operator hand-adds crypto subs into a preset; defaults stay meme-shape.
  */
 
+/**
+ * Gap between the two RSS requests a cycle makes.
+ *
+ * Measured from prod: 45s apart both return 200; 5s apart the second returns
+ * 429. The budget is per-IP and short-lived, so spacing is the whole strategy —
+ * there is nothing else to tune, and a 45s pause inside a 30-minute cycle is
+ * free.
+ */
+const RSS_GAP_MS = 45_000;
+
 const NICHE_MIN_UPVOTES = 1_000;
 const NICHE_SUBS = new Set(['cryptocurrency', 'cryptomoonshots', 'solana', 'memecoins', 'defi', 'wallstreetbets', 'dogecoin', 'pepecoin', 'shib', 'AICoins']);
 
@@ -82,12 +92,26 @@ class RedditCollector extends BaseCollector {
     // right now", which is a popularity question. This asks "what HAPPENED in
     // these subs this week", which is the question that finds narratives.
     // One story family per cycle, rotated, so the cost stays at one request.
-    await this._delay(5000);
+    //
+    // The gap before it is load-bearing. Reddit's RSS budget is roughly one
+    // request per 30-45s from this IP: measured 45s apart both requests return
+    // 200, measured 5s apart the second returns 429 (which is exactly what
+    // happened on the first production cycle). Two requests spaced by
+    // RSS_GAP_MS is the entire rate-limit strategy, and 45s inside a 30-minute
+    // cycle costs nothing.
     const family = this._nextSearchFamily();
-    try {
-      allItems.push(...await this._fetchMultiSearch(subreddits, family));
-    } catch (error) {
-      this.logger.warn(`[Reddit] story search (${family}) failed: ${error.message}`);
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await this._delay(RSS_GAP_MS);
+      try {
+        const items = await this._fetchMultiSearch(subreddits, family);
+        if (items.length > 0) { allItems.push(...items); break; }
+        // Empty means refused (the method logs the status) — one more try, then
+        // let it go. The hot feed above is the floor.
+        if (attempt === 2) this.logger.warn(`[Reddit] story search ${family} gave up after 2 attempts`);
+      } catch (error) {
+        this.logger.warn(`[Reddit] story search (${family}) failed: ${error.message}`);
+        break;
+      }
     }
 
     // Deduplicate by post ID
