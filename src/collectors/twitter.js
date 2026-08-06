@@ -600,18 +600,21 @@ const RELAXED_LIKES_BAR = 500;
 /**
  * Does this tweet (or aggregated cluster) clear the engagement floor?
  *
- * EITHER signal is enough (owner decision 2026-08-07). The old rule was
- * `views > 0 ? views >= viewsBar : likes >= likesBar` — when views were known,
- * likes were never consulted at all, which made the effective bar roughly
- * twice what the preset queries ask for. A query says `min_faves:5000`, Apify
- * bills us for the results, and then a tweet with 6 000 likes and 300 000
- * views was dropped here for having "only" 300K views. We were paying for
- * tweets and throwing them away.
+ * BOTH signals must clear their bar (owner decision 2026-08-07). The old rule
+ * was `views > 0 ? views >= viewsBar : likes >= likesBar` — when views were
+ * known, likes were never consulted at all, so a tweet could pass on reach
+ * alone with almost no engagement behind it.
  *
- * Story tweets are exactly the shape that loses on views and wins on likes:
- * people engage with a narrative after reading it, while a sticky clip racks up
- * impressions from the scroll alone. Consulting both signals is what stops this
- * floor from re-filtering out everything the narrative probes go looking for.
+ * Requiring both turns this into an implicit ratio test, and that is the point:
+ * a sticky clip collects impressions from the scroll without anyone stopping to
+ * react, so it clears views and fails likes. Something people actually engaged
+ * with clears both.
+ *
+ * Consequence worth knowing: every preset query already carries
+ * `min_faves:5000`, so for those the likes half is satisfied by construction
+ * and the effective bar is the views one. Where this genuinely bites is
+ * queries without a min_faves clause and payloads that arrive with no view
+ * count at all — those now fail, where before they were judged on likes.
  *
  * Lives here as one function because the rule is applied twice — per tweet in
  * `_normalize` and per cluster in `_clusterByTopic`. Those two copies had
@@ -622,7 +625,7 @@ export function meetsEngagementBar(views, likes, { cjkMult = 1, relaxedFloor = f
   const l = Number(likes) || 0;
   const viewsBar = (relaxedFloor ? RELAXED_VIEWS_BAR : VIEWS_BAR) * cjkMult;
   const likesBar = (relaxedFloor ? RELAXED_LIKES_BAR : LIKES_BAR) * cjkMult;
-  return v >= viewsBar || l >= likesBar;
+  return v >= viewsBar && l >= likesBar;
 }
 
 /**
