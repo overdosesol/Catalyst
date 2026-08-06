@@ -537,7 +537,18 @@ class AdminServer {
   }
 
   _setPresetConfigs(body) {
-    const cleaned = validatePresetOverrides(body?.overrides);
+    // Compact the manual blob against the layer directly BENEATH it — defaults
+    // merged with auto — not against defaults alone.
+    //
+    // Getting this wrong cost a production afternoon on 2026-08-07: the
+    // operator pressed "↩ Restore hardcoded", the correct sources landed in the
+    // manual layer, and then pressing Save deleted them again, because every
+    // value in them equalled the default and compaction read that as "no-op".
+    // It is not a no-op when Grok's auto layer sits in between — it is the
+    // whole mechanism by which manual outranks auto.
+    const cleaned = validatePresetOverrides(body?.overrides, {
+      baselines: readPresetAutoOverrides(this.db),
+    });
     const cleanedLocks = body?.tagsLocked !== undefined
       ? validatePresetTagsLocked(body.tagsLocked)
       : null;  // null = caller didn't touch locks, leave existing as-is

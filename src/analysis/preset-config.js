@@ -662,8 +662,15 @@ function rangesAt(path) {
   return isObj(node) ? node : null;
 }
 
-function defaultsAt(presetKey, path) {
-  let node = DEFAULT_PRESET_CONFIGS[presetKey];
+/**
+ * Value at `path` in the layer a manual override is being compared against.
+ *
+ * `baseline` is normally `DEFAULT_PRESET_CONFIGS[presetKey]`, but the admin
+ * save path passes defaults-merged-with-auto instead. That distinction is
+ * load-bearing: see the compaction comment in `cleanSubtree`.
+ */
+function baselineAt(baseline, path) {
+  let node = baseline;
   for (const segment of path) {
     if (!isObj(node) || !(segment in node)) return undefined;
     node = node[segment];
@@ -719,8 +726,9 @@ function validateLeafValue(meta, value, fqPath) {
  *   - if it equals the default, drop it (keep the override blob minimal)
  * Returns the cleaned subtree (may be {} if every value was default).
  */
-function cleanSubtree(presetKey, path, patch, keepDefaults = false) {
+function cleanSubtree(presetKey, path, patch, keepDefaults = false, baseline = null) {
   if (!isObj(patch)) return null;
+  const base = baseline || DEFAULT_PRESET_CONFIGS[presetKey];
   const meta = rangesAt(path);
   if (meta === null) {
     // No range descriptor at this path → unknown subtree
@@ -736,16 +744,21 @@ function cleanSubtree(presetKey, path, patch, keepDefaults = false) {
       // Leaf descriptor
       const fqPath  = [presetKey, ...path, field].join('.');
       const cleaned = validateLeafValue(childMeta, rawVal, fqPath);
-      const dflt    = defaultsAt(presetKey, [...path, field]);
-      // Skip if equal to default (compact blob).
+      const dflt    = baselineAt(base, [...path, field]);
+      // Skip if equal to the layer directly beneath (compact blob).
       //
-      // `keepDefaults` turns this off for one caller: admin "↩ Restore
-      // hardcoded". That button exists to PIN the defaults into the manual
-      // layer, because manual is the only layer that beats the Grok-written
-      // auto layer. Compaction deleted precisely what it was trying to write,
-      // so the button silently did nothing — found 2026-08-07, when clearing
-      // a stale auto-list was the only thing standing between the narrative
-      // lane and the cuteness feeds it was built to escape.
+      // That layer is NOT always the defaults. Storage is three-deep —
+      // defaults → auto (Grok) → manual — and compaction was written as if it
+      // were two. With an auto layer in between, a manual value equal to the
+      // default is not a no-op: it is precisely how an operator overrides
+      // auto. Dropping it silently hands control back to Grok. That is what
+      // made pressing Save right after "↩ Restore hardcoded" undo the restore,
+      // found on prod 2026-08-07. Hence `baselines`, which the admin save path
+      // fills with defaults-merged-with-auto.
+      //
+      // `keepDefaults` is a separate, stronger switch for the restore button
+      // itself: it writes nothing but defaults, and must land even when no
+      // auto layer exists, so that future auto-refreshes stay outranked.
       if (!keepDefaults) {
         if (Array.isArray(cleaned) && Array.isArray(dflt) &&
             cleaned.length === dflt.length &&
@@ -757,7 +770,7 @@ function cleanSubtree(presetKey, path, patch, keepDefaults = false) {
       out[field] = cleaned;
     } else {
       // Nested subtree (e.g. sources.reddit / alerts.weights)
-      const sub = cleanSubtree(presetKey, [...path, field], rawVal, keepDefaults);
+      const sub = cleanSubtree(presetKey, [...path, field], rawVal, keepDefaults, base);
       if (sub && Object.keys(sub).length > 0) out[field] = sub;
     }
   }
@@ -925,7 +938,7 @@ export function mergeOverrideBlobs(auto, manual) {
  *   in:   { animals: { junk: { politicsPenalty: 75 }, alerts: { weights: { weightMemePotential: 0.4 } } } }
  *   out:  same shape, but with values coerced + defaults stripped
  */
-export function validatePresetOverrides(input, { keepDefaults = false } = {}) {
+export function validatePresetOverrides(input, { keepDefaults = false, baselines = null } = {}) {
   if (input == null) return {};
   if (!isObj(input)) throw new Error('presetConfigs: must be an object');
   const out = {};
@@ -939,7 +952,10 @@ export function validatePresetOverrides(input, { keepDefaults = false } = {}) {
       if (!PRESET_GROUPS.includes(group)) {
         throw new Error(`presetConfigs.${preset}: unknown group '${group}'`);
       }
-      const sub = cleanSubtree(preset, [group], body, keepDefaults);
+      const baseline = baselines?.[preset]
+        ? deepMerge(DEFAULT_PRESET_CONFIGS[preset], baselines[preset])
+        : null;
+      const sub = cleanSubtree(preset, [group], body, keepDefaults, baseline);
       if (sub && Object.keys(sub).length > 0) cleanedPreset[group] = sub;
     }
     // Budget guard: assert sums on the EFFECTIVE merged config (not just patch)
