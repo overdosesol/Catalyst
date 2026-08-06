@@ -6,14 +6,32 @@ import { DEFAULT_MODELS } from './analysis/model-registry.js';
 const apifyApiKey = process.env.APIFY_API_KEY || process.env.APIFY_API || '';
 
 const config = {
-  // Reddit - direct RSS scraping, no auth needed
+  // Reddit - direct JSON API scraping (RSS fallback), no auth needed
+  //
+  // ⚠️ Every field here MUST stay `undefined` when its env var is absent.
+  // RedditCollector treats a present value as "operator pinned this via env"
+  // and gives it priority over the per-preset config — see reddit.js
+  // `_resolveRedditConfig`. A non-empty default therefore does not act as a
+  // default at all: it permanently shadows `sources.reddit` in every preset,
+  // making the admin UI and tag-refresher write to a blob nobody reads.
+  //
+  // That is exactly what happened between 2026-05-01 (presets shipped) and
+  // 2026-08-06: `subreddits` defaulted to ['all','popular'], so Reddit only
+  // ever scraped those two listings — off-topic for every preset, and both
+  // 403 → RSS fallback, which skips `_normalize` and therefore ignores the
+  // upvote bar entirely. Twitter and TikTok below use `undefined` and were
+  // never affected; keep it that way.
   reddit: {
     enabled: process.env.REDDIT_ENABLED !== 'false', // on by default
     subreddits: process.env.REDDIT_SUBREDDITS
       ? process.env.REDDIT_SUBREDDITS.split(',').map(s => s.trim())
-      : ['all', 'popular'],
-    postsPerSubreddit: 30,
-    minUpvotes: 500,
+      : undefined,
+    postsPerSubreddit: process.env.REDDIT_POSTS_PER_SUBREDDIT
+      ? parseInt(process.env.REDDIT_POSTS_PER_SUBREDDIT, 10)
+      : undefined,
+    minUpvotes: process.env.REDDIT_MIN_UPVOTES
+      ? parseInt(process.env.REDDIT_MIN_UPVOTES, 10)
+      : undefined,
   },
 
   // Google Trends - RSS feed, no auth needed
