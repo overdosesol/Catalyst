@@ -719,7 +719,7 @@ function validateLeafValue(meta, value, fqPath) {
  *   - if it equals the default, drop it (keep the override blob minimal)
  * Returns the cleaned subtree (may be {} if every value was default).
  */
-function cleanSubtree(presetKey, path, patch) {
+function cleanSubtree(presetKey, path, patch, keepDefaults = false) {
   if (!isObj(patch)) return null;
   const meta = rangesAt(path);
   if (meta === null) {
@@ -737,17 +737,27 @@ function cleanSubtree(presetKey, path, patch) {
       const fqPath  = [presetKey, ...path, field].join('.');
       const cleaned = validateLeafValue(childMeta, rawVal, fqPath);
       const dflt    = defaultsAt(presetKey, [...path, field]);
-      // Skip if equal to default (compact blob)
-      if (Array.isArray(cleaned) && Array.isArray(dflt) &&
-          cleaned.length === dflt.length &&
-          cleaned.every((v, i) => v === dflt[i])) {
-        continue;
+      // Skip if equal to default (compact blob).
+      //
+      // `keepDefaults` turns this off for one caller: admin "↩ Restore
+      // hardcoded". That button exists to PIN the defaults into the manual
+      // layer, because manual is the only layer that beats the Grok-written
+      // auto layer. Compaction deleted precisely what it was trying to write,
+      // so the button silently did nothing — found 2026-08-07, when clearing
+      // a stale auto-list was the only thing standing between the narrative
+      // lane and the cuteness feeds it was built to escape.
+      if (!keepDefaults) {
+        if (Array.isArray(cleaned) && Array.isArray(dflt) &&
+            cleaned.length === dflt.length &&
+            cleaned.every((v, i) => v === dflt[i])) {
+          continue;
+        }
+        if (!Array.isArray(cleaned) && cleaned === dflt) continue;
       }
-      if (!Array.isArray(cleaned) && cleaned === dflt) continue;
       out[field] = cleaned;
     } else {
       // Nested subtree (e.g. sources.reddit / alerts.weights)
-      const sub = cleanSubtree(presetKey, [...path, field], rawVal);
+      const sub = cleanSubtree(presetKey, [...path, field], rawVal, keepDefaults);
       if (sub && Object.keys(sub).length > 0) out[field] = sub;
     }
   }
@@ -915,7 +925,7 @@ export function mergeOverrideBlobs(auto, manual) {
  *   in:   { animals: { junk: { politicsPenalty: 75 }, alerts: { weights: { weightMemePotential: 0.4 } } } }
  *   out:  same shape, but with values coerced + defaults stripped
  */
-export function validatePresetOverrides(input) {
+export function validatePresetOverrides(input, { keepDefaults = false } = {}) {
   if (input == null) return {};
   if (!isObj(input)) throw new Error('presetConfigs: must be an object');
   const out = {};
@@ -929,7 +939,7 @@ export function validatePresetOverrides(input) {
       if (!PRESET_GROUPS.includes(group)) {
         throw new Error(`presetConfigs.${preset}: unknown group '${group}'`);
       }
-      const sub = cleanSubtree(preset, [group], body);
+      const sub = cleanSubtree(preset, [group], body, keepDefaults);
       if (sub && Object.keys(sub).length > 0) cleanedPreset[group] = sub;
     }
     // Budget guard: assert sums on the EFFECTIVE merged config (not just patch)

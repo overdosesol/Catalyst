@@ -594,7 +594,14 @@ class AdminServer {
 
     // Validate through the same path Save uses — guards against any
     // accidental shape drift in DEFAULT_PRESET_CONFIGS.
-    const validated = validatePresetOverrides(next);
+    //
+    // `keepDefaults` is mandatory here. The normal save path compacts the blob
+    // by dropping every value equal to the default, and this button writes
+    // nothing BUT defaults — so without the flag it validated down to `{}` and
+    // the button was a no-op that still flashed success. The whole point is to
+    // pin those defaults into the manual layer, since manual is the only layer
+    // that outranks Grok's auto-overrides.
+    const validated = validatePresetOverrides(next, { keepDefaults: true });
     this.db.setSetting('presetConfigs', JSON.stringify(validated));
   }
 

@@ -336,10 +336,7 @@ class TwitterCollector extends BaseCollector {
     // Relaxed floor: X-Trends top-tweet pulls bypass the firehose-grade bar
     // (the trending position already certifies quality). Soft bar still applied
     // so total noise (zero-engagement bots, etc.) doesn't slip through.
-    const viewsBar  = (opts.relaxedFloor ? 10_000 : 500_000) * cjkMult;
-    const likesBar  = (opts.relaxedFloor ? 500    : 10_000)  * cjkMult;
-    const meetsBar  = views > 0 ? views >= viewsBar : likes >= likesBar;
-    if (!meetsBar) return null;
+    if (!meetsEngagementBar(views, likes, { cjkMult, relaxedFloor: opts.relaxedFloor })) return null;
 
     const createdAt = tweet.created_at || tweet.createdAt || null;
     const ageHours  = createdAt
@@ -565,12 +562,11 @@ class TwitterCollector extends BaseCollector {
     }
 
     return Array.from(clusters.values())
-      // Drop clusters that still don't meet the bar after aggregation
-      .filter(c =>
-        (c.metrics.views || 0) > 0
-          ? (c.metrics.views || 0) >= 500_000
-          : (c.metrics.likes || 0) >= 10_000
-      )
+      // Drop clusters that still don't meet the bar after aggregation.
+      // Same either-signal rule as _normalize — via the same function, so the
+      // two can never drift apart. They did: this copy would have re-dropped
+      // every likes-qualified tweet the floor above had just let through.
+      .filter(c => meetsEngagementBar(c.metrics.views, c.metrics.likes))
       .map(cluster => ({
         ...cluster,
         metrics: {
@@ -594,6 +590,40 @@ class TwitterCollector extends BaseCollector {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/** Base engagement floor. CJK gets a multiplier — see _detectCjkScript. */
+export const VIEWS_BAR         = 500_000;
+export const LIKES_BAR         = 5_000;
+const RELAXED_VIEWS_BAR = 10_000;
+const RELAXED_LIKES_BAR = 500;
+
+/**
+ * Does this tweet (or aggregated cluster) clear the engagement floor?
+ *
+ * EITHER signal is enough (owner decision 2026-08-07). The old rule was
+ * `views > 0 ? views >= viewsBar : likes >= likesBar` — when views were known,
+ * likes were never consulted at all, which made the effective bar roughly
+ * twice what the preset queries ask for. A query says `min_faves:5000`, Apify
+ * bills us for the results, and then a tweet with 6 000 likes and 300 000
+ * views was dropped here for having "only" 300K views. We were paying for
+ * tweets and throwing them away.
+ *
+ * Story tweets are exactly the shape that loses on views and wins on likes:
+ * people engage with a narrative after reading it, while a sticky clip racks up
+ * impressions from the scroll alone. Consulting both signals is what stops this
+ * floor from re-filtering out everything the narrative probes go looking for.
+ *
+ * Lives here as one function because the rule is applied twice — per tweet in
+ * `_normalize` and per cluster in `_clusterByTopic`. Those two copies had
+ * already drifted once.
+ */
+export function meetsEngagementBar(views, likes, { cjkMult = 1, relaxedFloor = false } = {}) {
+  const v = Number(views) || 0;
+  const l = Number(likes) || 0;
+  const viewsBar = (relaxedFloor ? RELAXED_VIEWS_BAR : VIEWS_BAR) * cjkMult;
+  const likesBar = (relaxedFloor ? RELAXED_LIKES_BAR : LIKES_BAR) * cjkMult;
+  return v >= viewsBar || l >= likesBar;
+}
 
 /**
  * Detect dominant CJK script in a tweet.
