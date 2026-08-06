@@ -2,6 +2,7 @@ import BaseCollector from './base-collector.js';
 import { getActivePresetConfig } from '../analysis/preset-config.js';
 import { parseRedditAtomFeed } from '../utils/reddit-preview.js';
 import { isNarrativeLaneEnabled, resolveLane } from '../analysis/lane.js';
+import { STORY_FAMILIES, PROBE_ROTATION } from '../analysis/story-markers.js';
 
 /**
  * Reddit collector — uses Reddit JSON API (no auth needed with proper User-Agent)
@@ -59,14 +60,34 @@ class RedditCollector extends BaseCollector {
     const allItems = [];
     const subreddits = cfg.subreddits;
 
-    for (const subreddit of subreddits) {
-      try {
-        const items = await this._fetchJSON(subreddit);
-        allItems.push(...items);
-        await this._delay(1500);
-      } catch (error) {
-        this.logger.warn(`[Reddit] Failed to fetch r/${subreddit}: ${error.message}`);
-      }
+    // TWO requests per cycle, not one per subreddit.
+    //
+    // Reddit's unauthenticated JSON API returns 403 for every listing since
+    // ~2026-08, so every fetch falls through to RSS — and RSS rate-limits hard:
+    // measured from prod, roughly one request in three succeeds no matter how
+    // they are paced. Ten sequential per-sub requests therefore collapsed into
+    // ONE surviving subreddit per cycle (log evidence 2026-08-06: "Collected 1
+    // items", against 20-45 on the days before).
+    //
+    // A multireddit feed (`/r/a+b+c/`) returns all of them in a single request.
+    // Same data, one hundredth of the rate-limit pressure. Verified from prod:
+    // 100 entries across 8 distinct subs in one 200.
+    try {
+      allItems.push(...await this._fetchMultiRSS(subreddits));
+    } catch (error) {
+      this.logger.warn(`[Reddit] multireddit hot feed failed: ${error.message}`);
+    }
+
+    // Story search — the second reading mode. `hot` answers "what is at the top
+    // right now", which is a popularity question. This asks "what HAPPENED in
+    // these subs this week", which is the question that finds narratives.
+    // One story family per cycle, rotated, so the cost stays at one request.
+    await this._delay(5000);
+    const family = this._nextSearchFamily();
+    try {
+      allItems.push(...await this._fetchMultiSearch(subreddits, family));
+    } catch (error) {
+      this.logger.warn(`[Reddit] story search (${family}) failed: ${error.message}`);
     }
 
     // Deduplicate by post ID
@@ -78,6 +99,96 @@ class RedditCollector extends BaseCollector {
     });
   }
 
+  /** Browser-shaped headers. Reddit refuses non-browser UAs outright. */
+  _rssHeaders() {
+    return {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'application/atom+xml, text/xml, */*',
+    };
+  }
+
+  _buildMultiRssUrl(subreddits) {
+    if (!subreddits?.length) return null;
+    return `https://www.reddit.com/r/${subreddits.join('+')}/hot/.rss?limit=100`;
+  }
+
+  /**
+   * Search across the whole multireddit for one story family.
+   *
+   * `restrict_sr=on` is load-bearing: without it Reddit silently widens the
+   * query to all of Reddit and the preset stops meaning anything.
+   */
+  _buildMultiSearchUrl(subreddits, family) {
+    const def = STORY_FAMILIES[family];
+    if (!def) throw new Error(`[Reddit] unknown story family: ${family}`);
+    if (!subreddits?.length) return null;
+
+    const q = def.probeTerms.map(t => (t.includes(' ') ? `"${t}"` : t)).join(' OR ');
+    const params = new URLSearchParams({
+      q,
+      restrict_sr: 'on',
+      sort:        'top',
+      t:           'week',
+      limit:       '50',
+    });
+    return `https://www.reddit.com/r/${subreddits.join('+')}/search.rss?${params.toString()}`;
+  }
+
+  /** Rotates through the four story families, one per cycle. */
+  _nextSearchFamily() {
+    this._searchCycle = (this._searchCycle || 0) + 1;
+    return PROBE_ROTATION[this._searchCycle % PROBE_ROTATION.length];
+  }
+
+  async _fetchMultiRSS(subreddits) {
+    const url = this._buildMultiRssUrl(subreddits);
+    if (!url) return [];
+
+    const response = await fetch(url, { headers: this._rssHeaders() });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const items = this._parseAtomFeed(await response.text());
+    // RSS carries no scores, so freshness is the only bar available here.
+    // Kept at 6h: the same proxy the old per-sub fallback used.
+    const fresh = items.filter(item => (item.metrics.ageHours || 99) < 6);
+    this.logger.info(`[Reddit] multireddit hot: ${fresh.length} fresh of ${items.length} across ${subreddits.length} subs`);
+    return fresh;
+  }
+
+  async _fetchMultiSearch(subreddits, family) {
+    const url = this._buildMultiSearchUrl(subreddits, family);
+    if (!url) return [];
+
+    const response = await fetch(url, { headers: this._rssHeaders() });
+    // Never throw on refusal: one dead search must not take collect() down,
+    // and the hot feed above is the floor either way.
+    if (!response.ok) {
+      this.logger.warn(`[Reddit] story search ${family} → HTTP ${response.status}`);
+      return [];
+    }
+
+    // Search results span the whole week on purpose — a story worth telling
+    // does not stop being one after six hours — so the freshness filter that
+    // guards the hot feed is deliberately NOT applied here. They arrive
+    // pre-marked as narrative, which is what earns them the priority lane.
+    const items = this._parseAtomFeed(await response.text(), { fromProbe: true });
+    this.logger.info(`[Reddit] story search ${family}: ${items.length} items`);
+    return items;
+  }
+
+  /**
+   * Per-subreddit JSON fetch — NOT called by `collect()` since 2026-08-07.
+   *
+   * Reddit answers 403 to every unauthenticated `.json` listing (verified from
+   * prod against www / old / api hosts, and from a second network), so this
+   * path cannot succeed today. It is kept, with `_normalize` and
+   * `_fetchRSSFallback`, because it is the shape the collector returns to the
+   * moment credentials exist: swap the host for `oauth.reddit.com`, add the
+   * bearer header, and real scores come back — which is the only way the
+   * `minUpvotes` bar can ever apply again.
+   *
+   * Until then the live path is `_fetchMultiRSS` + `_fetchMultiSearch`.
+   */
   async _fetchJSON(subreddit) {
     const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=${this.postsPerSub}&raw_json=1`;
 
@@ -130,7 +241,15 @@ class RedditCollector extends BaseCollector {
     return items.filter(item => (item.metrics.ageHours || 99) < 6);
   }
 
-  _parseAtomFeed(xml) {
+  /**
+   * @param {string} xml
+   * @param {object} [opts]
+   * @param {boolean} [opts.fromProbe] — came from the story search, so it is
+   *        narrative by provenance rather than by wording.
+   */
+  _parseAtomFeed(xml, opts = {}) {
+    const laneEnabled = isNarrativeLaneEnabled(this.db);
+
     return parseRedditAtomFeed(xml).map((post, position) => {
       const ageHours = post.createdAt
         ? (Date.now() - post.createdAt) / 3_600_000
@@ -139,7 +258,7 @@ class RedditCollector extends BaseCollector {
         .filter(m => m?.type === 'photo' && m.url)
         .map(m => m.url);
 
-      return {
+      const item = {
         externalId: `reddit_${post.id}`,
         source:     'reddit',
         title:      post.title,
@@ -158,6 +277,16 @@ class RedditCollector extends BaseCollector {
           position,               // proxy: lower = more popular on page
         },
       };
+
+      // The lane belongs here too, not only in `_normalize`. RSS is the path
+      // Reddit actually takes now, and the lexical classifier only needs a
+      // title — which RSS has. Skipping it would mean every Reddit item on the
+      // live path silently counts as volume.
+      if (opts.fromProbe) item._fromProbe = true;
+      const { lane, reason } = resolveLane(item, { enabled: laneEnabled });
+      item.lane       = lane;
+      item.laneReason = reason;
+      return item;
     });
   }
 
