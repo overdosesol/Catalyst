@@ -71,6 +71,24 @@ function maskId(id) {
 }
 
 /**
+ * How many of this cycle's slots the volume lane may take.
+ *
+ * Half the cap is reserved for narrative. The reserve SHRINKS to the number
+ * of narrative candidates actually available — an empty reserved slot helps
+ * nobody. There is no flow in the other direction: volume outranks narrative
+ * on alertScore almost by definition, so a two-way reserve would be no
+ * reserve at all.
+ *
+ * @param {number} maxAlertsPerCycle — 0 means unlimited
+ * @param {number} narrativeAvailable — narrative candidates above threshold
+ */
+export function computeVolumeCap(maxAlertsPerCycle, narrativeAvailable) {
+  if (!(maxAlertsPerCycle > 0)) return 0; // unlimited stays unlimited
+  const reserve = Math.min(Math.floor(maxAlertsPerCycle / 2), Math.max(0, narrativeAvailable));
+  return maxAlertsPerCycle - reserve;
+}
+
+/**
  * Refresh `alertScore` / `alertBreakdown` / `_alertHardJunk` on every trend
  * using LIVE inputs (feedback votes from DB + actual age in hours). The
  * scorer baked-in alertScore is a coarse estimate from scoring time; the
@@ -218,7 +236,17 @@ export async function dispatchAlerts({ trends, deps, source = 'scan' }) {
       const effectiveAlertThreshold = Math.max(userThreshold, globalAlertThreshold);
       const maxAlertsPerCycle = Number(presetCfg.alerts?.thresholds?.maxAlertsPerCycle ?? 0) || 0;
 
+      // Lane quota — half the cycle goes to narrative, but only as far as there
+      // are narrative candidates to fill it. Candidates are sorted by
+      // alertScore, and volume outranks narrative on that scale almost by
+      // definition, so without a reserve the narrative lane never gets a slot.
+      const narrativeAvailable = alertCandidates.filter(t =>
+        t.lane === 'narrative' && (t.alertScore ?? 0) >= effectiveAlertThreshold
+      ).length;
+      const volumeCap = computeVolumeCap(maxAlertsPerCycle, narrativeAvailable);
+
       let alertsSentThisCycle = 0;
+      let volumeSentThisCycle = 0;
 
       for (const trend of alertCandidates) {
         const em = trend.metrics || trend.clusterMetrics?.metrics || {};
@@ -341,6 +369,12 @@ export async function dispatchAlerts({ trends, deps, source = 'scan' }) {
         const aiScorePass   = !aiUnavailable;
 
         const capPass       = !(maxAlertsPerCycle > 0 && alertsSentThisCycle >= maxAlertsPerCycle);
+        // Deliberately NOT folded into capPass: capPass breaks the candidate
+        // loop, and the volume quota must not. Volume filling its half means
+        // "skip this one and keep looking" — the narrative candidates further
+        // down the list are exactly who the remaining slots are being held for.
+        const isVolume      = trend.lane !== 'narrative';
+        const lanePass      = !(isVolume && volumeCap > 0 && volumeSentThisCycle >= volumeCap);
         const thresholdPass = alertScore >= effectiveAlertThreshold;
         const hardJunkPass  = !trend._alertHardJunk;
         const sourcePass    = !userDisabledSources.includes(sourceLc);
@@ -363,6 +397,7 @@ export async function dispatchAlerts({ trends, deps, source = 'scan' }) {
         gates.push({ name: 'alert_type',   passed: alertTypePass,    detail: trendAlertType ? `${trendAlertType} ∈ [${userAlertTypes.join(',')}]` : 'no type (wildcard)' });
         gates.push({ name: 'dedup',        passed: dedupPass,        detail: dedupPass ? 'new trend' : 'already sent' });
         gates.push({ name: 'cap',          passed: capPass,          detail: maxAlertsPerCycle > 0 ? `${alertsSentThisCycle}/${maxAlertsPerCycle}` : '∞' });
+        gates.push({ name: 'lane_quota',   passed: lanePass,         detail: isVolume ? `volume ${volumeSentThisCycle}/${volumeCap || '∞'}` : `narrative (reserved ${narrativeAvailable})` });
 
         const firstFail = gates.find(g => !g.passed);
         const allPassed = !firstFail;
@@ -452,6 +487,7 @@ export async function dispatchAlerts({ trends, deps, source = 'scan' }) {
           // disabled). All three count toward the per-cycle cap — the user
           // is in the pipeline regardless of when the chat actually beeps.
           alertsSentThisCycle++;
+          if (isVolume) volumeSentThisCycle++;
           totalSent++;
         }
 

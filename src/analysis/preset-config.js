@@ -67,7 +67,10 @@ export const PRESET_FIELD_RANGES = Object.freeze({
     twitter: {
       queries:           { type: 'list',  max: 20, itemMaxLen: 256,
                            label: 'X queries',
-                           desc: 'Поисковые запросы. По циклу запускается 2 (rotated).' },
+                           desc: 'Объёмные запросы — спрашивают ОБЪЕКТ в кадре. По циклу запускается 1 (rotated).' },
+      narrativeProbes:   { type: 'list',  max: 8, itemMaxLen: 256,
+                           label: 'X narrative probes',
+                           desc: 'Зонды на форму истории (глагол/время/институция), а не на объект. По циклу запускается 2 (ротация по 4 семействам).' },
     },
     tiktok: {
       // Note: per-preset TikTok control was removed 2026-05-05. TikTok runs
@@ -299,28 +302,53 @@ export const DEFAULT_PRESET_CONFIGS = Object.freeze({
   animals: {
     sources: {
       reddit: {
-        // Kept all 8 originals (low overlap, all unique signal). Added 2:
-        // FunnyAnimals (dedicated, rising) + AnimalMemes (bridge to culture).
+        // Rebuilt 2026-08-07 for the narrative lane. Over half the list is now
+        // lore-bearing: subs where the TYPICAL post carries an event you can
+        // retell — a fact, a rescue, a behaviour — rather than a frame you
+        // just look at.
+        //
+        // Cut: Eyebleach, rarepuppers, AnimalsBeingDerps, FunnyAnimals,
+        // AnimalMemes — feeds of cute frames. They rank well on engagement and
+        // can never produce a story, which is exactly the failure mode this
+        // work exists to fix. `aww` stays as the volume anchor so the lane
+        // split still has a volume side.
+        //
+        // NB: UpliftingNews was considered and rejected — this repo already
+        // dropped it from the `events` preset as "feel-good, not events", and
+        // it is not animal-specific, so it would burn vision calls off-theme.
         subreddits: [
-          'aww', 'AnimalsBeingDerps', 'AnimalsBeingBros', 'AnimalsBeingJerks',
-          'NatureIsFuckingLit', 'Eyebleach', 'rarepuppers', 'capybara',
-          'FunnyAnimals', 'AnimalMemes',
+          // lore-bearing
+          'Awwducational', 'likeus', 'NatureIsMetal', 'AnimalsBeingGeniuses',
+          'HumansBeingBros', 'NatureIsFuckingLit',
+          // volume / reach
+          'aww', 'AnimalsBeingBros', 'AnimalsBeingJerks', 'capybara',
         ],
         minUpvotes:        5000,
         postsPerSubreddit: 50,
       },
       twitter: {
-        // Removed: (animal OR pet OR cute) too broad / overlap with others;
-        //          (duck OR frog OR monkey OR bear OR hamster) too narrow.
-        // Added: capybara/otter/redpanda for trending exotic-cute (capybara
-        //        is undefeated 2025-2026), and a niche fail/derp/wholesome query.
+        // Volume queries — they ask for the OBJECT in frame. Bars deliberately
+        // unchanged (owner decision 2026-08-07): what changes is the wording of
+        // what we look for, not how much we let through.
+        // Removed: (rescue OR adopt OR stray OR shelter) — superseded by the
+        //          event probe below, which asks the same thing better;
+        //          (funny OR hilarious OR silly) — a cuteness query by
+        //          construction, it cannot return a narrative.
         queries: [
           '(dog OR puppy OR doggo OR pupper) min_faves:10000 -is:retweet',
           '(cat OR kitten OR kitty OR meow) min_faves:10000 -is:retweet',
-          '(rescue OR adopt OR stray OR shelter) (dog OR cat OR animal) min_faves:5000 -is:retweet',
-          '(funny OR hilarious OR silly) (dog OR cat OR animal OR pet) min_faves:5000 -is:retweet',
           '(capybara OR otter OR redpanda) min_faves:5000 -is:retweet',
           '(pet OR animal) (fail OR derp OR wholesome) min_faves:5000 -is:retweet',
+        ],
+        // Narrative probes — one per story family (see story-markers.js). They
+        // ask for the shape of an EVENT: a verb, a time marker, an institution.
+        // Same 5000 bar the old rescue query already carried — no threshold was
+        // lowered to make room for these.
+        narrativeProbes: [
+          '(meet OR named OR nicknamed) (dog OR cat OR zoo OR sanctuary OR shelter) min_faves:5000 -is:retweet',
+          '(rescued OR reunited OR escaped OR survived OR released) (dog OR cat OR animal OR zoo) min_faves:5000 -is:retweet',
+          '(rare OR "first ever" OR "new species" OR discovered) (animal OR wildlife OR species) min_faves:5000 -is:retweet',
+          '(zoo OR sanctuary OR shelter OR petition) (animal OR elephant OR dog OR cat) min_faves:5000 -is:retweet',
         ],
       },
       tiktok: {

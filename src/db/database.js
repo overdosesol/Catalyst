@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { replacementFor } from '../analysis/model-registry.js';
 import { PRESET_KEYS, validatePresetOverrides } from '../analysis/preset-config.js';
 import { sqliteCutoff } from '../utils/sqlite-time.js';
+import { createEntityLedgerSchema, recordEntityMentions } from './entity-ledger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +46,12 @@ class TrendDatabase {
   _migrate() {
     const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf-8');
     this.db.exec(schema);
+
+    // Entity ledger (2026-08-07) — lives in its own module, creates itself.
+    // Idempotent by construction, so it is safe on every boot; deploys here
+    // are all-at-once with no manual pre-steps, which is why schema changes
+    // must self-heal from inside _migrate rather than from a runbook.
+    createEntityLedgerSchema(this.db);
 
     // Safe migrations for existing DBs
     const addIfMissing = (table, column, definition) => {
@@ -1191,7 +1198,7 @@ class TrendDatabase {
       const { memePotential: _m, adoptionScore, emergenceScore, narrativePhase, rankScore,
               marketStage, junkPenalty, junkReasons, alertScore, alertBreakdown,
               alertType: _at, storyScore, storyHook, subjectName, nameStrength,
-              preStage, ...rawMetricsOnly } = meta;
+              preStage, lane, laneReason, ...rawMetricsOnly } = meta;
 
       out.push({
         _dbId:           row.id,
@@ -1236,6 +1243,11 @@ class TrendDatabase {
           isNovel: true,
         },
         preStage:        preStage || null,
+        // Top-level, not inside metrics: the alert dispatcher reads trend.lane
+        // directly, so leaving it in the rest-spread would make every
+        // hot-refreshed trend look like volume and quietly disable the quota.
+        lane:            lane       || null,
+        laneReason:      laneReason || null,
         metrics:         rawMetricsOnly,
         firstSeen:       row.first_seen_at,
       });
@@ -1549,6 +1561,13 @@ class TrendDatabase {
       // worse?" review needs to count cap hits over a whole night, and the
       // in-memory decisions ring buffer only holds the last few hundred.
       capsApplied:    trend.capsApplied           ?? null,
+      // Narrative lane (2026-08-07). Persisted for two reasons: the hot-refresh
+      // dispatch path rebuilds trends from the DB and would otherwise treat
+      // every one of them as volume, and the acceptance metric for this whole
+      // change is "how many narrative-lane trends reached an alert" — which is
+      // unanswerable if the lane only ever lived in memory.
+      lane:           trend.lane                  ?? null,
+      laneReason:     trend.laneReason            ?? null,
     });
 
     // UPSERT: if the trend already exists in DB (re-analysis after window expiry),
@@ -1607,6 +1626,22 @@ class TrendDatabase {
       trend.whyNow || '',
       trend.alertType || null
     );
+
+    // Entity ledger — record the subject names this NEW post mentions.
+    //
+    // Deliberately only on INSERT, not on the UPDATE path above: a trend that
+    // gets re-saved on every re-analysis would otherwise accumulate mentions
+    // of its own name across days and manufacture lore for itself. Lore has to
+    // come from separate posts.
+    try {
+      const names = [
+        trend.subjectName,
+        ...(trend.preStage?.gemini?.subjectNames || []),
+      ].filter(Boolean);
+      recordEntityMentions(this.db, names, trend.source);
+    } catch (e) {
+      this.logger.warn(`entity ledger write failed: ${e.message}`); // never break a save
+    }
 
     return result.lastInsertRowid;
   }

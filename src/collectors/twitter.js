@@ -1,5 +1,6 @@
 import BaseCollector from './base-collector.js';
 import { getActivePresetConfig } from '../analysis/preset-config.js';
+import { isNarrativeLaneEnabled, resolveLane, LANE_NARRATIVE } from '../analysis/lane.js';
 
 /**
  * Twitter/X collector — uses Apify's tweet-scraper to find viral world trends.
@@ -159,12 +160,12 @@ class TwitterCollector extends BaseCollector {
 
     const allTweets = [];
 
-    // Run 2 queries per cycle (rotates through the list to save Apify credits)
+    // 3 slots per cycle: 1 volume + 2 narrative probes (rotated to save credits)
     const queriesThisCycle = this._pickQueries();
 
-    for (const query of queriesThisCycle) {
+    for (const { query, fromProbe } of queriesThisCycle) {
       try {
-        const items = await this._searchQuery(query);
+        const items = await this._searchQuery(query, undefined, { fromProbe });
         allTweets.push(...items);
         await this._delay(2000);
       } catch (err) {
@@ -185,18 +186,41 @@ class TwitterCollector extends BaseCollector {
   }
 
   /**
-   * Pick 2 queries per cycle (rotates through the list over successive calls)
+   * Three slots per cycle: 1 volume + 2 narrative probes.
+   *
+   * Two probe slots, not one, so a full pass over the four story families
+   * takes one hour instead of two at a 30-minute cadence. Event narratives
+   * ("escaped from the zoo") live in hours — arriving two hours late is
+   * arriving after it is over.
+   *
+   * Returns `[{ query, fromProbe }]`, not bare strings: `fromProbe` rides all
+   * the way down into `_normalize`, where it puts the item in the narrative
+   * lane regardless of what its text happens to say.
    */
   _pickQueries() {
-    const queries = this._getQueries();
-    const cycleSize = 2;
+    const volume = this._getQueries();
+    const probes = this._getNarrativeProbes();
+
     this._cycleCounter = (this._cycleCounter || 0) + 1;
-    const start = (this._cycleCounter * cycleSize) % queries.length;
     const picked = [];
-    for (let i = 0; i < cycleSize; i++) {
-      picked.push(queries[(start + i) % queries.length]);
+
+    if (volume.length > 0) {
+      picked.push({ query: volume[this._cycleCounter % volume.length], fromProbe: false });
+    }
+    for (let i = 0; i < 2 && probes.length > 0; i++) {
+      const idx = (this._cycleCounter * 2 + i) % probes.length;
+      picked.push({ query: probes[idx], fromProbe: true });
     }
     return picked;
+  }
+
+  _getNarrativeProbes() {
+    if (this.customQueries) return []; // env pin means "operator drives this"
+    try {
+      return getActivePresetConfig(this.db).sources?.twitter?.narrativeProbes || [];
+    } catch (_) {
+      return [];
+    }
   }
 
   /**
@@ -226,7 +250,13 @@ class TwitterCollector extends BaseCollector {
     // Per-actor input shape. Both return identical engagement fields. The
     // optional maxItems arg lets callers (X Trends discovery) ask for a smaller
     // batch than the default cycle cap.
-    const input = actor.buildInput(query, maxItems || this.maxItemsPerQuery);
+    //
+    // Probes are capped tighter than volume queries: a story-shaped query
+    // matches a much wider slice of the firehose, and Apify bills compute
+    // units, not runs. Adding the 3rd slot costs nothing if each slot is
+    // shallower.
+    const cap   = opts.fromProbe ? Math.min(this.maxItemsPerQuery, 15) : this.maxItemsPerQuery;
+    const input = actor.buildInput(query, maxItems || cap);
 
     const response = await fetch(runUrl, {
       method: 'POST',
@@ -427,7 +457,7 @@ class TwitterCollector extends BaseCollector {
       videoUrl = pickVideoFrom(rMedia);
     }
 
-    return {
+    const item = {
       externalId: `twitter_${id || Buffer.from(text.substring(0, 30)).toString('base64').substring(0, 12)}`,
       source: 'twitter',
       title,
@@ -451,6 +481,17 @@ class TwitterCollector extends BaseCollector {
         videoUrl,
       },
     };
+
+    // NB: `title` here is often just hashtags (see _buildTitle), so the story
+    // words live in `description` — the raw tweet text. resolveLane reads both.
+    // No ledger lookup here on purpose — subject names arrive from Stage 0b,
+    // which runs after collection. The clusterer re-checks the lane once the
+    // names exist (see clusterer.route).
+    if (opts.fromProbe) item._fromProbe = true;
+    const { lane, reason } = resolveLane(item, { enabled: isNarrativeLaneEnabled(this.db) });
+    item.lane       = lane;
+    item.laneReason = reason;
+    return item;
   }
 
   /**
@@ -505,6 +546,13 @@ class TwitterCollector extends BaseCollector {
       } else {
         const c = clusters.get(clusterKey);
         c._count++;
+        // Lane is upgrade-only for a cluster: one narrative member makes the
+        // whole cluster narrative. Losing this means a story that clustered
+        // under a popular hashtag silently inherits the volume lane.
+        if (tweet.lane === LANE_NARRATIVE && c.lane !== LANE_NARRATIVE) {
+          c.lane       = LANE_NARRATIVE;
+          c.laneReason = tweet.laneReason;
+        }
         c._velocitySum = (c._velocitySum || 0) + tweetVelocity;
         c.metrics.views    = (c.metrics.views    || 0) + (tweet.metrics.views    || 0);
         c.metrics.likes    = (c.metrics.likes    || 0) + (tweet.metrics.likes    || 0);

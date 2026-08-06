@@ -1,6 +1,7 @@
 import BaseCollector from './base-collector.js';
 import { getActivePresetConfig } from '../analysis/preset-config.js';
 import { parseRedditAtomFeed } from '../utils/reddit-preview.js';
+import { isNarrativeLaneEnabled, resolveLane } from '../analysis/lane.js';
 
 /**
  * Reddit collector — uses Reddit JSON API (no auth needed with proper User-Agent)
@@ -306,7 +307,7 @@ class RedditCollector extends BaseCollector {
     // Skip very old posts (> 48h) — they're not trending anymore
     if (ageHours > 48) return null;
 
-    return {
+    const item = {
       externalId: `reddit_${id}`,
       source:     'reddit',
       title:      title,
@@ -328,6 +329,14 @@ class RedditCollector extends BaseCollector {
         score,
       },
     };
+
+    // No ledger lookup here on purpose — subject names arrive from Stage 0b,
+    // which runs after collection. The clusterer re-checks the lane once the
+    // names exist (see clusterer.route).
+    const { lane, reason } = resolveLane(item, { enabled: isNarrativeLaneEnabled(this.db) });
+    item.lane       = lane;
+    item.laneReason = reason;
+    return item;
   }
 
   _delay(ms) {

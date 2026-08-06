@@ -1161,6 +1161,12 @@ TIKTOK HASHTAG RULES — read carefully:
 - PREFER: animal hashtags with character potential (funnydogs, catstiktok, capybaras, frogs), niche meme communities (memetok, gentlecore, weirdcore), event/topic tags with named subjects, crypto/finance degen tags (cryptotok, degentok, solanatok).
 - The litmus test: if you imagine a creator's video under this tag — is the TYPICAL video about a NAMED character/event/moment, or just "person dancing/doing makeup/showing outfit to a sound"? If the latter — SKIP.
 
+SOURCE MUST CARRY STORIES, NOT JUST TRAFFIC:
+- A source qualifies when the TYPICAL post there has a subject you can name and an event you can retell in one sentence.
+- Feeds of adorable frames (a pet doing an endearing thing, with no event) are NOT sources for this system, however viral they are — they produce nothing to attach a narrative to.
+- Prefer subs and tags where posts carry: a rescue/escape/return, a NAMED character with an ongoing arc, a rare or first-ever sighting, an institution (zoo/shelter/sanctuary) or a conflict.
+- Engagement is not the tiebreaker here. A smaller sub where every post is an event beats a huge one where every post is a photo.
+
 CRITICAL RULES:
 - DO NOT suggest named memes/catchphrases/characters as Twitter keywords. Those are SUBJECTS, not SOURCES.
 - DO NOT suggest fan-subreddits tied to one show/movie/celebrity. They're too narrow.
@@ -1191,7 +1197,7 @@ TagRefresher.prototype._buildPrompt = function _buildPrompt(preset, existing) {
   const today = new Date().toISOString().slice(0, 10);
   const presetTheme = {
     general: 'broad mix — curated horizontal hubs covering animals, culture, celebrities, events',
-    animals: 'cute / wholesome / wildlife / pets — viral animal moments and creature content',
+    animals: 'animal STORIES — rescues and escapes, named animal celebrities with an ongoing arc, unusual or rare species, zoos/shelters/sanctuaries, conflicts and campaigns around animals. NOT feeds of adorable frames.',
     culture: 'memes / viral catchphrases / Gen-Z slang / TikTok cross-pollination',
     celebrities: 'entertainment / movies / music / K-pop / awards / tabloid drama',
     events: 'breaking news / disasters / sports / politics / AI launches / space',

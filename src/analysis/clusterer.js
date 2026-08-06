@@ -13,6 +13,46 @@ import { sqliteCutoff } from '../utils/sqlite-time.js';
 // the image fetch is down — it just falls back to fewer signals.
 import { EmbeddingsClient, cosineSimilarity } from './embeddings.js';
 import { ImageHasher, hashSimilarity } from './image-hash.js';
+import { LANE_NARRATIVE, resolveLane, isNarrativeLaneEnabled, makeLoreChecker } from './lane.js';
+
+/**
+ * The narrative lane buys priority, nothing else.
+ *
+ * `drop` is deliberately untouched: it fires on settled noise the system has
+ * already seen many times without growth, and a lane must not resurrect that.
+ * `save_only` IS overridden — an item skipping AI scoring because engagement
+ * is low is exactly the case the lane exists for.
+ */
+export function applyLanePriority(decision, representative) {
+  if (decision === 'drop') return decision;
+  return representative?.lane === LANE_NARRATIVE ? 'priority' : decision;
+}
+
+/**
+ * Second look at the lane, now that Stage 0b has run.
+ *
+ * Collectors can only see an item's text, so they catch probes and story-shaped
+ * wording. The entity ledger needs SUBJECT NAMES, and those come from vision —
+ * which happens after collection and before this point. This is the only place
+ * in the pipeline where the names exist and the routing decision is still open.
+ *
+ * Upgrade-only: an item already in the narrative lane keeps its original
+ * reason, so the logs still say WHY it got there.
+ *
+ * @returns {object} the same representative, mutated in place
+ */
+export function upgradeLaneWithLedger(representative, db) {
+  if (!representative || representative.lane === LANE_NARRATIVE) return representative;
+  const { lane, reason } = resolveLane(representative, {
+    enabled: isNarrativeLaneEnabled(db),
+    hasLore: makeLoreChecker(db),
+  });
+  if (lane === LANE_NARRATIVE) {
+    representative.lane       = lane;
+    representative.laneReason = reason;
+  }
+  return representative;
+}
 
 /**
  * NarrativeClusterer — pre-AI signal quality layer
@@ -270,7 +310,8 @@ class NarrativeClusterer {
         }
       }
 
-      const decision = this._decide(metrics);
+      upgradeLaneWithLedger(cluster.representative, this.db);
+      const decision = applyLanePriority(this._decide(metrics), cluster.representative);
 
       // Attach cluster context so scorer can use emergenceScore + phase
       cluster.representative.clusterMetrics = metrics;
