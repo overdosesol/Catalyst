@@ -69,6 +69,51 @@ test('stop-listed and too-short names are never recorded', () => {
   assert.equal(rows.c, 0);
 });
 
+// The 2026-08-10 prod snapshot: capybara had 20 mentions over 4 days and was
+// promoting every capybara post into the narrative lane. It is a species.
+test('species names never become entities, however many mentions they get', () => {
+  const db = freshDb();
+  for (const species of ['Capybara', 'Otter', 'Elephant', 'Bunny', 'Corgi', 'Seagull']) {
+    recordEntityMentions(db, [species], 'reddit', dayAgo(5));
+    recordEntityMentions(db, [species], 'reddit', dayAgo(3));
+    recordEntityMentions(db, [species], 'twitter', dayAgo(1));
+    assert.equal(hasLore(db, species), false, `${species} is a species, not a character`);
+  }
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM entity_ledger').get().c, 0);
+});
+
+test('a plural is the same stop word as its singular', () => {
+  const db = freshDb();
+  recordEntityMentions(db, ['Capybaras', 'Otters', 'box turtles'], 'reddit', dayAgo(1));
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM entity_ledger').get().c, 0);
+});
+
+test('a species used as the head noun is still a species', () => {
+  const db = freshDb();
+  const compound = ['grizzly bear', 'chinstrap penguin', 'baby alpaca',
+    'german shepherd', 'great blue heron', 'amur leopard'];
+  recordEntityMentions(db, compound, 'reddit', dayAgo(1));
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM entity_ledger').get().c, 0);
+});
+
+test('real subjects survive the stop-list', () => {
+  const db = freshDb();
+  // chuck and tom holland were the only genuine promotions in the snapshot;
+  // moo deng and pesto are the canonical animal characters this exists for.
+  const real = ['Chuck', 'Tom Holland', 'Moo Deng', 'Pesto', 'Gus', 'Hagrid'];
+  recordEntityMentions(db, real, 'reddit', dayAgo(1));
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM entity_ledger').get().c, real.length);
+});
+
+// The ledger is shared by every preset. An animal word that reads as a brand,
+// a team or a surname elsewhere must stay recordable.
+test('animal words that are also real subjects elsewhere are left alone', () => {
+  const db = freshDb();
+  const ambiguous = ['Black Panther', 'Puma', 'Jaguar', 'Falcon', 'Raven', 'Robin'];
+  recordEntityMentions(db, ambiguous, 'twitter', dayAgo(1));
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM entity_ledger').get().c, ambiguous.length);
+});
+
 test('lookup of an unknown name is false, not a crash', () => {
   assert.equal(hasLore(freshDb(), 'NeverSeen'), false);
 });

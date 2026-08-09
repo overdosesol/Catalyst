@@ -20,14 +20,88 @@ export const LEDGER_WINDOW_DAYS       = 30;  // animal characters run for months
 const MIN_NAME_LENGTH = 3;
 
 /**
- * Common pet names and generic words that would otherwise fuse unrelated
- * posts into one fake entity. Grow this by observation, not by imagination.
+ * Names that must never become ledger entities, because they fuse unrelated
+ * posts into one fake character. Grow this by observation, not by imagination.
+ *
+ * The species block is what the 2026-08-10 prod snapshot demanded. Of the
+ * eight names that had accumulated enough mentions to count as lore, half
+ * were species — capybara (20 mentions over 4 days), bunny, otter, elephant —
+ * and only `chuck` and `tom holland` were real subjects. A capybara is a kind
+ * of animal, not a character; every capybara post was feeding the same row.
  */
 const STOP_NAMES = new Set([
+  // Pet names common enough that two dogs sharing one are not one dog.
   'bella', 'luna', 'max', 'charlie', 'lucy', 'daisy', 'buddy', 'milo', 'coco',
-  'dog', 'cat', 'puppy', 'kitten', 'animal', 'pet', 'baby',
+
+  // Generic subjects.
+  'animal', 'animals', 'pet', 'baby', 'creature', 'critter', 'wildlife',
+
+  // Species and common animal words. Seeded from the ledger snapshot and from
+  // what the `animals` preset's own sources produce.
+  'dog', 'cat', 'puppy', 'kitten', 'kitty', 'bunny', 'rabbit', 'hare',
+  'capybara', 'otter', 'seal', 'walrus', 'manatee', 'dolphin', 'whale', 'orca',
+  'shark', 'octopus', 'squid', 'jellyfish', 'crab', 'lobster', 'turtle',
+  'tortoise', 'frog', 'toad', 'newt', 'salamander', 'lizard', 'gecko',
+  'iguana', 'chameleon', 'snake', 'python', 'cobra', 'alligator', 'crocodile',
+  'elephant', 'rhino', 'hippo', 'giraffe', 'zebra', 'buffalo', 'bison',
+  'lion', 'tiger', 'leopard', 'cheetah',
+  'lynx', 'bobcat', 'wolf', 'coyote', 'jackal', 'hyena', 'fox', 'bear',
+  'panda', 'koala', 'sloth', 'anteater', 'armadillo', 'pangolin', 'aardvark',
+  'monkey', 'ape', 'gorilla', 'chimp', 'chimpanzee', 'orangutan', 'baboon',
+  'lemur', 'meerkat', 'mongoose', 'raccoon', 'badger', 'skunk', 'possum',
+  'opossum', 'ferret', 'weasel', 'stoat', 'marten', 'beaver', 'porcupine',
+  'hedgehog', 'squirrel', 'chipmunk', 'marmot', 'groundhog', 'mole', 'shrew',
+  'mouse', 'rat', 'hamster', 'gerbil', 'guinea pig', 'chinchilla',
+  'kangaroo', 'wallaby', 'wombat', 'quokka', 'platypus', 'echidna',
+  'alpaca', 'llama', 'camel', 'moose', 'elk', 'deer', 'fawn', 'antelope',
+  'gazelle', 'ibex', 'horse', 'pony', 'foal', 'donkey', 'mule', 'cow',
+  'calf', 'goat', 'sheep', 'lamb', 'pig', 'piglet', 'boar',
+  'bird', 'owl', 'eagle', 'hawk', 'vulture', 'heron',
+  'stork', 'pelican', 'flamingo', 'penguin', 'puffin', 'seagull',
+  'gull', 'duck', 'duckling', 'goose', 'swan', 'chicken', 'rooster', 'hen',
+  'turkey', 'peacock', 'parrot', 'cockatoo', 'macaw', 'crow',
+  'magpie', 'pigeon', 'sparrow', 'plover', 'woodpecker',
+  'hummingbird', 'bat', 'fish', 'koi', 'snail', 'slug', 'spider', 'tarantula',
+  'scorpion', 'bee', 'wasp', 'hornet', 'ant', 'beetle', 'butterfly', 'moth',
+  'dragonfly', 'mantis', 'cicada', 'caterpillar', 'worm', 'bug', 'insect',
+
+  // Breeds. Same failure as species: every corgi post feeds one row.
+  'corgi', 'husky', 'malamute', 'shiba', 'akita', 'retriever',
+  'labrador', 'shepherd', 'collie', 'poodle', 'chihuahua', 'dachshund',
+  'pug', 'beagle', 'bulldog', 'terrier', 'pitbull', 'rottweiler', 'doberman',
+  'dalmatian', 'greyhound', 'spaniel', 'pomeranian', 'samoyed',
+  'tabby', 'calico', 'siamese', 'persian', 'sphynx', 'ragdoll',
+
   'tiktok', 'reddit', 'twitter', 'youtube', 'instagram',
 ]);
+
+// Deliberately NOT here, though they are animals: panther, puma, cougar,
+// jaguar, falcon, raven, robin, bull, crane, chick, condor, lab, chow, inu.
+// The ledger is shared by every preset, and in `culture` / `celebrities` /
+// `events` those read as brands, teams, films and surnames — real subjects
+// that deserve to accumulate lore. Losing "capybara" costs nothing; losing
+// "Black Panther" costs a narrative.
+
+/** "capybaras" is the same entity as "capybara". Guarded by MIN_NAME_LENGTH,
+ *  so short real names ("gus") are never truncated into a match. */
+function singular(word) {
+  return word.endsWith('s') && word.length - 1 >= MIN_NAME_LENGTH
+    ? word.slice(0, -1)
+    : word;
+}
+
+/**
+ * A plural ("capybaras") and a species used as the head noun ("grizzly bear",
+ * "chinstrap penguin", "baby alpaca", "german shepherd") are the two shapes
+ * the ledger actually produced. Neither is caught by a plain set lookup, and
+ * the multi-word ones cannot be enumerated — there is always another heron.
+ */
+function isStopName(normalized) {
+  if (STOP_NAMES.has(normalized) || STOP_NAMES.has(singular(normalized))) return true;
+  const head = normalized.split(' ').pop();
+  if (head === normalized) return false;
+  return STOP_NAMES.has(head) || STOP_NAMES.has(singular(head));
+}
 
 export function normalizeEntityName(raw) {
   return String(raw ?? '')
@@ -38,7 +112,7 @@ export function normalizeEntityName(raw) {
 }
 
 function isRecordable(normalized) {
-  return normalized.length >= MIN_NAME_LENGTH && !STOP_NAMES.has(normalized);
+  return normalized.length >= MIN_NAME_LENGTH && !isStopName(normalized);
 }
 
 /** Idempotent — called from _migrate() on every boot. */
