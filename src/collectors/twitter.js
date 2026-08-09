@@ -160,7 +160,7 @@ class TwitterCollector extends BaseCollector {
 
     const allTweets = [];
 
-    // 3 slots per cycle: 1 volume + 2 narrative probes (rotated to save credits)
+    // 3 slots when the preset has probes (1 volume + 2), else 2 volume slots
     const queriesThisCycle = this._pickQueries();
 
     for (const { query, fromProbe } of queriesThisCycle) {
@@ -186,7 +186,12 @@ class TwitterCollector extends BaseCollector {
   }
 
   /**
-   * Three slots per cycle: 1 volume + 2 narrative probes.
+   * With probes: 3 slots — 1 volume + 2 narrative probes.
+   * Without probes: 2 volume slots, the pre-narrative-lane cycle size.
+   *
+   * The volume slot count is not fixed at one. A preset that never configured
+   * `narrativeProbes` must not silently lose half its X coverage because the
+   * narrative lane exists for a different preset.
    *
    * Two probe slots, not one, so a full pass over the four story families
    * takes one hour instead of two at a 30-minute cadence. Event narratives
@@ -204,8 +209,14 @@ class TwitterCollector extends BaseCollector {
     this._cycleCounter = (this._cycleCounter || 0) + 1;
     const picked = [];
 
-    if (volume.length > 0) {
-      picked.push({ query: volume[this._cycleCounter % volume.length], fromProbe: false });
+    // Never more than the list holds — a one-query preset must not spend two
+    // Apify calls on the same query.
+    const volumeSlots = Math.min(probes.length > 0 ? 1 : 2, volume.length);
+    if (volumeSlots > 0) {
+      const start = (this._cycleCounter * volumeSlots) % volume.length;
+      for (let i = 0; i < volumeSlots; i++) {
+        picked.push({ query: volume[(start + i) % volume.length], fromProbe: false });
+      }
     }
     for (let i = 0; i < 2 && probes.length > 0; i++) {
       const idx = (this._cycleCounter * 2 + i) % probes.length;

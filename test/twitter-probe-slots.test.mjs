@@ -34,7 +34,7 @@ test('volume queries rotate too', () => {
   assert.ok(seen.size >= 3, 'volume slot must not stick to one query');
 });
 
-test('with no probes configured the cycle degrades to volume only', () => {
+test('with no probes configured the cycle keeps the old two volume slots', () => {
   const bareDb = {
     getSetting: (k, d) => {
       if (k === 'activePreset') return 'animals';
@@ -44,6 +44,38 @@ test('with no probes configured the cycle degrades to volume only', () => {
   };
   const c = new TwitterCollector(config, silentLogger, bareDb);
   const picked = c._pickQueries();
-  assert.ok(picked.length >= 1);
+  assert.equal(picked.length, 2, 'no probes must not mean half the coverage');
   assert.equal(picked.filter(p => p.fromProbe).length, 0);
+  assert.notEqual(picked[0].query, picked[1].query, 'two slots must not spend two calls on one query');
+});
+
+// The regression this guards: only `animals` ships narrativeProbes, so a
+// probes-aware _pickQueries that always reserved just one volume slot cut
+// every other preset from 2 X queries per cycle to 1.
+for (const preset of ['culture', 'celebrities', 'events', 'general']) {
+  test(`preset "${preset}" still gets two volume queries per cycle`, () => {
+    const presetDb = { getSetting: (k, d) => (k === 'activePreset' ? preset : d) };
+    const c = new TwitterCollector(config, silentLogger, presetDb);
+    const picked = c._pickQueries();
+
+    assert.equal(picked.filter(p => p.fromProbe).length, 0, `${preset} has no probes`);
+    assert.equal(picked.length, 2);
+  });
+}
+
+test('a one-query preset spends one call, not two on the same query', () => {
+  const oneQueryDb = {
+    getSetting: (k, d) => {
+      if (k === 'activePreset') return 'animals';
+      if (k === 'presetConfigs') {
+        return JSON.stringify({
+          animals: { sources: { twitter: { queries: ['solo min_faves:10000'], narrativeProbes: [] } } },
+        });
+      }
+      return d;
+    },
+  };
+  const c = new TwitterCollector(config, silentLogger, oneQueryDb);
+  const picked = c._pickQueries();
+  assert.equal(picked.length, 1);
 });
