@@ -115,3 +115,39 @@ test('bonus applies once on top of a Stage-2-rewritten score, not the Stage 1 on
   assert.strictEqual(t.memePotential, 72);
   assert.strictEqual(t.storyBonus.memeBefore, 60);
 });
+
+// Found 2026-08-10: applyNarrativeBonuses raises memePotential and records why
+// in `storyBonus`, but saveTrend's raw_metrics payload listed every narrative
+// field EXCEPT that one. The admin's "📖 Story bonus +N" row therefore showed
+// during a live scan and vanished on reload, and a 7-day audit of the
+// narrative lane came back with zero bonuses recorded against 73 eligible
+// trends. The bonus was never missing — only the evidence of it.
+test('the bonus audit trail survives a save/reload round-trip', async () => {
+  const { default: TrendDatabase } = await import('../src/db/database.js');
+  const silent = { info() {}, warn() {}, debug() {}, error() {} };
+  const db = new TrendDatabase(':memory:', silent);
+
+  const t = trend({
+    title: 'Moo Deng escapes the enclosure', source: 'reddit',
+    url: 'https://reddit.com/r/aww/comments/round-trip',
+    memePotential: 70, storyScore: 100, subjectName: 'Moo Deng', nameStrength: 100,
+    pipelineStatus: 'scored',
+  });
+  applyNarrativeBonuses(t);
+  assert.strictEqual(t.storyBonus.bonus, 15, 'precondition: the bonus fired');
+
+  db.saveTrend(t);
+  const row = db.db.prepare('SELECT raw_metrics FROM trends WHERE url = ?').get(t.url);
+  const saved = JSON.parse(row.raw_metrics);
+
+  assert.strictEqual(saved.storyBonus.bonus, 15);
+  assert.strictEqual(saved.storyBonus.storyScore, 100);
+  assert.strictEqual(saved.nameBonus.bonus, 10);
+  assert.strictEqual(saved.memePotential, t.memePotential, 'the raised score is the one stored');
+});
+
+test('a trend that earned no bonus stores null, not undefined', () => {
+  const t = trend({ memePotential: 50, storyScore: 10 });
+  applyNarrativeBonuses(t);
+  assert.strictEqual(t.storyBonus, undefined);
+});

@@ -1552,6 +1552,13 @@ class TrendDatabase {
       storyHook:      trend.storyHook    ?? trend.xSearchData?.storyHook  ?? '',
       subjectName:    trend.subjectName  ?? trend.xSearchData?.subjectName ?? '',
       nameStrength:   trend.nameStrength ?? trend.xSearchData?.nameStrength ?? 0,
+      // The bonus audit trail, not the bonus itself — `memePotential` above
+      // already carries the raised number. Without these two the admin's
+      // "📖 Story bonus +N" row only ever showed during a live scan and
+      // vanished on reload, which made the narrative machinery unmeasurable
+      // after the fact (found 2026-08-10 while auditing the narrative lane).
+      storyBonus:     trend.storyBonus ?? null,
+      nameBonus:      trend.nameBonus  ?? null,
       // PreStage enrichment — persisted so re-scoring or admin SubmitPage
       // displays the same data that Stage 1 saw, without re-paying for
       // nano/gemini calls. null when PreStage didn't run or both failed.
