@@ -40,6 +40,17 @@ const ACTORS = {
   },
   xquik: {
     id: 'xquik~x-tweet-scraper',
+    // Rejects the ENTIRE run with 400 "Max Items must be at least 20" below
+    // this. Declared per-actor because two callers legitimately want less:
+    // narrative probes (shallow on purpose) and X-Trends tweet pulls (7 per
+    // trend). Both failed 100% of the time from 2026-08-15.
+    //
+    // The floor is the ACTOR's, and it appeared without warning: the same probe
+    // query ran against xquik on 08-07 and 08-10 asking for 15 and was accepted
+    // (it failed those days on a transient 502, not on validation). Nothing on
+    // our side changed on 08-15. An actor's input schema is somebody else's
+    // deploy — treat these limits as data that can move, not as constants.
+    minItems: 20,
     buildInput: (query, maxItems) => ({
       searchTerms: [query],
       maxItems,
@@ -49,6 +60,27 @@ const ACTORS = {
   },
 };
 const DEFAULT_ACTOR = 'kaitoeasyapi';
+
+/**
+ * Honour the actor's floor, whatever the caller asked for.
+ *
+ * A request below the floor does not degrade — it 400s the whole run, so a
+ * caller wanting fewer items gets NONE. Clamping up costs a few extra results;
+ * not clamping costs the entire slot.
+ */
+export function resolveItemBudget(actorDef, requested) {
+  const want = Math.max(1, Math.floor(Number(requested) || 0));
+  return Math.max(want, actorDef?.minItems || 1);
+}
+
+/**
+ * Probe queries are deliberately shallower than volume ones: a story-shaped
+ * query matches a far wider slice of the firehose, and Apify bills per result.
+ * Subject to the actor floor above — on an actor with minItems=20 this has no
+ * effect, which is the correct trade: shallow is a preference, running at all
+ * is not.
+ */
+export const PROBE_ITEM_CAP = 15;
 
 // ── Search presets ────────────────────────────────────────────────────────────
 // Each preset = 6 queries. Per cycle we run 2 (rotated).
@@ -260,14 +292,14 @@ class TwitterCollector extends BaseCollector {
 
     // Per-actor input shape. Both return identical engagement fields. The
     // optional maxItems arg lets callers (X Trends discovery) ask for a smaller
-    // batch than the default cycle cap.
-    //
-    // Probes are capped tighter than volume queries: a story-shaped query
-    // matches a much wider slice of the firehose, and Apify bills compute
-    // units, not runs. Adding the 3rd slot costs nothing if each slot is
-    // shallower.
-    const cap   = opts.fromProbe ? Math.min(this.maxItemsPerQuery, 15) : this.maxItemsPerQuery;
-    const input = actor.buildInput(query, maxItems || cap);
+    // batch than the default cycle cap — subject to the actor's own floor.
+    const cap    = opts.fromProbe ? Math.min(this.maxItemsPerQuery, PROBE_ITEM_CAP) : this.maxItemsPerQuery;
+    const wanted = maxItems || cap;
+    const budget = resolveItemBudget(actor, wanted);
+    if (budget !== wanted) {
+      this.logger.debug?.(`[Twitter] ${actorName} floor: asked ${wanted} items, sending ${budget}`);
+    }
+    const input = actor.buildInput(query, budget);
 
     const response = await fetch(runUrl, {
       method: 'POST',
