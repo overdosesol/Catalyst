@@ -10,6 +10,8 @@
  */
 
 import { LIFESPAN_VALUES, LIFESPAN_DESCRIPTORS } from './lifespan.js';
+import { classifyStoryShape } from './story-markers.js';
+import { LEDGER_MIN_MENTIONS, LEDGER_MIN_DISTINCT_DAYS } from '../db/entity-ledger.js';
 
 /**
  * Single source of truth for the alert-type axis. event/trend/post.
@@ -152,16 +154,81 @@ Stage 0b also reports whether there is anything here to hold on to. Still observ
 50 on any of these means the observer was NOT SURE. Treat it as no signal, never as a negative.
 Do NOT double-punish. Hard caps for the extreme values are applied in code after you. Your job is to score the content honestly; when these fields are weak, simply do not reach for the top bands.`;
 
+// ─── Retrieval context (2026-08-11) ──────────────────────────────────────────
+//
+// The pipeline decides "this looks like a story" BEFORE Stage 1 runs — by a
+// story-shaped search query, by lexical markers, or by the entity ledger — and
+// then used to throw that away and ask the model to rediscover it from the
+// title alone. It rediscovered badly: measured over 7 days in prod, storyScore
+// averaged 35.1 on narrative-lane items against 32.0 on volume ones. Three
+// points of separation, which is why the lane could route stories to the
+// scorer and still not get them alerted.
+//
+// Framed as findings, never as verdicts — the same choice as the "Observed:"
+// line from Stage 0b. Both rules at the bottom are load-bearing: the first
+// stops the model rubber-stamping whatever the lexical prefilter flagged, the
+// second stops it reading a missing line as evidence AGAINST a story, which
+// would penalise every narrative that arrives through plain `hot`.
+const RETRIEVAL_BLOCK = `━━━ RETRIEVAL CONTEXT ━━━
+Some items carry a "Retrieval:" line. It records HOW the item reached you — which query found it, which words it contains, whether its subject is already known to us. These are facts about the search, not a verdict on the content.
+
+Weigh the three kinds differently:
+• "story-shaped search query" — the QUERY was hunting for a story. This post merely matched it, and may still be a plain clip. Weakest of the three.
+• "story markers" — those words are present in the text. Words lie: a compilation titled "rescued animals" is still a compilation.
+• "subject already in our index" — the STRONGEST. The subject appeared on separate days, independently of this post. That is exactly the case a caption-less frame deserves scoring for: the story exists, it is simply not in this post. Reach for the upper bands here even when the post itself is quiet.
+
+Two rules:
+1. A Retrieval line alone never justifies a high storyScore. It tells you where to look, not what to conclude. When the content does not carry the story, score it low.
+2. NO Retrieval line is NOT evidence against a story. Most items arrive without one. Never lower a score because the line is absent.`;
+
 /**
  * Assembled Stage 1 system prompt. Marker miss falls back to appending — losing
- * the block silently would be worse than misplacing it.
+ * a block silently would be worse than misplacing it.
  * `test/potential-gates.test.mjs` asserts the marker still hits.
  */
 function composeSystemPrompt() {
+  const blocks = `${NARRATIVE_CORE_BLOCK}\n\n${RETRIEVAL_BLOCK}`;
   const marker = '━━━ BATCH CALIBRATION';
   const at = SYSTEM_PROMPT.indexOf(marker);
-  if (at < 0) return `${SYSTEM_PROMPT}\n\n${NARRATIVE_CORE_BLOCK}`;
-  return `${SYSTEM_PROMPT.slice(0, at)}${NARRATIVE_CORE_BLOCK}\n\n${SYSTEM_PROMPT.slice(at)}`;
+  if (at < 0) return `${SYSTEM_PROMPT}\n\n${blocks}`;
+  return `${SYSTEM_PROMPT.slice(0, at)}${blocks}\n\n${SYSTEM_PROMPT.slice(at)}`;
+}
+
+/**
+ * One line describing how a narrative-lane item was retrieved, or '' for
+ * everything else. Exported so the wording is testable without a live model.
+ *
+ * Volume items get nothing on purpose: a line saying "arrived normally" is
+ * noise on every item in the batch, and rule 2 above already covers how to
+ * read its absence.
+ */
+export function buildRetrievalLine(trend) {
+  if (trend?.lane !== 'narrative') return '';
+  const reason = String(trend.laneReason || '');
+
+  if (reason.startsWith('ledger:')) {
+    const name = reason.slice('ledger:'.length).trim();
+    if (!name) return '';
+    return `Retrieval: subject "${name}" is already in our index — at least ${LEDGER_MIN_MENTIONS} mentions across ${LEDGER_MIN_DISTINCT_DAYS}+ separate days, independent of this post`;
+  }
+
+  // Markers are recomputed rather than persisted: classifyStoryShape is pure
+  // and cheap, and naming the actual words beats naming the family. Probe
+  // items get them too when present — the query and the text can agree.
+  const shape = classifyStoryShape(trend.title, trend.description);
+  const markers = shape.hits.length > 0
+    ? `title contains story markers ${shape.hits.map(h => `"${h}"`).join(', ')}`
+    : '';
+
+  if (reason.startsWith('probe')) {
+    return markers
+      ? `Retrieval: returned by a story-shaped search query; ${markers}`
+      : `Retrieval: returned by a story-shaped search query — the QUERY looked for a story, this post's own text does not state one`;
+  }
+  if (reason.startsWith('lexical') && markers) {
+    return `Retrieval: ${markers}`;
+  }
+  return '';
 }
 
 export const STAGE1_SYSTEM_PROMPT = composeSystemPrompt();
@@ -256,6 +323,12 @@ export function buildAnalysisPrompt(trends) {
           : `\n   Retelling: NONE (nothing but mood or pose once judgement words are stripped)`;
       }
     }
+
+    // How this item was retrieved. Sits after the observer's findings and
+    // before engagement: the model should read what the post IS before it
+    // reads why we went looking for it. See RETRIEVAL_BLOCK.
+    const _retrieval = buildRetrievalLine(t);
+    if (_retrieval) detail += `\n   ${_retrieval}`;
 
     // [MARKET_STAGE] optional context hint — remove 3 lines to disable
     const _msHint = t.clusterMetrics?.marketStage && t.clusterMetrics.marketStage !== 'none'
