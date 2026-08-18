@@ -154,7 +154,7 @@ Stage 0b also reports whether there is anything here to hold on to. Still observ
 50 on any of these means the observer was NOT SURE. Treat it as no signal, never as a negative.
 Do NOT double-punish. Hard caps for the extreme values are applied in code after you. Your job is to score the content honestly; when these fields are weak, simply do not reach for the top bands.`;
 
-// ─── Retrieval context (2026-08-11) ──────────────────────────────────────────
+// ─── Retrieval context (2026-08-18) ──────────────────────────────────────────
 //
 // The pipeline decides "this looks like a story" BEFORE Stage 1 runs — by a
 // story-shaped search query, by lexical markers, or by the entity ledger — and
