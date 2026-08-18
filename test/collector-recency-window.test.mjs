@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import config from '../src/config.js';
-import TwitterCollector, { withRecencyWindow } from '../src/collectors/twitter.js';
+import TwitterCollector, { withRecencyWindow, countQueryGroups } from '../src/collectors/twitter.js';
 import TikTokCollector, { dateRangeForMaxAge } from '../src/collectors/tiktok.js';
 
 // The bug both halves of this file fix, found 2026-08-18:
@@ -114,6 +114,61 @@ test('X-Trends pulls get the window too', async () => {
   // a trend, not fewer, and drops 82-day-old results that were pure noise.
   const q = await sentQuery(twitterOn(), '#SomeTrend', 7, { relaxedFloor: true });
   assert.equal(q, '#SomeTrend within_time:3d');
+});
+
+// ── The two-group limit ──────────────────────────────────────────────────────
+// Found the hard way: this shipped without the guard, and the min_faves
+// detector flagged our OWN queries in the very first cycle afterwards. Adding
+// a recency operator to a query with two parenthesised groups makes the
+// advanced-search parse collapse — min_faves stops being honoured and the
+// median result comes back with 0 likes. Measured twice, identical both times.
+
+test('one group takes the window, two groups do not', () => {
+  const one = '(rescued OR reunited OR escaped OR survived) min_faves:5000 -is:retweet';
+  assert.equal(withRecencyWindow(one, 72), `${one} within_time:3d`, 'OK: 20/20 honoured, 6 reach');
+
+  const two = '(meet OR named) (dog OR cat OR zoo) min_faves:5000 -is:retweet';
+  assert.equal(withRecencyWindow(two, 72), two, 'JUNK if windowed: 4/15 honoured, median 0 likes');
+});
+
+test('it is the group count, not the query length or -is:retweet', () => {
+  // Both of these were measured as JUNK when windowed, so neither shortening
+  // the groups nor dropping -is:retweet earns the window back.
+  const short = '(rescued OR escaped) (dog OR cat) min_faves:5000 -is:retweet';
+  const noRt  = '(meet OR named OR nicknamed) (dog OR cat OR zoo) min_faves:5000';
+  assert.equal(withRecencyWindow(short, 72), short);
+  assert.equal(withRecencyWindow(noRt, 72), noRt);
+});
+
+test('every shipped narrative probe is two-group, so none of them get windowed', async () => {
+  // If a future preset edit collapses a probe to one group it SHOULD start
+  // getting the window — this test documents today's state, not a rule.
+  const { DEFAULT_PRESET_CONFIGS } = await import('../src/analysis/preset-config.js');
+  const probes = DEFAULT_PRESET_CONFIGS.animals?.sources?.twitter?.narrativeProbes || [];
+  assert.ok(probes.length > 0, 'precondition: animals has probes');
+  for (const p of probes) {
+    assert.ok(countQueryGroups(p) >= 2, `probe is single-group now, re-measure it: ${p}`);
+    assert.equal(withRecencyWindow(p, 72), p);
+  }
+});
+
+test('every shipped volume query is single-group, so all of them do', async () => {
+  const { DEFAULT_PRESET_CONFIGS } = await import('../src/analysis/preset-config.js');
+  const queries = DEFAULT_PRESET_CONFIGS.animals?.sources?.twitter?.queries || [];
+  assert.ok(queries.length > 0, 'precondition: animals has volume queries');
+  for (const q of queries) {
+    const windowed = withRecencyWindow(q, 72);
+    if (countQueryGroups(q) <= 1) assert.match(windowed, /within_time:3d$/, q);
+  }
+});
+
+test('counting groups ignores nesting and unbalanced parens', () => {
+  assert.equal(countQueryGroups('(a OR b)'), 1);
+  assert.equal(countQueryGroups('(a OR b) (c OR d)'), 2);
+  assert.equal(countQueryGroups('plain words'), 0);
+  assert.equal(countQueryGroups('(unclosed'), 0);
+  assert.equal(countQueryGroups(''), 0);
+  assert.equal(countQueryGroups(null), 0);
 });
 
 // ── TikTok ───────────────────────────────────────────────────────────────────

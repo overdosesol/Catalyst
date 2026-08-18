@@ -670,6 +670,38 @@ class TwitterCollector extends BaseCollector {
 // across three runs. Same lesson as `min_faves`: a field in an actor's schema
 // is a claim, not a behaviour.
 
+// THE TWO-GROUP LIMIT. Adding the operator to a query with two or more
+// parenthesised groups makes the advanced-search parse collapse: `min_faves`
+// stops being honoured and the response degrades to a plain text search with a
+// median of 0 likes. Caught in the first cycle after this shipped, by the
+// min_faves detector below flagging our OWN queries.
+//
+// Measured, two passes, identical both times:
+//
+//   (a OR b OR c) min_faves:5000 -is:retweet within_time:3d      OK,   20/20 honoured, 6 reach
+//   (a OR b) (c OR d) min_faves:5000 -is:retweet within_time:3d  JUNK,  2/15 honoured, 0 reach
+//   (a OR b OR c) (d OR e OR f) min_faves:5000 within_time:3d    JUNK,  4/15 honoured, 2 reach
+//
+// It is the group COUNT, not the term count and not `-is:retweet`. `since:`
+// fails the same way, and the native `since_time` field has no effect on these
+// queries at all, so for a two-group query there is currently no way to ask for
+// recency. Those are left un-windowed: stale results that are honestly labelled
+// beat fresh-looking noise, and the alternative trips the health alarm every
+// cycle on our own malformed query.
+//
+// The narrative probes are all two-group by construction (story-shape verbs
+// against subject), which is why they are the ones that lose out. Rewriting
+// them as single-group queries would earn them the window - measured at 6
+// reaching items against today's 0 - but that drops the subject constraint, so
+// it is a preset-design decision rather than a collector one. See NEXT.md.
+
+/** Parenthesised groups in a query. Two or more and the parser gives up. */
+export const MAX_GROUPS_FOR_WINDOW = 1;
+
+export function countQueryGroups(query) {
+  return (String(query || '').match(/\([^()]*\)/g) || []).length;
+}
+
 export function withRecencyWindow(query, maxAgeHours) {
   const q = String(query || '').trim();
   if (!q) return '';
@@ -679,6 +711,8 @@ export function withRecencyWindow(query, maxAgeHours) {
   if (!Number.isFinite(hours) || hours <= 0) return q;
   // An explicit window written by the caller outranks the default.
   if (/\b(?:within_time|since|until|since_time|until_time)\s*:/i.test(q)) return q;
+  // Too complex to survive the operator - see THE TWO-GROUP LIMIT above.
+  if (countQueryGroups(q) > MAX_GROUPS_FOR_WINDOW) return q;
 
   const h = Math.max(1, Math.ceil(hours));
   const window = h % 24 === 0 ? `${h / 24}d` : `${h}h`;
