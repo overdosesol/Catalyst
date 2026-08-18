@@ -300,7 +300,12 @@ class TwitterCollector extends BaseCollector {
     if (budget !== wanted) {
       this.logger.debug?.(`[Twitter] ${actorName} floor: asked ${wanted} items, sending ${budget}`);
     }
-    const input = actor.buildInput(query, budget);
+    // Ask for the window we are actually going to keep. Without this the
+    // request ('Top', all-time) and the filter (twitterMaxAgeHours) contradict
+    // each other and most of what we pay for is discarded unread.
+    const maxAgeHours = Number(this.db?.getSetting('twitterMaxAgeHours', 72) ?? 72);
+    const windowed = withRecencyWindow(query, maxAgeHours);
+    const input = actor.buildInput(windowed, budget);
 
     const response = await fetch(runUrl, {
       method: 'POST',
@@ -320,6 +325,17 @@ class TwitterCollector extends BaseCollector {
 
     const tweets = await response.json();
     if (!Array.isArray(tweets)) return [];
+
+    // The actor answered 201 with a well-formed payload. That is not the same
+    // as the actor having done what we asked — see detectIgnoredFilter.
+    const ignored = detectIgnoredFilter(tweets, parseMinFaves(windowed));
+    if (ignored) {
+      const msg = `${actorName} ignored min_faves:${ignored.minFaves} — `
+        + `${ignored.below}/${ignored.total} tweets below it, median ${ignored.medianLikes} likes`;
+      this.logger.warn(`[Twitter] ${msg}`);
+      this.noteFailure(new Error(msg));
+      return [];
+    }
 
     return tweets.map(t => this._normalize(t, query, opts)).filter(Boolean);
   }
@@ -634,6 +650,104 @@ class TwitterCollector extends BaseCollector {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+// ── Recency window ──────────────────────────────────────────────────────────
+//
+// `queryType: 'Top'` means top of ALL TIME. It shipped in the first commit
+// (2026-04-16). `twitterMaxAgeHours` arrived on 2026-04-24 and has been
+// throwing away exactly what Top returns ever since — two numbers that nobody
+// had put side by side. Measured 2026-08-18 on a live preset query: of 20
+// tweets, 6 cleared the engagement bar, 7 were under 72h, and only 1 was both.
+// The oldest result was 66957 hours old. Seven and a half years.
+//
+// So derive the ask from our own cap. One setting, one window, and the two can
+// never drift apart again.
+//
+// The operator goes in the query string rather than the actor's native
+// `since_time` field, and that is not a style preference — the native field
+// was tested and does not hold the line: asking for 3 days still returned
+// tweets 281h and 452h old. `within_time:` returned nothing older than 72h
+// across three runs. Same lesson as `min_faves`: a field in an actor's schema
+// is a claim, not a behaviour.
+
+export function withRecencyWindow(query, maxAgeHours) {
+  const q = String(query || '').trim();
+  if (!q) return '';
+  const hours = Number(maxAgeHours);
+  // 0 disables our own age filter. Narrowing the request anyway would quietly
+  // reinstate a filter the operator switched off.
+  if (!Number.isFinite(hours) || hours <= 0) return q;
+  // An explicit window written by the caller outranks the default.
+  if (/\b(?:within_time|since|until|since_time|until_time)\s*:/i.test(q)) return q;
+
+  const h = Math.max(1, Math.ceil(hours));
+  const window = h % 24 === 0 ? `${h / 24}d` : `${h}h`;
+  return `${q} within_time:${window}`;
+}
+
+// ── Did the actor actually run our query? ─────────────────────────────
+//
+// Written 2026-08-18 after Twitter spent weeks yielding ~7 items a day instead
+// of the expected 100+. Nothing was erroring. Measured against
+// xquik~x-tweet-scraper: on roughly two runs in three the actor ignores the
+// `min_faves:` operator and returns ~20 arbitrary tweets with a median of 0
+// likes. HTTP 201, well-formed payload, no warning of any kind. All of them
+// then fail the 500K-views floor, so the cycle logs "Collected 0 items".
+// Sampled that day: xquik honoured the filter on 5 runs of 15, kaitoeasyapi on
+// 5 of 5.
+//
+// This is a third failure mode, and the two we already watch for cannot see
+// it. `down` needs a thrown error; there is none. `silent` needs 72 empty
+// cycles in a row; the occasional honest run trickles an item through and
+// resets the streak forever. A source that returns confident nonsense reads as
+// healthy to both.
+//
+// The check is cheap because we already know what we asked for: our own query
+// carries `min_faves:N`, so every tweet coming back should have at least N
+// likes. When most of them do not, the actor ignored the filter. That is a
+// comparison against our own demand, not against a guess about the world,
+// which is what keeps it from producing false alarms.
+
+/** Consecutive-sample floor. Three bad tweets is noise, not evidence. */
+export const IGNORED_FILTER_MIN_SAMPLE = 5;
+
+/** Share of the batch that must be under the floor before we call it a lie. */
+export const IGNORED_FILTER_SHARE = 0.5;
+
+/** The engagement floor our own query demanded, or 0 if it demanded none. */
+export function parseMinFaves(query) {
+  const m = /min_faves:(\d+)/i.exec(String(query || ''));
+  return m ? Number(m[1]) : 0;
+}
+
+/**
+ * Did this batch come back honouring the floor the query asked for?
+ *
+ * Returns null when everything is fine (including "no floor to check" and
+ * "sample too small to judge"), or a report when the actor plainly ignored it.
+ *
+ * The threshold is half the batch, not all of it, for two reasons. Search
+ * indexes lag, so a genuine result can be indexed above the floor and read
+ * back below it — a handful of those must not page anyone. And the observed
+ * junk was not uniformly zero: one sampled run carried two real viral tweets
+ * among fourteen duds, which a stricter all-or-nothing rule would have passed.
+ */
+export function detectIgnoredFilter(tweets, minFaves) {
+  if (!minFaves || !Array.isArray(tweets)) return null;
+  if (tweets.length < IGNORED_FILTER_MIN_SAMPLE) return null;
+
+  const likes = tweets.map(t => Number(t?.likeCount ?? t?.favoriteCount) || 0);
+  const below = likes.filter(l => l < minFaves).length;
+  if (below / likes.length < IGNORED_FILTER_SHARE) return null;
+
+  const sorted = [...likes].sort((a, b) => a - b);
+  return {
+    minFaves,
+    below,
+    total: likes.length,
+    medianLikes: sorted[Math.floor(sorted.length / 2)],
+  };
+}
 
 /** Base engagement floor. CJK gets a multiplier — see _detectCjkScript. */
 export const VIEWS_BAR         = 500_000;

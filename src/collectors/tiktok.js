@@ -83,18 +83,54 @@ const ACTORS = {
   },
   apidojo: {
     id: 'apidojo~tiktok-scraper',
-    // No `hashtags` field — feed it tag URLs through startUrls instead.
-    // `https://www.tiktok.com/tag/<tag>` is the canonical hashtag-page URL.
-    buildInput: (hashtag, maxItems) => ({
-      startUrls: [{ url: `https://www.tiktok.com/tag/${encodeURIComponent(hashtag)}` }],
+    // Keyword SEARCH, not the /tag/ page. The tag page is editorially ranked
+    // rather than chronological, and apidojo's own schema says `dateRange`
+    // "only works in Search" — so through startUrls there is no way to ask for
+    // recent videos at all. Measured 2026-08-18 on #animalsoftiktok: via the
+    // tag page the median video was 691 days old, 8 of 20 cleared the
+    // virality floor and every one of those 8 was then dropped by our own
+    // 7-day cap. Zero reached the pipeline, which is why TikTok read as quiet
+    // instead of broken. Same query as a keyword search with dateRange:
+    // 20 of 20 under a week, median 3 days, 4 reaching the pipeline.
+    //
+    // The response shape is identical between the two modes (same 19
+    // top-level keys), so `_normalize` needs no changes — verified before
+    // switching. Keyword search additionally populates `channel.followers`,
+    // which the tag page left null.
+    //
+    // No `sortType`: measured, the actor's default returns stronger videos
+    // here than MOST_LIKED does (14M plays vs 294K on the top result).
+    buildInput: (hashtag, maxItems, opts = {}) => ({
+      keywords: [hashtag],
       maxItems,
-      sortType: 'RELEVANCE',
+      ...(opts.dateRange ? { dateRange: opts.dateRange } : {}),
       // Suppress optional media downloads — we keep cover URLs only.
       shouldDownloadVideos: false,
       shouldDownloadCovers: false,
     }),
   },
 };
+
+/**
+ * Our own age cap, expressed in the enum apidojo accepts.
+ *
+ * Rounds UP to the next window that still contains the cap, never down: the
+ * actor's filter is a pre-filter to stop paying for material we would discard,
+ * while `tiktokMaxAgeDays` in `_normalize` stays the authoritative one. Cutting
+ * tighter than our own cap here would silently discard days we accept.
+ *
+ * Returns null when there is no cap, so the field is omitted entirely.
+ */
+export function dateRangeForMaxAge(maxAgeDays) {
+  const d = Number(maxAgeDays);
+  if (!Number.isFinite(d) || d <= 0) return null;
+  if (d <= 1)   return 'YESTERDAY';
+  if (d <= 7)   return 'THIS_WEEK';
+  if (d <= 31)  return 'THIS_MONTH';
+  if (d <= 93)  return 'LAST_THREE_MONTHS';
+  if (d <= 186) return 'LAST_SIX_MONTHS';
+  return null;   // past six months the tightest available window is everything
+}
 const DEFAULT_ACTOR = 'clockworks';
 
 // Per-preset hashtags now live in settings.presetConfigs (sources.tiktok.hashtags).
@@ -427,7 +463,12 @@ class TikTokCollector extends BaseCollector {
     // keeps it out of the URL entirely.
     const runUrl = `https://api.apify.com/v2/acts/${actor.id}/run-sync-get-dataset-items?timeout=${TIMEOUT_SECS}`;
 
-    const input = actor.buildInput(hashtag, this.maxVideosPerTag);
+    // Ask the actor for the same window `_normalize` is going to enforce, so
+    // we stop paying for years-old videos that get discarded on arrival.
+    const maxAgeDays = Number(this.db?.getSetting?.('tiktokMaxAgeDays', 7) ?? 7);
+    const input = actor.buildInput(hashtag, this.maxVideosPerTag, {
+      dateRange: dateRangeForMaxAge(maxAgeDays),
+    });
 
     const response = await fetch(runUrl, {
       method: 'POST',
