@@ -202,6 +202,7 @@ class TwitterCollector extends BaseCollector {
         await this._delay(2000);
       } catch (err) {
         this.logger.warn(`[Twitter] Query failed "${query.substring(0, 60)}": ${err.message}`);
+        this.noteFailure(err);
       }
     }
 

@@ -209,6 +209,7 @@ class XTrendsCollector extends BaseCollector {
             );
           } catch (e) {
             this.logger.warn(`[XTrends] tweet fetch for "${trend.trend}" failed: ${e.message}`);
+            this.noteFailure(e);
           }
         }
 

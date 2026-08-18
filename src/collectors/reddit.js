@@ -86,6 +86,9 @@ class RedditCollector extends BaseCollector {
       allItems.push(...await this._fetchMultiRSS(subreddits));
     } catch (error) {
       this.logger.warn(`[Reddit] multireddit hot feed failed: ${error.message}`);
+      // No retry on this one, and it is the floor the whole source stands on —
+      // count it every time.
+      this.noteFailure(error);
     }
 
     // Story search — the second reading mode. `hot` answers "what is at the top
@@ -107,9 +110,16 @@ class RedditCollector extends BaseCollector {
         if (items.length > 0) { allItems.push(...items); break; }
         // Empty means refused (the method logs the status) — one more try, then
         // let it go. The hot feed above is the floor.
-        if (attempt === 2) this.logger.warn(`[Reddit] story search ${family} gave up after 2 attempts`);
+        if (attempt === 2) {
+          this.logger.warn(`[Reddit] story search ${family} gave up after 2 attempts`);
+          this.noteFailure(new Error(
+            `story search ${family} gave up after 2 attempts` +
+            (this._lastSearchStatus ? ` (HTTP ${this._lastSearchStatus})` : '')
+          ));
+        }
       } catch (error) {
         this.logger.warn(`[Reddit] story search (${family}) failed: ${error.message}`);
+        this.noteFailure(error);
         break;
       }
     }
@@ -188,6 +198,12 @@ class RedditCollector extends BaseCollector {
     // and the hot feed above is the floor either way.
     if (!response.ok) {
       this.logger.warn(`[Reddit] story search ${family} → HTTP ${response.status}`);
+      // Deliberately NOT noteFailure() here. A single 429 is routine — Reddit
+      // passes roughly one RSS request in three — and the caller retries. The
+      // failure is recorded only where the cycle actually gives up, otherwise
+      // a third of all cycles would look faulty and the alert would cry wolf
+      // about twice a week.
+      this._lastSearchStatus = response.status;
       return [];
     }
 

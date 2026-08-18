@@ -105,6 +105,38 @@ export async function notifyAdminCrash(error, context = {}) {
 }
 
 /**
+ * Post a source-health notice (collector down / silent / recovered).
+ *
+ * Deliberately NOT routed through notifyAdminCrash: there is no Error and no
+ * stack here, and the 5-minute fingerprint cooldown is the wrong instrument.
+ * Rate limiting for these lives in the health tracker itself, which counts
+ * cycles and knows the difference between a new fault and the same one still
+ * going — see source-health.js. Adding a second layer of suppression here
+ * would only make "why didn't I get a message" harder to answer.
+ *
+ * Fire-and-forget, never throws: a monitoring path must not be able to break
+ * the thing it monitors.
+ *
+ * @param {string} html — preformatted HTML, one or two lines
+ */
+export function notifyAdminHealth(html) {
+  if (!_bot || !_groupId || !html) return;
+  const env = process.env.NODE_ENV || 'unknown';
+  const msg = `${html}\n<code>${escHtml(env)}</code>`.slice(0, _ADMIN_MSG_LIMIT);
+
+  withTelegramRetry(
+    () => _bot.sendMessage(_groupId, msg, {
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      disable_notification: false,
+    }),
+    { logger: _logger, label: 'admin-health' }
+  ).catch(e => {
+    _logger.warn(`[admin-alert] health notice failed: ${e.message}`);
+  });
+}
+
+/**
  * Test/debug helper — clears the dedupe Map. Exposed для REPL/manual tests,
  * not used by production code.
  */

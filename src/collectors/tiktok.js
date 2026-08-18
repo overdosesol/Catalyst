@@ -362,6 +362,9 @@ class TikTokCollector extends BaseCollector {
         `[TikTok] skipping cycle — last run ${Math.round(ageMinutes)}min ago ` +
         `(interval=${effectiveInterval}min)`
       );
+      // Not a silent source — a source that was told to wait. Half of all
+      // cycles land here at a 60-min interval against a 30-min scan.
+      this.noteSkipped();
       return [];
     }
     this._lastCollectAt = Date.now();
