@@ -89,6 +89,63 @@ function applyTextOnlyMultiplier(trend, logger = null) {
   );
 }
 
+// ─── Per-source score discount (post-Stage 2) ────────────────────────
+//
+// TikTok arrives pre-inflated and the model scores it that way. Over 14 days
+// of prod (2026-08-04‘18), scored trends by source:
+//
+//   source          n      viral   meme   alertScore   ≥60
+//   reddit       1922       39.5   42.9         33.1    267
+//   twitter       169       94.6   67.6         65.1    168
+//   tiktok        118       92.4   57.8         62.1    116
+//
+// 116 of 118 TikTok items cleared 60 on virality and 74 of them scored 95+.
+// A scale where almost every item is a 95 is not a scale. The Stage 1 prompt
+// already carries an explicit "DO NOT score 95+ just because plays=10M" line
+// and the model ignores it, because the raw numbers really are that big:
+// TikTok plays run 5-10× Twitter views for the same cultural weight.
+//
+// So this is a deterministic discount rather than another sentence in the
+// prompt. Owner's call, 2026-08-18: take ~20% off TikTok across the board.
+// It lands on `memePotential` and `score`, the two numbers everything
+// downstream reads — alertScore weights them at 0.60/0.20, `adoptionScore` is
+// an alias of memePotential, and both are what the card shows. Discounting
+// those two carries the cut everywhere without touching cluster-level
+// emergence, which can be shared with items from other sources.
+//
+// Runs LAST in the post-pass, after the caps, so the discount is the final
+// word: whatever the pipeline decided a TikTok trend is worth, the saved
+// number is 20% below it. Running it earlier would let a later cap or bonus
+// quietly restore part of the cut.
+export const SOURCE_SCORE_MULT = Object.freeze({
+  tiktok: 0.8,
+});
+
+export function applySourceScoreMultiplier(trend, logger = null) {
+  const src  = String(trend?.source || '').toLowerCase();
+  const mult = SOURCE_SCORE_MULT[src];
+  if (!(mult > 0) || mult === 1) return;
+
+  const beforeMeme  = Number(trend.memePotential) || 0;
+  const beforeViral = Number(trend.score) || 0;
+  if (beforeMeme === 0 && beforeViral === 0) return;
+
+  trend.memePotential = Math.round(beforeMeme  * mult);
+  trend.score         = Math.round(beforeViral * mult);
+  trend.sourcePenalty = {
+    source:      src,
+    multiplier:  mult,
+    memeBefore:  beforeMeme,
+    memeAfter:   trend.memePotential,
+    viralBefore: beforeViral,
+    viralAfter:  trend.score,
+  };
+  logger?.info?.(
+    `Source discount "${trend.title}": ${src} ×${mult} ` +
+    `meme ${beforeMeme}→${trend.memePotential} viral ${beforeViral}→${trend.score}`
+  );
+}
+
 // ─── Emergence + Adoption helpers (used by scorer and server) ─────────────────
 
 /**
@@ -529,7 +586,8 @@ function recomputeDerivedScores(trend, alertWeights) {
  *   2. text-only multiplier — a multiplier before the bonus would scale it too
  *   3. potential caps    — MUST come after the bonuses, or a +25 story bonus
  *      lifts a capped trend straight back over its ceiling
- *   4. one recompute of everything derived from memePotential
+ *   4. per-source discount — last, so nothing can restore part of the cut
+ *   5. one recompute of everything derived from memePotential
  *
  * Each trend is isolated — one throwing must not abort the batch.
  */
@@ -541,6 +599,8 @@ export function runPostPass(trends, alertWeights, logger = null) {
     catch (e) { logger?.warn?.(`textOnly multiplier threw for "${t?.title}": ${e.message}`); }
     try { applyPotentialCaps(t, logger); }
     catch (e) { logger?.warn?.(`potential caps threw for "${t?.title}": ${e.message}`); }
+    try { applySourceScoreMultiplier(t, logger); }
+    catch (e) { logger?.warn?.(`source discount threw for "${t?.title}": ${e.message}`); }
     try { recomputeDerivedScores(t, alertWeights); }
     catch (e) { logger?.warn?.(`score recompute threw for "${t?.title}": ${e.message}`); }
   }
@@ -1134,7 +1194,7 @@ class Scorer {
       deepReasoning:     String(this.db?.getSetting?.('deepReasoningEnabled', '0')) === '1',
     };
 
-    // ── Post-pass: narrative bonuses → text-only multiplier → recompute ────
+    // ── Post-pass: bonuses → text-only → caps → source discount → recompute ─
     // Runs for every trend (Stage 1 + Stage 2) AFTER all AI stages have
     // finalized memePotential/score. The story/name bonuses live here rather
     // than in Stage 2 so they still apply when x_search is toggled off, and

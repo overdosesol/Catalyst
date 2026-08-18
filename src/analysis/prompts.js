@@ -79,7 +79,7 @@ SCORING HARD RULES (apply BEFORE anchors):
 • hasSubject=false AND hasNarrative=false → cap at 30.
 
 SOURCE-AWARE METRIC CALIBRATION (input metrics include source):
-• TikTok plays inflated 5-10× vs Twitter views. 500K-1M = baseline-viral; 5M+ = distinctive. DO NOT score 95+ just because plays=10M.
+• TikTok plays inflated 5-10× vs Twitter views. Every TikTok you see already cleared a 1M plays / 40K likes / 5K shares floor, so clearing it is not a distinction — 1-3M plays is the FLOOR-CLEARING BASELINE, not a high number. 10M+ is genuinely rare (4 of 143 over 30 days). DO NOT score 95+ on plays alone.
 • TikTok shares × 50 ≈ Twitter retweets in cultural impact. 5K+ shares = stronger than likes.
 • TikTok memes burn out in 24-48h. >72h-old TikTok = past peak. Twitter 5-7 days. Reddit 1-2 weeks.
 • Reddit upvotes vote-democratized: 10K upvotes ≈ 100K+ readers. 500+ comments = real discussion.

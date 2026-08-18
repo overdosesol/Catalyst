@@ -1568,6 +1568,12 @@ class TrendDatabase {
       // worse?" review needs to count cap hits over a whole night, and the
       // in-memory decisions ring buffer only holds the last few hundred.
       capsApplied:    trend.capsApplied           ?? null,
+      // Per-source discount (2026-08-18) — same reasoning as the caps above:
+      // `memePotential` and `score` already carry the reduced numbers, this is
+      // the audit trail. Persisted so "did the TikTok discount do what we
+      // wanted?" is answerable from the DB a week later instead of only from
+      // a live scan log.
+      sourcePenalty:  trend.sourcePenalty         ?? null,
       // Narrative lane (2026-08-07). Persisted for two reasons: the hot-refresh
       // dispatch path rebuilds trends from the DB and would otherwise treat
       // every one of them as volume, and the acceptance metric for this whole

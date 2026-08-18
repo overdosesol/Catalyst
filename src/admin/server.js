@@ -6153,7 +6153,7 @@ function ManualResultCard({ result, comment, setComment, onAlertSent }) {
         ),
 
       // ── COLLAPSIBLE: Score adjustments (every trend, no Stage 2 needed) ─
-      (t.subjectName || t.storyBonus || t.nameBonus || t.textOnlyPenalty || t.capsApplied) &&
+      (t.subjectName || t.storyBonus || t.nameBonus || t.textOnlyPenalty || t.capsApplied || t.sourcePenalty) &&
         React.createElement(Collapsible, { title: '⚖️ Корректировки скора', defaultOpen: true },
           t.subjectName && React.createElement('div', { style: { fontSize: 12, color: 'var(--text2)', marginBottom: 8 } },
             '🏷 Subject: ', React.createElement('b', { style: { color: 'var(--text)' } }, '"' + t.subjectName + '"'),
@@ -6167,7 +6167,11 @@ function ManualResultCard({ result, comment, setComment, onAlertSent }) {
               React.createElement('div', { style: { color: t.capsApplied.memeAfter !== t.capsApplied.memeBefore ? '#ff7675' : 'var(--text2)' } },
                 '⛔ Ворота: ' + t.capsApplied.rules.map(r => r.rule).join(' + ')
                 + ' → потолок ' + t.capsApplied.cap
-                + ' — meme ' + t.capsApplied.memeBefore + '→' + t.capsApplied.memeAfter)
+                + ' — meme ' + t.capsApplied.memeBefore + '→' + t.capsApplied.memeAfter),
+            t.sourcePenalty && t.sourcePenalty.multiplier < 1 && React.createElement('div', null,
+              '📉 Скидка по источнику (' + t.sourcePenalty.source + ') ×' + t.sourcePenalty.multiplier.toFixed(2)
+              + ' — meme ' + t.sourcePenalty.memeBefore + '→' + t.sourcePenalty.memeAfter
+              + ', viral ' + t.sourcePenalty.viralBefore + '→' + t.sourcePenalty.viralAfter)
           )
         ),
 
@@ -8333,15 +8337,16 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       // Stage 2 deltas — saved per-trend so the SubmitPage history can show
       // the same penalty/bonus chips after page reload.
       stage2Penalty:    metrics.stage2Penalty    || null,
-      // Neither bonus object is persisted (saveTrend does not list them), so
-      // these read null on the DB-hydration path. The flat fields below are
-      // what actually survives a reload.
+      // storyBonus/nameBonus/capsApplied/sourcePenalty ARE persisted by
+      // saveTrend, so they survive a reload. textOnlyPenalty is not — it
+      // reads null on the DB-hydration path and only shows during a live scan.
       storyBonus:      metrics.storyBonus      || null,
       nameBonus:       metrics.nameBonus       || null,
       subjectName:     metrics.subjectName     || '',
       nameStrength:    metrics.nameStrength    || 0,
       textOnlyPenalty:  metrics.textOnlyPenalty  || null,
       capsApplied:      metrics.capsApplied      || null,
+      sourcePenalty:    metrics.sourcePenalty    || null,
       // Cluster routing inputs (snapshot at scoring time).
       clusterMetrics:   metrics.clusterMetrics   || null,
       // Stage 1 viralityScore lives in raw_metrics for non-current rows; the
@@ -8397,6 +8402,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(
       nameStrength: trend.nameStrength || 0,
       textOnlyPenalty: trend.textOnlyPenalty || null,
       capsApplied: trend.capsApplied || null,
+      sourcePenalty: trend.sourcePenalty || null,
       clusterMetrics: trend.clusterMetrics || null,
       memeShapeSignals: trend.metrics?.memeShapeSignals || trend.memeShapeSignals || null,
       junkReasons: trend.clusterMetrics?.junkReasons || trend.metrics?.junkReasons || trend.junkReasons || [],

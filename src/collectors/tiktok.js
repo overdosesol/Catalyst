@@ -505,40 +505,15 @@ class TikTokCollector extends BaseCollector {
     // Engagement rate: likes relative to follower count
     const engagementRate = followers > 0 ? Math.round((likes / followers) * 10000) / 100 : 0; // percentage
 
-    // Minimum engagement bar — passes if ANY of:
-    //   • plays  ≥ 500 000   (real reach — 500K views = certified viral)
-    //   • likes  ≥  20 000   (real engagement — 20K likes is consistent with
-    //                         genuine virality regardless of view count, and
-    //                         organically near-impossible to fake at scale)
-    //   • shares ≥   5 000   (the strongest TikTok virality signal — a low-view
-    //                         but heavily-shared video is still meaningful)
-    //
-    // Floor was raised 2026-05-05 from 50K plays / 1K likes / 200 shares.
-    //
-    // viralScore was previously a 4th OR-option (≥60 default) but it's the
-    // sum of `log10` per metric — `10·log10(plays) + 12·log10(likes) +
-    // 8·log10(comments) + 15·log10(shares) + 5·log10(followers)`. Any video
-    // with ~200K plays alone gets viralScore = 100 (10·log10(200K) ≈ 53,
-    // plus *anything* on the other axes pushes past 60). That made the floor
-    // a no-op — videos with 6K likes and 100 shares slipped through because
-    // their 200K plays kept viralScore pinned at 100. Removed 2026-05-05.
-    // viralScore is still computed for downstream signals; it just no longer
-    // gates the floor.
-    //
-    // CJK-script videos get a harder bar — Apify's TikTok firehose drags in
-    // regional virality that meets the default floor but never crosses into a
-    // global narrative.
+    // Minimum engagement bar — numbers and reasoning live on `meetsViralBar`
+    // below. CJK-script videos get a harder bar: Apify's TikTok firehose drags
+    // in regional virality that meets the default floor but never crosses into
+    // a global narrative.
     //   • Chinese (zh): 4× plays/likes/shares
     //   • Japanese (ja) / Korean (ko): 2× plays/likes/shares
     const cjkScript = _detectCjkScript(desc);
     const cjkMult   = cjkScript === 'zh' ? 4 : cjkScript ? 2 : 1;
-    const playsBar  = 500_000 * cjkMult;
-    const likesBar  =  20_000 * cjkMult;
-    const sharesBar =   5_000 * cjkMult;
-    const meetsBar  = plays  >= playsBar
-                   || likes  >= likesBar
-                   || shares >= sharesBar;
-    if (!meetsBar) return null;
+    if (!meetsViralBar(plays, likes, shares, { cjkMult })) return null;
 
     // Drop obvious compilations / aggregator videos — they have no narrative
     // arc and pollute the feed with "Top 10 funny X" and "X minutes of Y" type
@@ -750,6 +725,45 @@ class TikTokCollector extends BaseCollector {
   normalize(item) {
     return item; // already normalized in _normalize()
   }
+}
+
+// ── Engagement floor ──────────────────────────────────────────────────────────
+
+/**
+ * Bars a video must clear to enter the pipeline at all. Any ONE of the three
+ * is enough — unlike Twitter, where both bars are required.
+ *
+ * Raised 2026-08-18 on the owner's call: plays 500K → 1M, likes 20K → 40K.
+ * (The previous raise, 2026-05-05, came from 50K plays / 1K likes / 200 shares.)
+ * Measured against 30 days of saved TikTok trends, doubling those two takes the
+ * window from 143 items to 113.
+ *
+ * `shares` was deliberately left at 5 000, and it is worth knowing what that
+ * costs: over the same 30 days 101 of the 143 saved videos had ≥5K shares, so
+ * shares is the loosest of the three gates, not the rarest. 24 of them clear
+ * nothing except shares and survive the doubling on that path alone. Moving it
+ * to 10K would take the window to 99. It stays at 5K because a heavily-shared
+ * video with modest reach is the one shape here worth catching early — but if
+ * TikTok is still too loud after this change, this is the next number to move.
+ *
+ * viralScore used to be a 4th OR-option (≥60) but it is the sum of `log10`
+ * per metric — `10·log10(plays) + 12·log10(likes) + 8·log10(comments) +
+ * 15·log10(shares) + 5·log10(followers)`. Any video with ~200K plays alone
+ * pins it at 100, which made the whole floor a no-op. Removed 2026-05-05;
+ * viralScore is still computed for downstream signals, it just no longer gates.
+ */
+export const PLAYS_BAR  = 1_000_000;
+export const LIKES_BAR  =    40_000;
+export const SHARES_BAR =     5_000;
+
+export function meetsViralBar(plays, likes, shares, { cjkMult = 1 } = {}) {
+  const p = Number(plays)  || 0;
+  const l = Number(likes)  || 0;
+  const s = Number(shares) || 0;
+  const mult = Number(cjkMult) > 0 ? Number(cjkMult) : 1;
+  return p >= PLAYS_BAR  * mult
+      || l >= LIKES_BAR  * mult
+      || s >= SHARES_BAR * mult;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
