@@ -14,12 +14,17 @@ notify_failure() {
   local exit_code=$?
   # Don't alert on successful exit.
   if [ "$exit_code" -eq 0 ]; then exit 0; fi
-  if [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${SUPPORT_GROUP_ID:-}" ]; then
+  # The alert lands in the support group, so it has to be sent by the bot that
+  # is actually a member of it (@CatalystSupportbot = SUPPORT_BOT_TOKEN).
+  # TG_BOT_TOKEN holds the main parser bot, which is not in that group and only
+  # ever got "chat not found" back — kept as a fallback for older env files.
+  local bot_token="${SUPPORT_BOT_TOKEN:-${TG_BOT_TOKEN:-}}"
+  if [ -n "$bot_token" ] && [ -n "${SUPPORT_GROUP_ID:-}" ]; then
     # Never mask the real exit code — but do NOT swallow a broken alert either:
-    # a rejected sendMessage (bad chat_id, revoked token) used to fail silently,
-    # which is how 70 failed backups went unnoticed for 71 days.
+    # a rejected sendMessage (wrong bot, bad chat_id, revoked token) used to
+    # fail silently, which is how 70 failed backups went unnoticed for 71 days.
     local tg_response
-    tg_response=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+    tg_response=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${bot_token}/sendMessage" \
       --data-urlencode "chat_id=${SUPPORT_GROUP_ID}" \
       --data-urlencode "text=🚨 Catalyst backup FAILED (exit ${exit_code}) on $(hostname) at $(date -Is)" \
       2>&1 || true)
@@ -28,7 +33,7 @@ notify_failure() {
       *) echo "$(date -Is) WARN: backup alert not delivered to Telegram: ${tg_response:-<no response>}" >&2 ;;
     esac
   else
-    echo "$(date -Is) WARN: backup failed but TG_BOT_TOKEN/SUPPORT_GROUP_ID unset — no alert sent" >&2
+    echo "$(date -Is) WARN: backup failed but SUPPORT_BOT_TOKEN/SUPPORT_GROUP_ID unset in /etc/catalyst.env — no alert sent" >&2
   fi
   exit "$exit_code"
 }
