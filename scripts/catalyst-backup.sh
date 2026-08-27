@@ -15,10 +15,20 @@ notify_failure() {
   # Don't alert on successful exit.
   if [ "$exit_code" -eq 0 ]; then exit 0; fi
   if [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${SUPPORT_GROUP_ID:-}" ]; then
-    curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+    # Never mask the real exit code — but do NOT swallow a broken alert either:
+    # a rejected sendMessage (bad chat_id, revoked token) used to fail silently,
+    # which is how 70 failed backups went unnoticed for 71 days.
+    local tg_response
+    tg_response=$(curl -s --max-time 15 -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
       --data-urlencode "chat_id=${SUPPORT_GROUP_ID}" \
       --data-urlencode "text=🚨 Catalyst backup FAILED (exit ${exit_code}) on $(hostname) at $(date -Is)" \
-      > /dev/null 2>&1 || true
+      2>&1 || true)
+    case "$tg_response" in
+      *'"ok":true'*) : ;;
+      *) echo "$(date -Is) WARN: backup alert not delivered to Telegram: ${tg_response:-<no response>}" >&2 ;;
+    esac
+  else
+    echo "$(date -Is) WARN: backup failed but TG_BOT_TOKEN/SUPPORT_GROUP_ID unset — no alert sent" >&2
   fi
   exit "$exit_code"
 }
@@ -70,7 +80,7 @@ find "$BACKUP_DIR" -name 'catalyst_*.db.gz' -mtime +14 -delete
 
 # Off-site copy to Backblaze B2 (B2 lifecycle rule handles its own retention: 30d hide + 1d delete)
 BACKUP_FILE="${BACKUP_DIR}/catalyst_${DATE}.db.gz"
-rclone copy "$BACKUP_FILE" b2:catalyst-prod-backups/ --log-level INFO >> /var/log/catalyst-backup-rclone.log 2>&1
+rclone copy "$BACKUP_FILE" b2:catalystparser-prod-backups/ --log-level INFO >> /var/log/catalyst-backup-rclone.log 2>&1
 
 SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
 echo "$(date -Is) backup OK: catalyst_${DATE}.db.gz ($SIZE)"

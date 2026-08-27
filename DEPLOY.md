@@ -258,7 +258,7 @@ by `scripts/catalyst-backup.sh`, which the deploy scripts sync to
 3. Hot backup via `sqlite3 ".backup"` (lock-aware — safe while the app writes).
 4. `gzip` the snapshot → `/var/backups/catalyst/catalyst_YYYY-MM-DD_HH-MM.db.gz`, then `gzip -t` to verify the archive.
 5. Prune local snapshots older than 14 days.
-6. Copy the snapshot off-site to Backblaze B2 via `rclone` (`b2:catalyst-prod-backups/`).
+6. Copy the snapshot off-site to Backblaze B2 via `rclone` (`b2:catalystparser-prod-backups/`).
 7. On **any** non-zero exit, a Telegram alert is sent to `SUPPORT_GROUP_ID` (failure trap).
 
 Backblaze + Telegram credentials live in `/etc/catalyst.env` (sourced by the
@@ -289,8 +289,8 @@ Off-site (если VPS погиб):
 # и applicationKey из Backblaze console). Config ляжет в /root/.config/rclone/rclone.conf.
 # Если есть backup rclone.conf со старого VPS — просто скопируй его сюда.
 # Контракт названия remote: "b2".
-rclone ls b2:catalyst-prod-backups/
-rclone copy b2:catalyst-prod-backups/catalyst_YYYY-MM-DD_HH-MM.db.gz /tmp/
+rclone ls b2:catalystparser-prod-backups/
+rclone copy b2:catalystparser-prod-backups/catalyst_YYYY-MM-DD_HH-MM.db.gz /tmp/
 ```
 
 **Step 2 — Verify archive integrity**
@@ -374,8 +374,8 @@ rm /tmp/restore.db /tmp/catalyst_*.db.gz
 
 ```bash
 mkdir -p /tmp/drill
-LATEST=$(rclone lsf b2:catalyst-prod-backups/ | sort | tail -1)
-rclone copy "b2:catalyst-prod-backups/$LATEST" /tmp/drill/
+LATEST=$(rclone lsf b2:catalystparser-prod-backups/ | sort | tail -1)
+rclone copy "b2:catalystparser-prod-backups/$LATEST" /tmp/drill/
 echo "Drill file: /tmp/drill/$LATEST"
 ```
 
@@ -470,7 +470,7 @@ chmod 600 /etc/catalyst.env
 
 **Step 5 — Восстанови БД из B2**
 
-Настрой rclone remote `b2` (`rclone config` → Backblaze B2 → ключи), затем выполни процедуру **§6.5 (Steps 1-9)** с off-site источника: pull последнего `.db.gz` из `b2:catalyst-prod-backups/`, `gzip -t`, gunzip, `PRAGMA integrity_check`, stop container, подмена файла в volume, start, smoke.
+Настрой rclone remote `b2` (`rclone config` → Backblaze B2 → ключи), затем выполни процедуру **§6.5 (Steps 1-9)** с off-site источника: pull последнего `.db.gz` из `b2:catalystparser-prod-backups/`, `gzip -t`, gunzip, `PRAGMA integrity_check`, stop container, подмена файла в volume, start, smoke.
 
 **Step 6 — TLS сертификат**
 
